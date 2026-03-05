@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go"
@@ -11,6 +12,33 @@ import (
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/store"
 )
+
+// mockCounter counts words as tokens for testing.
+type mockCounter struct{}
+
+func (m *mockCounter) Count(_ context.Context, text string) (int, error) {
+	if text == "" {
+		return 0, nil
+	}
+	return len(strings.Fields(text)), nil
+}
+
+func (m *mockCounter) Tokenize(_ context.Context, text string) ([]int, error) {
+	words := strings.Fields(text)
+	tokens := make([]int, len(words))
+	for i := range tokens {
+		tokens[i] = i
+	}
+	return tokens, nil
+}
+
+func (m *mockCounter) Detokenize(_ context.Context, tokens []int) (string, error) {
+	parts := make([]string, len(tokens))
+	for i := range parts {
+		parts[i] = "word"
+	}
+	return strings.Join(parts, " "), nil
+}
 
 // mockLLM implements llm.LLM for testing.
 type mockLLM struct {
@@ -53,7 +81,7 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 
 	s := store.NewSQLiteStore(db, 4)
 	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{
-		ChunkSize:    100,
+		MaxChunkSize: 100,
 		ChunkOverlap: 0,
 	})
 
@@ -73,7 +101,7 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 		},
 	}
 
-	p := NewPipeline(s, mock, mock, chunker, config.RAGConfig{
+	p := NewPipeline(s, mock, mock, chunker, &mockCounter{}, config.RAGConfig{
 		TopK:                5,
 		SimilarityThreshold: 0.0, // accept all
 		MaxContextTokens:    1024,
@@ -157,14 +185,17 @@ func TestBuildContext(t *testing.T) {
 		},
 	}
 
-	ctx := p.BuildContext(result)
-	if ctx == "" {
+	ragCtx, err := p.BuildContext(context.Background(), result)
+	if err != nil {
+		t.Fatalf("BuildContext error: %v", err)
+	}
+	if ragCtx == "" {
 		t.Fatal("expected non-empty context")
 	}
-	if !contains(ctx, "Test Document") {
+	if !contains(ragCtx, "Test Document") {
 		t.Error("context should contain document title")
 	}
-	if !contains(ctx, "chunk text") {
+	if !contains(ragCtx, "chunk text") {
 		t.Error("context should contain chunk content")
 	}
 }

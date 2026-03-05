@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,9 @@ func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
 
 	// OpenAI-compatible API routes
 	r.Route("/v1", func(r chi.Router) {
+		// Health check (llama-server also exposes /v1/health)
+		r.Get("/health", handler.HealthCheck)
+
 		// Standard OpenAI endpoints (proxied to llama-server or handled locally)
 		r.Post("/chat/completions", handler.ChatCompletions)
 		r.Post("/embeddings", handler.Embeddings)
@@ -51,9 +55,16 @@ func zerologMiddleware(logger zerolog.Logger) func(next http.Handler) http.Handl
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
 
-			logger.Info().
+			// Use Debug level for noisy polling/static paths
+			lvl := zerolog.InfoLevel
+			p := r.URL.Path
+			if p == "/admin/crawler/status" || strings.HasPrefix(p, "/admin/static/") {
+				lvl = zerolog.DebugLevel
+			}
+
+			logger.WithLevel(lvl).
 				Str("method", r.Method).
-				Str("path", r.URL.Path).
+				Str("path", p).
 				Int("status", ww.Status()).
 				Int("bytes", ww.BytesWritten()).
 				Dur("duration", time.Since(start)).

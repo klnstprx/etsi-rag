@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -18,6 +19,33 @@ import (
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
 )
+
+// mockCounter counts words as tokens for testing.
+type mockCounter struct{}
+
+func (m *mockCounter) Count(_ context.Context, text string) (int, error) {
+	if text == "" {
+		return 0, nil
+	}
+	return len(strings.Fields(text)), nil
+}
+
+func (m *mockCounter) Tokenize(_ context.Context, text string) ([]int, error) {
+	words := strings.Fields(text)
+	tokens := make([]int, len(words))
+	for i := range tokens {
+		tokens[i] = i
+	}
+	return tokens, nil
+}
+
+func (m *mockCounter) Detokenize(_ context.Context, tokens []int) (string, error) {
+	parts := make([]string, len(tokens))
+	for i := range parts {
+		parts[i] = "word"
+	}
+	return strings.Join(parts, " "), nil
+}
 
 // mockLLM implements llm.LLM for handler tests.
 type mockLLM struct{}
@@ -60,8 +88,9 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 
 	s := store.NewSQLiteStore(db, 4)
 	mock := &mockLLM{}
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{ChunkSize: 100})
-	pipeline := rag.NewPipeline(s, mock, mock, chunker, config.RAGConfig{
+	counter := &mockCounter{}
+	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100})
+	pipeline := rag.NewPipeline(s, mock, mock, chunker, counter, config.RAGConfig{
 		TopK:                5,
 		SimilarityThreshold: 0.0,
 		MaxContextTokens:    1024,
@@ -74,6 +103,7 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	h := NewHandler(HandlerConfig{
 		EmbeddingClient: mock,
 		ChatClient:      mock,
+		Counter:         counter,
 		Pipeline:        pipeline,
 		Store:           s,
 		SessionStore:    sessionStore,

@@ -14,6 +14,7 @@ import (
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/store"
+	"etsi-rag/internal/tokencount"
 )
 
 // RetrievalResult represents chunks retrieved for a query.
@@ -50,6 +51,7 @@ type Pipeline struct {
 	embedder llm.LLM
 	chatter  llm.LLM
 	chunker  chunking.Chunker
+	counter  tokencount.Counter
 	config   config.RAGConfig
 }
 
@@ -67,6 +69,20 @@ func (p *Pipeline) SetChatter(c llm.LLM) {
 	p.mu.Unlock()
 }
 
+// SetChunker swaps the chunker (thread-safe).
+func (p *Pipeline) SetChunker(ch chunking.Chunker) {
+	p.mu.Lock()
+	p.chunker = ch
+	p.mu.Unlock()
+}
+
+// SetCounter swaps the token counter (thread-safe).
+func (p *Pipeline) SetCounter(c tokencount.Counter) {
+	p.mu.Lock()
+	p.counter = c
+	p.mu.Unlock()
+}
+
 func (p *Pipeline) getEmbedder() llm.LLM {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -79,13 +95,28 @@ func (p *Pipeline) getChatter() llm.LLM {
 	return p.chatter
 }
 
+func (p *Pipeline) getChunker() chunking.Chunker {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.chunker
+}
+
+func (p *Pipeline) getCounter() tokencount.Counter {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.counter
+}
+
 // NewPipeline creates a new RAG pipeline.
-func NewPipeline(s store.Store, embedder, chatter llm.LLM, ch chunking.Chunker, cfg config.RAGConfig) *Pipeline {
+// Counter may be nil at startup (misconfigured backend); operations requiring
+// token counting will return errors until a valid counter is set via SetCounter.
+func NewPipeline(s store.Store, embedder, chatter llm.LLM, ch chunking.Chunker, counter tokencount.Counter, cfg config.RAGConfig) *Pipeline {
 	return &Pipeline{
 		store:    s,
 		embedder: embedder,
 		chatter:  chatter,
 		chunker:  ch,
+		counter:  counter,
 		config:   cfg,
 	}
 }
@@ -156,9 +187,14 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, language *string,
 }
 
 // BuildContext constructs the context string from retrieval results.
-func (p *Pipeline) BuildContext(results *RetrievalResult) string {
+func (p *Pipeline) BuildContext(ctx context.Context, results *RetrievalResult) (string, error) {
 	if results == nil || len(results.Chunks) == 0 {
-		return ""
+		return "", nil
+	}
+
+	counter := p.getCounter()
+	if counter == nil {
+		return "", fmt.Errorf("token counter not configured")
 	}
 
 	// Map document IDs to titles
@@ -168,19 +204,29 @@ func (p *Pipeline) BuildContext(results *RetrievalResult) string {
 	}
 
 	var b strings.Builder
-	maxChars := p.config.MaxContextTokens * 4 // rough chars-to-tokens estimate
+	currentTokens := 0
 
 	for i, sc := range results.Chunks {
 		title := docTitles[sc.Chunk.DocID]
-		block := fmt.Sprintf("[%d] %s:\n%s\n\n", i+1, title, sc.Chunk.Content)
+		header := title
+		if sc.Chunk.SectionTitle != "" {
+			header = title + " > " + sc.Chunk.SectionTitle
+		}
+		block := fmt.Sprintf("[%d] %s:\n%s\n\n", i+1, header, sc.Chunk.Content)
 
-		if b.Len()+len(block) > maxChars {
+		blockTokens, err := counter.Count(ctx, block)
+		if err != nil {
+			return "", fmt.Errorf("counting context tokens: %w", err)
+		}
+
+		if currentTokens+blockTokens > p.config.MaxContextTokens {
 			break
 		}
 		b.WriteString(block)
+		currentTokens += blockTokens
 	}
 
-	return b.String()
+	return b.String(), nil
 }
 
 // BuildMessages constructs OpenAI messages with RAG context.
@@ -231,7 +277,10 @@ func (p *Pipeline) Chat(
 	}
 
 	// Build context and augment messages
-	ragContext := p.BuildContext(retrieval)
+	ragContext, err := p.BuildContext(ctx, retrieval)
+	if err != nil {
+		return nil, fmt.Errorf("building context: %w", err)
+	}
 	augmented := p.BuildMessages(messages, ragContext, language)
 
 	chatter := p.getChatter()
@@ -280,7 +329,10 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 			return totalDocs, totalChunks, fmt.Errorf("storing document %s: %w", doc.ID, err)
 		}
 
-		chunks := p.chunker.Chunk(doc.Content)
+		chunks, err := p.getChunker().Chunk(ctx, doc.Content)
+		if err != nil {
+			return totalDocs, totalChunks, fmt.Errorf("chunking document %s: %w", doc.ID, err)
+		}
 		if len(chunks) == 0 {
 			totalDocs++
 			continue
@@ -291,8 +343,9 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 		texts := make([]string, len(chunks))
 		for i, c := range chunks {
 			domainChunks[i] = domain.Chunk{
-				Content:    c.Content,
-				ChunkIndex: c.Index,
+				Content:      c.Content,
+				ChunkIndex:   c.Index,
+				SectionTitle: c.SectionTitle,
 			}
 			texts[i] = c.Content
 		}

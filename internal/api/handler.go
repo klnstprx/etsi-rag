@@ -2,17 +2,18 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"sync"
-
-	"github.com/go-chi/chi/v5"
-	"github.com/openai/openai-go"
-
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
+	"etsi-rag/internal/tokencount"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/openai/openai-go"
 )
 
 // Handler holds dependencies for HTTP handlers.
@@ -20,6 +21,7 @@ type Handler struct {
 	mu              sync.RWMutex
 	embeddingClient llm.LLM
 	chatClient      llm.LLM
+	counter         tokencount.Counter
 	pipeline        *rag.Pipeline
 	store           store.Store
 	sessionStore    *session.Store
@@ -39,6 +41,13 @@ func (h *Handler) SetChatClient(c llm.LLM) {
 	h.mu.Unlock()
 }
 
+// SetCounter swaps the token counter (thread-safe).
+func (h *Handler) SetCounter(c tokencount.Counter) {
+	h.mu.Lock()
+	h.counter = c
+	h.mu.Unlock()
+}
+
 func (h *Handler) getEmbeddingClient() llm.LLM {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -51,10 +60,17 @@ func (h *Handler) getChatClient() llm.LLM {
 	return h.chatClient
 }
 
+func (h *Handler) getCounter() tokencount.Counter {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.counter
+}
+
 // HandlerConfig holds configuration for creating a Handler.
 type HandlerConfig struct {
 	EmbeddingClient llm.LLM
 	ChatClient      llm.LLM
+	Counter         tokencount.Counter
 	Pipeline        *rag.Pipeline
 	Store           store.Store
 	SessionStore    *session.Store
@@ -65,6 +81,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	return &Handler{
 		embeddingClient: cfg.EmbeddingClient,
 		chatClient:      cfg.ChatClient,
+		counter:         cfg.Counter,
 		pipeline:        cfg.Pipeline,
 		store:           cfg.Store,
 		sessionStore:    cfg.SessionStore,
@@ -92,17 +109,16 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"id":     "chatcmpl-local",
-		"object": "chat.completion",
-		"model":  string(req.Model),
-		"choices": []map[string]any{
+	json.NewEncoder(w).Encode(openai.ChatCompletion{
+		ID:      "chatcmpl-local",
+		Model:   string(req.Model),
+		Created: time.Now().Unix(),
+		Choices: []openai.ChatCompletionChoice{
 			{
-				"index":         0,
-				"finish_reason": "stop",
-				"message": map[string]string{
-					"role":    "assistant",
-					"content": resp,
+				Index:        0,
+				FinishReason: "stop",
+				Message: openai.ChatCompletionMessage{
+					Content: resp,
 				},
 			},
 		},
@@ -111,51 +127,59 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // Embeddings handles POST /v1/embeddings.
 func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Input any                   `json:"input"`
-		Model openai.EmbeddingModel `json:"model"`
-	}
+	var req EmbeddingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ErrBadRequest("invalid request body").WriteJSON(w)
 		return
 	}
 
-	// Handle single string input
-	var text string
-	switch v := req.Input.(type) {
-	case string:
-		text = v
-	default:
-		ErrBadRequest("input must be a string").WriteJSON(w)
+	// Extract texts from the input union.
+	var texts []string
+	if req.Input.OfString.Valid() {
+		texts = []string{req.Input.OfString.Value}
+	} else if len(req.Input.OfArrayOfStrings) > 0 {
+		texts = req.Input.OfArrayOfStrings
+	} else {
+		ErrBadRequest("input must be a string or array of strings").WriteJSON(w)
 		return
 	}
 
-	emb, err := h.getEmbeddingClient().Embed(r.Context(), text)
+	embeddings, err := h.getEmbeddingClient().EmbedBatch(r.Context(), texts)
 	if err != nil {
 		ErrBadGateway(err).WriteJSON(w)
 		return
 	}
 
-	// Convert to float64 for JSON
-	emb64 := make([]float64, len(emb))
-	for i, v := range emb {
-		emb64[i] = float64(v)
+	// Build response using SDK types.
+	data := make([]openai.Embedding, len(embeddings))
+	var totalTokens int64
+	counter := h.getCounter()
+	for i, emb := range embeddings {
+		emb64 := make([]float64, len(emb))
+		for j, v := range emb {
+			emb64[j] = float64(v)
+		}
+		data[i] = openai.Embedding{
+			Index:     int64(i),
+			Embedding: emb64,
+		}
+		if counter != nil {
+			n, err := counter.Count(r.Context(), texts[i])
+			if err != nil {
+				ErrInternal(err).WriteJSON(w)
+				return
+			}
+			totalTokens += int64(n)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"object": "list",
-		"model":  string(req.Model),
-		"data": []map[string]any{
-			{
-				"object":    "embedding",
-				"index":     0,
-				"embedding": emb64,
-			},
-		},
-		"usage": map[string]int{
-			"prompt_tokens": len(text) / 4,
-			"total_tokens":  len(text) / 4,
+	json.NewEncoder(w).Encode(openai.CreateEmbeddingResponse{
+		Model: req.Model,
+		Data:  data,
+		Usage: openai.CreateEmbeddingResponseUsage{
+			PromptTokens: totalTokens,
+			TotalTokens:  totalTokens,
 		},
 	})
 }
@@ -192,14 +216,14 @@ func (h *Handler) RAGChat(w http.ResponseWriter, r *http.Request) {
 
 	resp := RAGChatResponse{
 		ChatCompletion: openai.ChatCompletion{
-			ID:    "ragchat-local",
-			Model: req.Model,
+			ID:      "ragchat-local",
+			Model:   req.Model,
+			Created: time.Now().Unix(),
 			Choices: []openai.ChatCompletionChoice{
 				{
 					Index:        0,
 					FinishReason: "stop",
 					Message: openai.ChatCompletionMessage{
-						Role:    "assistant",
 						Content: result.Response,
 					},
 				},
