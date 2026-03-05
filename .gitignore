@@ -1,12 +1,17 @@
 # Binary output
 bin/
 
+# User config (auto-generated from config.default.toml)
+config/config.toml
+
 # Test coverage
 coverage.out
 coverage.html
 
 # Database files
 data/
+*_templ.go
+internal/admin/static/styles.css
 
 # IDE
 .idea/
@@ -14,3 +19,5 @@ data/
 
 # OS
 .DS_Store
+
+*.svg
