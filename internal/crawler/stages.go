@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,7 @@ func (c *Crawler) crawlStageAll(
 
 	sem := make(chan struct{}, c.config.Concurrency)
 	var globalPages atomic.Int64
+	var globalVisited sync.Map
 	var wg sync.WaitGroup
 
 	for _, src := range sources {
@@ -40,7 +42,7 @@ func (c *Crawler) crawlStageAll(
 			}
 			defer func() { <-sem }()
 
-			if err := c.crawlSourceStage(ctx, src, parseCh, progress, &globalPages); err != nil {
+			if err := c.crawlSourceStage(ctx, src, parseCh, progress, &globalPages, &globalVisited); err != nil {
 				c.logger.Error().Err(err).Str("source", src.Name).Msg("source crawl failed")
 			}
 
@@ -64,6 +66,7 @@ func (c *Crawler) crawlSourceStage(
 	parseCh chan<- CrawlItem,
 	progress *RunProgress,
 	globalPages *atomic.Int64,
+	globalVisited *sync.Map,
 ) error {
 	c.logger.Info().Str("source", src.Name).Str("seed", src.SeedURL).Msg("starting source crawl")
 
@@ -72,9 +75,12 @@ func (c *Crawler) crawlSourceStage(
 		depth int
 	}
 
-	visited := make(map[string]bool)
 	queue := []queueItem{{url: src.SeedURL, depth: 0}}
-	visited[src.SeedURL] = true
+	globalVisited.Store(src.SeedURL, true)
+
+	// Per-source counters for completion summary
+	var srcDiscovered, srcFetched, srcFailed int
+	var maxDepthReached int
 
 	seedParsed, err := url.Parse(src.SeedURL)
 	if err != nil {
@@ -104,6 +110,7 @@ func (c *Crawler) crawlSourceStage(
 		}
 
 		item := queue[0]
+		queue[0] = queueItem{} // zero out to allow GC of url string
 		queue = queue[1:]
 
 		if item.depth > c.config.MaxDepth {
@@ -112,15 +119,21 @@ func (c *Crawler) crawlSourceStage(
 
 		globalPages.Add(1)
 		progress.Discovered.Add(1)
+		srcDiscovered++
+		if item.depth > maxDepthReached {
+			maxDepthReached = item.depth
+		}
 
 		result, err := c.fetcher.Fetch(ctx, item.url)
 		if err != nil {
 			c.logger.Warn().Err(err).Str("url", item.url).Msg("fetch failed")
 			progress.CrawlFail.Add(1)
+			srcFailed++
 			c.recordFailedPage(ctx, src.ID, item.url, err)
 			continue
 		}
 		progress.Fetched.Add(1)
+		srcFetched++
 
 		// Store raw bytes in object store
 		objKey := objectStoreKey(result.ContentType, item.url)
@@ -155,15 +168,16 @@ func (c *Crawler) crawlSourceStage(
 
 			// Enqueue discovered links
 			for _, link := range parsed.Links {
-				if visited[link] {
+				if _, alreadySeen := globalVisited.LoadOrStore(link, true); alreadySeen {
 					continue
 				}
 				if !shouldFollow(link, seedPath) {
 					continue
 				}
-				visited[link] = true
 				queue = append(queue, queueItem{url: link, depth: item.depth + 1})
 			}
+			// Links are only needed for BFS; nil out to free memory
+			parsed.Links = nil
 		}
 
 		// Send to parse stage (blocks if channel full = backpressure)
@@ -174,7 +188,13 @@ func (c *Crawler) crawlSourceStage(
 		}
 	}
 
-	c.logger.Info().Str("source", src.Name).Msg("source crawl stage completed")
+	c.logger.Info().
+		Str("source", src.Name).
+		Int("discovered", srcDiscovered).
+		Int("fetched", srcFetched).
+		Int("failed", srcFailed).
+		Int("depth_reached", maxDepthReached).
+		Msg("source finished")
 	return nil
 }
 
@@ -197,6 +217,9 @@ func (c *Crawler) parseStage(
 			// HTML: already parsed in crawl stage
 			title = item.HTMLParsed.Title
 			text = item.HTMLParsed.Text
+			if item.HTMLParsed.Description != "" {
+				text = item.HTMLParsed.Description + "\n\n" + text
+			}
 		} else {
 			// PDF: extract text
 			var err error
@@ -244,8 +267,10 @@ func (c *Crawler) embedStage(
 	progress *RunProgress,
 	runStartedAt time.Time,
 	cancelFn context.CancelFunc,
+	force bool,
 ) {
 	consecutiveFails := 0
+	var embedIngested, embedSkipped, embedFailed int
 
 	for item := range inCh {
 		if ctx.Err() != nil {
@@ -255,12 +280,13 @@ func (c *Crawler) embedStage(
 		now := time.Now()
 		existing, _ := c.store.GetCrawlPageByURL(ctx, item.URL)
 
-		if existing != nil && existing.ContentHash == item.ContentHash {
+		if !force && existing != nil && existing.ContentHash == item.ContentHash {
 			// Unchanged — update timestamp only
 			existing.LastCrawledAt = &now
 			existing.Status = domain.CrawlPageFetched
 			c.store.UpsertCrawlPage(ctx, existing)
 			progress.Skipped.Add(1)
+			embedSkipped++
 			continue
 		}
 
@@ -271,8 +297,11 @@ func (c *Crawler) embedStage(
 		urlStr := item.URL
 
 		// Delete old document if exists (re-ingest)
-		if existing != nil && existing.DocID != nil {
-			c.store.DeleteDocument(ctx, *existing.DocID)
+		if err := c.store.DeleteDocument(ctx, docID); err != nil {
+			// "not found" is expected for new documents
+			if !strings.Contains(err.Error(), "not found") {
+				c.logger.Warn().Err(err).Str("url", item.URL).Msg("delete old document failed")
+			}
 		}
 
 		doc := domain.Document{
@@ -287,6 +316,7 @@ func (c *Crawler) embedStage(
 		if _, _, err := c.pipeline.Ingest(ctx, []domain.Document{doc}); err != nil {
 			c.logger.Warn().Err(err).Str("url", item.URL).Msg("ingest failed")
 			progress.EmbedFail.Add(1)
+			embedFailed++
 			c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
 			consecutiveFails++
 			if consecutiveFails >= 3 {
@@ -299,6 +329,14 @@ func (c *Crawler) embedStage(
 		consecutiveFails = 0
 
 		progress.Ingested.Add(1)
+		embedIngested++
+		if embedIngested%25 == 0 {
+			c.logger.Info().
+				Int("ingested", embedIngested).
+				Int("skipped", embedSkipped).
+				Int("failed", embedFailed).
+				Msg("embed progress")
+		}
 
 		page := &domain.CrawlPage{
 			SourceID:       item.Source.ID,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -19,24 +20,65 @@ type FetchResult struct {
 	StatusCode  int
 }
 
-// Fetcher performs rate-limited HTTP fetching.
+// Fetcher performs rate-limited HTTP fetching with optional JS rendering.
 type Fetcher struct {
-	client *http.Client
-	delay  time.Duration
+	client      *http.Client
+	browser     *Browser
+	delay       time.Duration
+	maxBodySize int64
+	jsPatterns  []string
 }
 
 // NewFetcher creates a new rate-limited fetcher.
-func NewFetcher(timeout, delay time.Duration) *Fetcher {
+// maxBodySize of 0 means unlimited.
+func NewFetcher(timeout, delay time.Duration, maxBodySize int64) *Fetcher {
 	return &Fetcher{
-		client: &http.Client{Timeout: timeout},
-		delay:  delay,
+		client:      &http.Client{Timeout: timeout},
+		delay:       delay,
+		maxBodySize: maxBodySize,
 	}
 }
 
-// Fetch retrieves a URL's contents. The caller must manage rate-limiting
-// by calling this in a ticker-gated loop.
-func (f *Fetcher) Fetch(ctx context.Context, url string) (*FetchResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// SetBrowser attaches a headless browser for JS-rendered pages.
+func (f *Fetcher) SetBrowser(b *Browser) {
+	f.browser = b
+}
+
+// SetJSPatterns sets URL path prefixes that require JS rendering.
+func (f *Fetcher) SetJSPatterns(patterns []string) {
+	f.jsPatterns = patterns
+}
+
+// Fetch retrieves a URL's contents. Pages matching JS patterns use the
+// headless browser if available; otherwise falls back to static HTTP.
+func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, error) {
+	if f.needsJS(rawURL) && f.browser != nil {
+		return f.fetchDynamic(ctx, rawURL)
+	}
+	return f.fetchStatic(ctx, rawURL)
+}
+
+// needsJS returns true if the URL path matches any configured JS pattern.
+func (f *Fetcher) needsJS(rawURL string) bool {
+	if len(f.jsPatterns) == 0 {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	for _, pattern := range f.jsPatterns {
+		if strings.Contains(path, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchStatic performs a plain HTTP GET.
+func (f *Fetcher) fetchStatic(ctx context.Context, rawURL string) (*FetchResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -44,30 +86,58 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (*FetchResult, error) {
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching %s: %w", url, err)
+		return nil, fmt.Errorf("fetching %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetching %s: status %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("fetching %s: status %d", rawURL, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if f.maxBodySize > 0 {
+		reader = io.LimitReader(resp.Body, f.maxBodySize+1)
+	}
+
+	body, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, fmt.Errorf("reading response from %s: %w", url, err)
+		return nil, fmt.Errorf("reading response from %s: %w", rawURL, err)
+	}
+
+	if f.maxBodySize > 0 && int64(len(body)) > f.maxBodySize {
+		return nil, fmt.Errorf("response from %s exceeds %d bytes", rawURL, f.maxBodySize)
 	}
 
 	ct := "html"
 	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "pdf") || strings.HasSuffix(strings.ToLower(url), ".pdf") {
+	if strings.Contains(contentType, "pdf") || strings.HasSuffix(strings.ToLower(rawURL), ".pdf") {
 		ct = "pdf"
 	}
 
 	return &FetchResult{
-		URL:         url,
+		URL:         rawURL,
 		Body:        body,
 		ContentType: ct,
 		StatusCode:  resp.StatusCode,
+	}, nil
+}
+
+// fetchDynamic uses the headless browser to render JS and return the page HTML.
+func (f *Fetcher) fetchDynamic(ctx context.Context, rawURL string) (*FetchResult, error) {
+	body, err := f.browser.Fetch(ctx, rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic fetch %s: %w", rawURL, err)
+	}
+
+	if f.maxBodySize > 0 && int64(len(body)) > f.maxBodySize {
+		return nil, fmt.Errorf("response from %s exceeds %d bytes", rawURL, f.maxBodySize)
+	}
+
+	return &FetchResult{
+		URL:         rawURL,
+		Body:        body,
+		ContentType: "html",
+		StatusCode:  200,
 	}, nil
 }
 
