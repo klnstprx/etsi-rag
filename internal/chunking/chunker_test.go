@@ -1,6 +1,7 @@
 package chunking
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 )
 
 func TestRecursiveCharacterChunker(t *testing.T) {
+	ctx := context.Background()
 	tests := []struct {
 		name       string
 		content    string
@@ -67,11 +69,14 @@ func TestRecursiveCharacterChunker(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chunker := NewRecursiveCharacterChunker(config.ChunkingConfig{
-				ChunkSize:    tt.chunkSize,
+				MaxChunkSize: tt.chunkSize,
 				ChunkOverlap: tt.overlap,
 			})
 
-			chunks := chunker.Chunk(tt.content)
+			chunks, err := chunker.Chunk(ctx, tt.content)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
 			if tt.checkEmpty {
 				if chunks != nil {
@@ -103,13 +108,17 @@ func TestRecursiveCharacterChunker(t *testing.T) {
 }
 
 func TestRecursiveCharacterChunkerOverlap(t *testing.T) {
+	ctx := context.Background()
 	content := "AAAAA\n\nBBBBB\n\nCCCCC"
 	chunker := NewRecursiveCharacterChunker(config.ChunkingConfig{
-		ChunkSize:    10,
+		MaxChunkSize: 10,
 		ChunkOverlap: 3,
 	})
 
-	chunks := chunker.Chunk(content)
+	chunks, err := chunker.Chunk(ctx, content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(chunks) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
 	}
@@ -120,51 +129,157 @@ func TestRecursiveCharacterChunkerOverlap(t *testing.T) {
 	}
 }
 
-func TestTokenChunker(t *testing.T) {
-	content := "the quick brown fox jumped over the lazy dog and went home"
-	chunker := NewTokenChunker(4, 1, nil) // whitespace tokenizer, 4 tokens, 1 overlap
-
-	chunks := chunker.Chunk(content)
-	if len(chunks) == 0 {
-		t.Fatal("expected chunks")
-	}
-
-	// Each chunk should have at most 4 words
-	for i, c := range chunks {
-		words := strings.Fields(c.Content)
-		if len(words) > 4 {
-			t.Errorf("chunk %d has %d words, expected ≤ 4: %q", i, len(words), c.Content)
-		}
-	}
-}
-
-func TestSentenceChunker(t *testing.T) {
-	content := "First sentence. Second sentence. Third sentence. Fourth sentence."
-	chunker := NewSentenceChunker(40, 10)
-
-	chunks := chunker.Chunk(content)
-	if len(chunks) == 0 {
-		t.Fatal("expected chunks")
-	}
-
-	for i, c := range chunks {
-		if len(c.Content) > 50 { // some slack for boundary
-			t.Errorf("chunk %d too long: %d chars", i, len(c.Content))
-		}
-		t.Logf("chunk[%d]: %q", i, c.Content)
-	}
-}
-
 func TestChunkerEmpty(t *testing.T) {
+	ctx := context.Background()
+	counter := &mockCounter{}
 	chunkers := []Chunker{
-		NewRecursiveCharacterChunker(config.ChunkingConfig{ChunkSize: 100}),
-		NewTokenChunker(10, 2, nil),
-		NewSentenceChunker(100, 10),
+		NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100}),
+		NewRecursiveTokenChunker(config.ChunkingConfig{MaxChunkSize: 100}, counter, 512),
 	}
 
 	for _, c := range chunkers {
-		if chunks := c.Chunk(""); chunks != nil {
+		chunks, err := c.Chunk(ctx, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if chunks != nil {
 			t.Errorf("expected nil for empty content")
+		}
+	}
+}
+
+// mockCounter is a test counter that counts words as tokens.
+type mockCounter struct{}
+
+func (m *mockCounter) Count(_ context.Context, text string) (int, error) {
+	if text == "" {
+		return 0, nil
+	}
+	return len(strings.Fields(text)), nil
+}
+
+func (m *mockCounter) Tokenize(_ context.Context, text string) ([]int, error) {
+	words := strings.Fields(text)
+	tokens := make([]int, len(words))
+	for i := range tokens {
+		tokens[i] = i
+	}
+	return tokens, nil
+}
+
+func (m *mockCounter) Detokenize(_ context.Context, tokens []int) (string, error) {
+	parts := make([]string, len(tokens))
+	for i := range parts {
+		parts[i] = "word"
+	}
+	return strings.Join(parts, " "), nil
+}
+
+func TestRecursiveTokenChunker(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		content   string
+		chunkSize int
+		overlap   int
+		maxEmbed  int
+		wantMin   int // minimum expected chunks
+		wantMax   int // maximum expected chunks
+	}{
+		{
+			name:      "short content single chunk",
+			content:   "Hello world",
+			chunkSize: 10,
+			overlap:   0,
+			maxEmbed:  512,
+			wantMin:   1,
+			wantMax:   1,
+		},
+		{
+			name:      "splits into multiple chunks",
+			content:   "one two three four five six seven eight nine ten eleven twelve",
+			chunkSize: 4,
+			overlap:   0,
+			maxEmbed:  512,
+			wantMin:   3,
+			wantMax:   4,
+		},
+		{
+			name:      "embedding limit caps chunk size",
+			content:   "one two three four five six seven eight nine ten",
+			chunkSize: 100, // very large
+			overlap:   0,
+			maxEmbed:  3, // but embedding only allows 3 tokens
+			wantMin:   3,
+			wantMax:   5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counter := &mockCounter{}
+			chunker := NewRecursiveTokenChunker(config.ChunkingConfig{
+				MaxChunkSize: tt.chunkSize,
+				ChunkOverlap: tt.overlap,
+			}, counter, tt.maxEmbed)
+
+			chunks, err := chunker.Chunk(ctx, tt.content)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(chunks) < tt.wantMin || len(chunks) > tt.wantMax {
+				t.Errorf("expected %d-%d chunks, got %d", tt.wantMin, tt.wantMax, len(chunks))
+				for i, c := range chunks {
+					t.Logf("  chunk[%d]: %q", i, c.Content)
+				}
+			}
+
+			// Verify indices are sequential
+			for i, c := range chunks {
+				if c.Index != i {
+					t.Errorf("chunk %d has Index %d", i, c.Index)
+				}
+			}
+		})
+	}
+}
+
+func TestRecursiveTokenChunkerNilCounter(t *testing.T) {
+	ctx := context.Background()
+	chunker := NewRecursiveTokenChunker(config.ChunkingConfig{
+		MaxChunkSize: 10,
+		ChunkOverlap: 2,
+	}, nil, 512)
+
+	_, err := chunker.Chunk(ctx, "some content here")
+	if err == nil {
+		t.Error("expected error for nil counter")
+	}
+}
+
+func TestRecursiveTokenChunkerWithOverlap(t *testing.T) {
+	ctx := context.Background()
+	counter := &mockCounter{}
+	chunker := NewRecursiveTokenChunker(config.ChunkingConfig{
+		MaxChunkSize: 10,
+		ChunkOverlap: 2,
+	}, counter, 512)
+
+	content := strings.Repeat("Hello world. ", 20)
+	chunks, err := chunker.Chunk(ctx, content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(chunks) < 2 {
+		t.Errorf("expected multiple chunks, got %d", len(chunks))
+	}
+
+	for i, c := range chunks {
+		if c.Content == "" {
+			t.Errorf("chunk %d is empty", i)
 		}
 	}
 }
