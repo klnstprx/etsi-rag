@@ -57,8 +57,8 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 	defer tx.Rollback()
 
 	chunkStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO chunks (doc_id, content, chunk_index)
-		VALUES (?, ?, ?)
+		INSERT INTO chunks (doc_id, content, chunk_index, section_title)
+		VALUES (?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("preparing chunk statement: %w", err)
@@ -80,7 +80,7 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 				i, s.embeddingDimension, len(embeddings[i]))
 		}
 
-		result, err := chunkStmt.ExecContext(ctx, docID, chunk.Content, chunk.ChunkIndex)
+		result, err := chunkStmt.ExecContext(ctx, docID, chunk.Content, chunk.ChunkIndex, chunk.SectionTitle)
 		if err != nil {
 			return fmt.Errorf("inserting chunk %d: %w", i, err)
 		}
@@ -106,7 +106,7 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 // GetChunksByDocument retrieves all chunks for a document.
 func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]domain.Chunk, error) {
 	query := `
-		SELECT id, doc_id, content, chunk_index
+		SELECT id, doc_id, content, chunk_index, section_title
 		FROM chunks
 		WHERE doc_id = ?
 		ORDER BY chunk_index
@@ -120,7 +120,7 @@ func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]
 	var chunks []domain.Chunk
 	for rows.Next() {
 		var chunk domain.Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.DocID, &chunk.Content, &chunk.ChunkIndex); err != nil {
+		if err := rows.Scan(&chunk.ID, &chunk.DocID, &chunk.Content, &chunk.ChunkIndex, &chunk.SectionTitle); err != nil {
 			return nil, fmt.Errorf("scanning chunk: %w", err)
 		}
 		chunks = append(chunks, chunk)
@@ -203,7 +203,7 @@ func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, to
 	results := make([]SearchResult, 0, topK)
 	fetchQuery := `
 		SELECT
-			c.id, c.doc_id, c.content, c.chunk_index,
+			c.id, c.doc_id, c.content, c.chunk_index, c.section_title,
 			d.id, d.title, d.content, d.url, d.language, d.category
 		FROM chunks c
 		JOIN documents d ON d.id = c.doc_id
@@ -212,7 +212,7 @@ func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, to
 	for _, sc := range topScores {
 		var r SearchResult
 		scanErr := s.db.QueryRowContext(ctx, fetchQuery, sc.chunkID).Scan(
-			&r.Chunk.ID, &r.Chunk.DocID, &r.Chunk.Content, &r.Chunk.ChunkIndex,
+			&r.Chunk.ID, &r.Chunk.DocID, &r.Chunk.Content, &r.Chunk.ChunkIndex, &r.Chunk.SectionTitle,
 			&r.Document.ID, &r.Document.Title, &r.Document.Content, &r.Document.URL, &r.Document.Language, &r.Document.Category,
 		)
 		if scanErr != nil {

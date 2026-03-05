@@ -10,7 +10,7 @@ import (
 // OpenDB opens a SQLite database using the pure Go modernc.org/sqlite driver.
 // Pragmas are set via DSN parameters so they apply to every pooled connection.
 func OpenDB(path string) (*sql.DB, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=cache_size(-4000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
@@ -37,6 +37,7 @@ func Migrate(db *sql.DB, embeddingDimension int) error {
 			doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
 			content TEXT NOT NULL,
 			chunk_index INTEGER NOT NULL,
+			section_title TEXT NOT NULL DEFAULT '',
 			UNIQUE(doc_id, chunk_index)
 		);
 

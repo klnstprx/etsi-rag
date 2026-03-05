@@ -88,6 +88,89 @@ func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) 
 	return docs, nil
 }
 
+// DocumentSummary holds document metadata without full content.
+type DocumentSummary struct {
+	ID         string
+	Title      string
+	URL        *string
+	Language   domain.Language
+	Category   domain.Category
+	ChunkCount int
+	ContentLen int
+}
+
+// CountDocuments returns the total number of documents.
+func (s *SQLiteStore) CountDocuments(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting documents: %w", err)
+	}
+	return count, nil
+}
+
+// CountChunks returns the total number of chunks.
+func (s *SQLiteStore) CountChunks(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting chunks: %w", err)
+	}
+	return count, nil
+}
+
+// ListDocumentsSummary returns paginated document summaries (no content).
+func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset int, search string) ([]DocumentSummary, int, error) {
+	// Count total (with optional search filter)
+	var total int
+	var countArgs []interface{}
+	countQuery := `SELECT COUNT(*) FROM documents`
+	if search != "" {
+		countQuery += ` WHERE title LIKE ? OR url LIKE ?`
+		like := "%" + search + "%"
+		countArgs = append(countArgs, like, like)
+	}
+	if err := s.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting documents: %w", err)
+	}
+
+	// Fetch page
+	query := `
+		SELECT d.id, d.title, d.url, d.language, d.category,
+			LENGTH(d.content) as content_len,
+			(SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) as chunk_count
+		FROM documents d
+	`
+	var args []interface{}
+	if search != "" {
+		query += ` WHERE d.title LIKE ? OR d.url LIKE ?`
+		like := "%" + search + "%"
+		args = append(args, like, like)
+	}
+	query += ` ORDER BY d.created_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing document summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var docs []DocumentSummary
+	for rows.Next() {
+		var d DocumentSummary
+		if err := rows.Scan(&d.ID, &d.Title, &d.URL, &d.Language, &d.Category, &d.ContentLen, &d.ChunkCount); err != nil {
+			return nil, 0, fmt.Errorf("scanning document summary: %w", err)
+		}
+		docs = append(docs, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating document summaries: %w", err)
+	}
+
+	return docs, total, nil
+}
+
 // DeleteDocument deletes a document and its chunks + embeddings (via CASCADE).
 func (s *SQLiteStore) DeleteDocument(ctx context.Context, id string) error {
 	// Delete document (chunks and embeddings are deleted via CASCADE)

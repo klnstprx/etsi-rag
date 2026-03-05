@@ -313,6 +313,24 @@ func TestDeleteDocumentCascadesChunks(t *testing.T) {
 	}
 }
 
+func TestOpenDB_CacheSizePragma(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	var cacheSize int
+	if err := db.QueryRow("PRAGMA cache_size").Scan(&cacheSize); err != nil {
+		t.Fatalf("querying cache_size: %v", err)
+	}
+
+	// cache_size = -4000 means 4000 KiB (negative = KiB)
+	if cacheSize != -4000 {
+		t.Errorf("cache_size = %d, want -4000", cacheSize)
+	}
+}
+
 func TestCosineSimilarity(t *testing.T) {
 	tests := []struct {
 		name string

@@ -96,8 +96,9 @@ type Document struct {
 
 // Chunk represents a document chunk for vector search.
 type Chunk struct {
-	ID         int64
-	DocID      string
-	Content    string
-	ChunkIndex int
+	ID           int64
+	DocID        string
+	Content      string
+	ChunkIndex   int
+	SectionTitle string
 }

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"etsi-rag/internal/prompts"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -13,12 +15,25 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
+const (
+	// ConfigFileName is the user-editable config file (gitignored).
+	ConfigFileName = "config.toml"
+	// DefaultConfigFileName is the tracked template with default values.
+	DefaultConfigFileName = "config.default.toml"
+
+	envPrefix    = "APP__"
+	envSeparator = "__"
+	envRunMode   = "RUN_MODE"
+	defaultMode  = "development"
+)
+
 // BackendConfig represents an LLM server endpoint.
 type BackendConfig struct {
-	Name    string `koanf:"name"`
-	BaseURL string `koanf:"base_url"`
-	APIKey  string `koanf:"api_key"`
-	Enabled bool   `koanf:"enabled"`
+	Name       string `koanf:"name"`
+	BaseURL    string `koanf:"base_url"`
+	APIKey     string `koanf:"api_key"`
+	Enabled    bool   `koanf:"enabled"`
+	IsLlamaCpp bool   `koanf:"is_llama_cpp"`
 }
 
 // Config holds all application configuration.
@@ -28,7 +43,7 @@ type Config struct {
 	Embedding   EmbeddingConfig   `koanf:"embedding"`
 	Chat        ChatConfig        `koanf:"chat"`
 	Agent       AgentConfig       `koanf:"agent"`
-	VectorStore VectorStoreConfig `koanf:"vector_store"`
+	Database    DatabaseConfig    `koanf:"database"`
 	RAG         RAGConfig         `koanf:"rag"`
 	Chunking    ChunkingConfig    `koanf:"chunking"`
 	Session     SessionConfig     `koanf:"session"`
@@ -70,6 +85,7 @@ type EmbeddingConfig struct {
 	Backend   string `koanf:"backend"`
 	Model     string `koanf:"model"`
 	Dimension int    `koanf:"dimension"`
+	MaxTokens int    `koanf:"max_tokens"`
 }
 
 // ChatConfig holds chat stage settings.
@@ -88,8 +104,8 @@ type AgentConfig struct {
 	Temperature float64 `koanf:"temperature"`
 }
 
-// VectorStoreConfig holds vector database settings.
-type VectorStoreConfig struct {
+// DatabaseConfig holds SQLite database settings.
+type DatabaseConfig struct {
 	Path string `koanf:"path"`
 }
 
@@ -104,8 +120,9 @@ type RAGConfig struct {
 
 // ChunkingConfig holds document chunking settings.
 type ChunkingConfig struct {
-	ChunkSize    int      `koanf:"chunk_size"`
+	MaxChunkSize int      `koanf:"max_chunk_size"`
 	ChunkOverlap int      `koanf:"chunk_overlap"`
+	MinChunkSize int      `koanf:"min_chunk_size"`
 	Separators   []string `koanf:"separators"`
 }
 
@@ -122,6 +139,9 @@ type CrawlerConfig struct {
 	MaxDepth       int           `koanf:"max_depth"`
 	MaxPages       int           `koanf:"max_pages"`
 	Concurrency    int           `koanf:"concurrency"`
+	MaxBodySize    int64         `koanf:"max_body_size"`    // max response body in bytes, 0 = unlimited
+	EmbedWorkers   int           `koanf:"embed_workers"`    // concurrent embed stage workers
+	JSPatterns     []string      `koanf:"js_patterns"`      // URL path prefixes requiring JS rendering
 }
 
 // ObjectStoreConfig holds S3-compatible object storage settings (RustFS).
@@ -133,37 +153,79 @@ type ObjectStoreConfig struct {
 	Region    string `koanf:"region"`
 }
 
+// ConfigPath returns the full path to the user config file within a config directory.
+func ConfigPath(configDir string) string {
+	return configDir + "/" + ConfigFileName
+}
+
+// DefaultConfigPath returns the full path to the default config template within a config directory.
+func DefaultConfigPath(configDir string) string {
+	return configDir + "/" + DefaultConfigFileName
+}
+
+// ensureConfigFile copies the default config to the user config path if it does not exist.
+func ensureConfigFile(configDir string) error {
+	cfgPath := ConfigPath(configDir)
+	if _, err := os.Stat(cfgPath); err == nil {
+		return nil // already exists
+	}
+
+	defaultPath := DefaultConfigPath(configDir)
+	src, err := os.Open(defaultPath)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", DefaultConfigFileName, err)
+	}
+	defer src.Close()
+
+	dst, err := os.Create(cfgPath)
+	if err != nil {
+		return fmt.Errorf("creating %s: %w", ConfigFileName, err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("copying default config: %w", err)
+	}
+	return nil
+}
+
 // Load reads configuration from files and environment variables.
+// It ensures config.toml exists (copying from config.default.toml if needed),
+// then loads config.toml → {RUN_MODE}.toml → APP__* env vars.
 func Load(configDir string) (*Config, error) {
+	if err := ensureConfigFile(configDir); err != nil {
+		return nil, fmt.Errorf("ensuring config file: %w", err)
+	}
+
 	k := koanf.New(".")
 
-	// Load default config
-	defaultPath := configDir + "/default.toml"
-	if err := k.Load(file.Provider(defaultPath), toml.Parser()); err != nil {
-		return nil, err
+	// Load user config
+	cfgPath := ConfigPath(configDir)
+	if err := k.Load(file.Provider(cfgPath), toml.Parser()); err != nil {
+		return nil, fmt.Errorf("loading %s: %w", ConfigFileName, err)
 	}
 
 	// Load environment-specific config if RUN_MODE is set
-	runMode := os.Getenv("RUN_MODE")
+	runMode := os.Getenv(envRunMode)
 	if runMode == "" {
-		runMode = "development"
+		runMode = defaultMode
 	}
 	modePath := configDir + "/" + runMode + ".toml"
 	if _, err := os.Stat(modePath); err == nil {
 		if err := k.Load(file.Provider(modePath), toml.Parser()); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("loading %s: %w", modePath, err)
 		}
 	}
 
 	// Load environment variables with APP__ prefix
-	if err := k.Load(env.Provider("APP__", ".", func(s string) string {
+	if err := k.Load(env.Provider(envPrefix, ".", func(s string) string {
 		return strings.ReplaceAll(
-			strings.ToLower(strings.TrimPrefix(s, "APP__")),
-			"__",
+			strings.ToLower(strings.TrimPrefix(s, envPrefix)),
+			envSeparator,
 			".",
 		)
 	}), nil); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading env vars: %w", err)
 	}
 
 	var cfg Config
@@ -213,11 +275,18 @@ func (c *Config) applyDefaults() {
 		c.Session.TTLSeconds = 3600
 	}
 
-	if c.Chunking.ChunkSize == 0 {
-		c.Chunking.ChunkSize = 500
+	if c.Embedding.MaxTokens == 0 {
+		c.Embedding.MaxTokens = 512
+	}
+
+	if c.Chunking.MaxChunkSize == 0 {
+		c.Chunking.MaxChunkSize = 256
 	}
 	if c.Chunking.ChunkOverlap == 0 {
-		c.Chunking.ChunkOverlap = 50
+		c.Chunking.ChunkOverlap = 32
+	}
+	if c.Chunking.MinChunkSize == 0 {
+		c.Chunking.MinChunkSize = 64
 	}
 	if len(c.Chunking.Separators) == 0 {
 		c.Chunking.Separators = []string{"\n\n", "\n", ". ", " ", ""}
@@ -233,10 +302,16 @@ func (c *Config) applyDefaults() {
 		c.Crawler.MaxDepth = 10
 	}
 	if c.Crawler.MaxPages == 0 {
-		c.Crawler.MaxPages = 2000
+		c.Crawler.MaxPages = 5000
 	}
 	if c.Crawler.Concurrency == 0 {
 		c.Crawler.Concurrency = 4
+	}
+	if c.Crawler.MaxBodySize == 0 {
+		c.Crawler.MaxBodySize = 10 * 1024 * 1024 // 10 MB
+	}
+	if c.Crawler.EmbedWorkers == 0 {
+		c.Crawler.EmbedWorkers = 1
 	}
 
 	if c.ObjectStore.Region == "" {
@@ -244,10 +319,10 @@ func (c *Config) applyDefaults() {
 	}
 
 	if c.RAG.SystemPromptES == "" {
-		c.RAG.SystemPromptES = defaultSystemPromptES
+		c.RAG.SystemPromptES = prompts.RAGEs
 	}
 	if c.RAG.SystemPromptEN == "" {
-		c.RAG.SystemPromptEN = defaultSystemPromptEN
+		c.RAG.SystemPromptEN = prompts.RAGEn
 	}
 }
 
@@ -274,15 +349,3 @@ func WriteTo(cfg *Config, path string) error {
 	}
 	return nil
 }
-
-const defaultSystemPromptES = `Eres un asistente virtual de la Escuela Técnica Superior de Ingeniería Informática de la Universidad de Málaga.
-Tu objetivo es ayudar a estudiantes y visitantes con información sobre los grados, cursos, procedimientos y servicios de la escuela.
-Responde siempre en español, de manera clara y concisa.
-Si no tienes información suficiente para responder, indícalo amablemente.
-Basa tus respuestas en el contexto proporcionado cuando esté disponible.`
-
-const defaultSystemPromptEN = `You are a virtual assistant for the School of Computer Science Engineering at the University of Malaga.
-Your goal is to help students and visitors with information about degrees, courses, procedures, and services at the school.
-Always respond in English, in a clear and concise manner.
-If you don't have enough information to answer, politely indicate so.
-Base your responses on the provided context when available.`

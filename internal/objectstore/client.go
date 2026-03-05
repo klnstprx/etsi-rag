@@ -96,6 +96,14 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// Healthy checks if the object store is reachable by listing the bucket.
+func (c *Client) Healthy(ctx context.Context) bool {
+	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.bucket),
+	})
+	return err == nil
+}
+
 // Exists checks if a key exists.
 func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
