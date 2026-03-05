@@ -36,65 +36,80 @@ templ CrawlerPage(data CrawlerData) {
 }
 
 templ CrawlerContent(data CrawlerData) {
-	@PageHeader("Crawler")
-	<!-- Stats Row -->
-	<div class="grid grid-cols-1 gap-6 sm:grid-cols-3 mb-6">
-		@StatCardInt("Indexed Documents", data.DocCount)
-		@StatCardInt("Crawl Sources", len(data.Sources))
-		<div class="bg-white rounded-lg shadow p-6">
-			<dt class="text-sm font-medium text-gray-500 mb-3">Controls</dt>
-			<div class="flex gap-3">
-				if data.Running {
-					<button
-						hx-delete="/admin/crawler/run"
-						hx-target="#main"
-						hx-swap="innerHTML"
-						class="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700"
-					>
-						Stop Crawl
-					</button>
-				} else {
-					<button
-						hx-post="/admin/crawler/run"
-						hx-target="#main"
-						hx-swap="innerHTML"
-						class="px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700"
-					>
-						Start Crawl
-					</button>
-				}
-				<button
-					hx-post="/admin/crawler/purge"
-					hx-target="#main"
-					hx-swap="innerHTML"
-					hx-confirm="Purge all stale documents?"
-					class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-				>
-					Purge Stale
-				</button>
-			</div>
+	<!-- Header with action buttons -->
+	<div class="flex items-center justify-between mb-8">
+		<h2 class="text-2xl font-bold text-gray-900">Crawler</h2>
+		<div class="flex gap-3">
+			if data.Running {
+				@BtnDanger("Stop Crawl", templ.Attributes{
+					"hx-delete": "/admin/crawler/run",
+					"hx-target": "#main",
+					"hx-swap":   "innerHTML",
+				})
+			} else {
+				@BtnSuccess("Start Crawl", templ.Attributes{
+					"hx-post":   "/admin/crawler/run",
+					"hx-target": "#main",
+					"hx-swap":   "innerHTML",
+				})
+			}
+			@BtnWarning("Reprocess", templ.Attributes{
+				"hx-post":    "/admin/crawler/reprocess",
+				"hx-target":  "#main",
+				"hx-swap":    "innerHTML",
+				"hx-confirm": "Re-parse and re-embed all fetched pages?",
+				"disabled":   data.Running,
+			})
+			@BtnSecondary("Purge Stale", templ.Attributes{
+				"hx-post":    "/admin/crawler/purge",
+				"hx-target":  "#main",
+				"hx-swap":    "innerHTML",
+				"hx-confirm": "Purge all stale documents?",
+			})
 		</div>
 	</div>
-	<!-- Live Status (polling trigger is inside the fragment, active only when running) -->
-	<div id="crawler-status">
+	<!-- Stats -->
+	<div class="grid grid-cols-1 gap-6 sm:grid-cols-2 mb-6">
+		@StatCardInt("Indexed Documents", data.DocCount)
+		@StatCardInt("Crawl Sources", len(data.Sources))
+	</div>
+	<!-- Live Status -->
+	<div id="crawler-status" class="mb-6" aria-live="polite">
 		@CrawlerStatusFragment(data.Running, data.Progress)
 	</div>
 	<!-- Sources Section -->
-	<div class="mt-6">
+	<div class="mb-6">
 		<div class="flex items-center justify-between mb-4">
 			<h3 class="text-lg font-medium text-gray-900">Crawl Sources</h3>
-			<button
-				class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-				onclick="document.getElementById('source-form').classList.toggle('hidden')"
-			>
-				Add Source
-			</button>
 		</div>
-		@SourceForm()
+		@Collapsible("Add Source") {
+			@Card() {
+				<div class="p-6">
+					<h3 class="text-lg font-medium text-gray-900 mb-4">New Source</h3>
+					<form
+						hx-post="/admin/crawler/sources"
+						hx-target="#main"
+						hx-swap="innerHTML"
+						class="grid grid-cols-1 gap-4 sm:grid-cols-2"
+					>
+						@FormField("name", "Name", "text", "", "My Source", true)
+						@FormField("seed_url", "Seed URL", "url", "", "https://example.com/path", true)
+						@FormField("category", "Category", "text", "", "general", false)
+						@FormField("language", "Language", "text", "es", "", false)
+						<div class="sm:col-span-2">
+							@FormCheckbox("enabled", "Enabled", true)
+						</div>
+						<div class="sm:col-span-2 flex justify-end">
+							@BtnPrimary("Create Source", templ.Attributes{"type": "submit"})
+						</div>
+					</form>
+				</div>
+			}
+		}
 		@SourceTable(data.Sources)
 	</div>
 	<!-- Run History -->
-	<div class="mt-6">
+	<div>
 		<h3 class="text-lg font-medium text-gray-900 mb-4">Run History</h3>
 		@RunTable(data.Runs)
 	</div>
@@ -141,7 +156,6 @@ templ CrawlerStatusFragment(running bool, progress *ProgressSnapshot) {
 			</div>
 		</div>
 	} else {
-		<!-- No hx-get/hx-trigger: polling stops when idle -->
 		<div class="bg-white rounded-lg shadow p-6">
 			<div class="flex items-center gap-2">
 				<span class="inline-flex rounded-full h-3 w-3 bg-gray-400"></span>
@@ -151,80 +165,17 @@ templ CrawlerStatusFragment(running bool, progress *ProgressSnapshot) {
 	}
 }
 
-templ SourceForm() {
-	<div id="source-form" class="hidden bg-white rounded-lg shadow p-6 mb-6">
-		<h3 class="text-lg font-medium text-gray-900 mb-4">New Source</h3>
-		<form
-			hx-post="/admin/crawler/sources"
-			hx-target="#main"
-			hx-swap="innerHTML"
-			class="grid grid-cols-1 gap-4 sm:grid-cols-2"
-		>
-			<div>
-				<label class="block text-sm font-medium text-gray-700">Name</label>
-				<input
-					type="text"
-					name="name"
-					required
-					class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-					placeholder="My Source"
-				/>
-			</div>
-			<div>
-				<label class="block text-sm font-medium text-gray-700">Seed URL</label>
-				<input
-					type="url"
-					name="seed_url"
-					required
-					class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-					placeholder="https://example.com/path"
-				/>
-			</div>
-			<div>
-				<label class="block text-sm font-medium text-gray-700">Category</label>
-				<input
-					type="text"
-					name="category"
-					class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-					placeholder="general"
-				/>
-			</div>
-			<div>
-				<label class="block text-sm font-medium text-gray-700">Language</label>
-				<input
-					type="text"
-					name="language"
-					value="es"
-					class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-				/>
-			</div>
-			<div class="flex items-center gap-2 sm:col-span-2">
-				<input type="checkbox" name="enabled" checked class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"/>
-				<label class="text-sm font-medium text-gray-700">Enabled</label>
-			</div>
-			<div class="sm:col-span-2">
-				<button
-					type="submit"
-					class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-				>
-					Create Source
-				</button>
-			</div>
-		</form>
-	</div>
-}
-
 templ SourceTable(sources []domain.CrawlSource) {
-	<div class="bg-white rounded-lg shadow overflow-hidden">
+	@TableWrap() {
 		<table class="min-w-full divide-y divide-gray-200">
 			<thead class="bg-gray-50">
 				<tr>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Seed URL</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Language</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+					@Th("Name")
+					@Th("Seed URL")
+					@Th("Category")
+					@Th("Language")
+					@Th("Status")
+					@Th("Actions")
 				</tr>
 			</thead>
 			<tbody class="bg-white divide-y divide-gray-200">
@@ -237,41 +188,36 @@ templ SourceTable(sources []domain.CrawlSource) {
 						<td class="px-6 py-4 whitespace-nowrap">
 							@EnabledBadge(src.Enabled)
 						</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm">
-							<button
-								hx-delete={ fmt.Sprintf("/admin/crawler/sources/%d", src.ID) }
-								hx-target="#main"
-								hx-swap="innerHTML"
-								hx-confirm="Delete this source?"
-								class="text-red-600 hover:text-red-900"
-							>
-								Delete
-							</button>
+						<td class="px-6 py-4 whitespace-nowrap">
+							@BtnLink("Delete", "red", templ.Attributes{
+								"hx-delete":  fmt.Sprintf("/admin/crawler/sources/%d", src.ID),
+								"hx-target":  "#main",
+								"hx-swap":    "innerHTML",
+								"hx-confirm": "Delete this source?",
+							})
 						</td>
 					</tr>
 				}
 				if len(sources) == 0 {
-					<tr>
-						<td colspan="6" class="px-6 py-4 text-center text-sm text-gray-500">No sources configured</td>
-					</tr>
+					@EmptyRow(6, "No sources configured")
 				}
 			</tbody>
 		</table>
-	</div>
+	}
 }
 
 templ RunTable(runs []domain.CrawlRun) {
-	<div class="bg-white rounded-lg shadow overflow-hidden">
+	@TableWrap() {
 		<table class="min-w-full divide-y divide-gray-200">
 			<thead class="bg-gray-50">
 				<tr>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Finished</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Discovered</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Fetched</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Changed</th>
-					<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Failed</th>
+					@Th("Started")
+					@Th("Finished")
+					@Th("Status")
+					@Th("Discovered")
+					@Th("Fetched")
+					@Th("Changed")
+					@Th("Failed")
 				</tr>
 			</thead>
 			<tbody class="bg-white divide-y divide-gray-200">
@@ -305,11 +251,9 @@ templ RunTable(runs []domain.CrawlRun) {
 					</tr>
 				}
 				if len(runs) == 0 {
-					<tr>
-						<td colspan="7" class="px-6 py-4 text-center text-sm text-gray-500">No runs yet</td>
-					</tr>
+					@EmptyRow(7, "No runs yet")
 				}
 			</tbody>
 		</table>
-	</div>
+	}
 }

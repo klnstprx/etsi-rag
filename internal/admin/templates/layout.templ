@@ -10,29 +10,31 @@ templ Layout(title string, activePage string) {
 			<link rel="stylesheet" href="/admin/static/styles.css"/>
 			<script src="/admin/static/htmx.min.js"></script>
 			<script src="/admin/static/htmx-sse.js"></script>
+			<script src="/admin/static/htmx-remove-me.js"></script>
 		</head>
-		<body class="h-full" hx-boost="true">
+		<body class="h-full" hx-ext="remove-me">
 			<div class="flex h-full">
 				@Sidebar(activePage)
 				<main id="main" class="flex-1 overflow-y-auto p-8">
 					{ children... }
 				</main>
 			</div>
-			<div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2"></div>
+			<div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2" aria-live="polite"></div>
 		</body>
 	</html>
 }
 
 templ Sidebar(activePage string) {
-	<aside class="w-64 bg-gray-900 text-gray-300 flex flex-col">
+	<aside class="w-64 bg-gray-900 text-gray-300 flex flex-col shrink-0">
 		<div class="p-4 border-b border-gray-700">
 			<h1 class="text-lg font-bold text-white">ETSI RAG</h1>
 			<p class="text-xs text-gray-500">Admin Panel</p>
 		</div>
-		<nav class="flex-1 p-4 space-y-1">
+		<nav class="flex-1 p-4 space-y-1" aria-label="Main navigation">
 			@NavLink("/admin/", "Dashboard", activePage == "dashboard")
 			@NavLink("/admin/backends", "Backends", activePage == "backends")
 			@NavLink("/admin/config", "Config", activePage == "config")
+			@NavLink("/admin/documents", "Documents", activePage == "documents")
 			@NavLink("/admin/crawler", "Crawler", activePage == "crawler")
 			@NavLink("/admin/chat", "Chat", activePage == "chat")
 		</nav>

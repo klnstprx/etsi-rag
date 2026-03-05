@@ -16,8 +16,8 @@ templ ChatContent(sessionID string) {
 			<form
 				hx-post="/admin/chat/send"
 				hx-target="#chat-messages"
-				hx-swap="beforeend"
-				hx-on::after-request="this.reset(); document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight"
+				hx-swap="beforeend scroll:bottom"
+				hx-on:htmx:after-request="this.reset()"
 				class="flex gap-3"
 			>
 				<input type="hidden" name="session_id" value={ sessionID }/>
@@ -27,20 +27,15 @@ templ ChatContent(sessionID string) {
 					required
 					autocomplete="off"
 					placeholder="Type a message..."
-					class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2 border"
+					class="flex-1 rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
 				/>
-				<button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">
-					Send
-				</button>
-				<button
-					type="button"
-					hx-post="/admin/chat/reset"
-					hx-target="#main"
-					hx-swap="innerHTML"
-					class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-				>
-					Reset
-				</button>
+				@BtnPrimary("Send", templ.Attributes{"type": "submit"})
+				@BtnSecondary("Reset", templ.Attributes{
+					"type":    "button",
+					"hx-post": "/admin/chat/reset",
+					"hx-target": "#main",
+					"hx-swap": "innerHTML",
+				})
 			</form>
 		</div>
 	</div>
@@ -48,7 +43,7 @@ templ ChatContent(sessionID string) {
 
 templ UserMessage(text string) {
 	<div class="flex justify-end">
-		<div class="max-w-md rounded-lg px-4 py-2 bg-blue-600 text-white text-sm">
+		<div class="max-w-2xl rounded-lg px-4 py-2 bg-blue-600 text-white text-sm">
 			{ text }
 		</div>
 	</div>
@@ -57,11 +52,11 @@ templ UserMessage(text string) {
 templ AssistantMessageSSE(sessionID string) {
 	<div class="flex justify-start">
 		<div
-			class="max-w-md rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm"
+			class="max-w-2xl rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm"
 			hx-ext="sse"
 			sse-connect={ "/admin/chat/stream/" + sessionID }
 			sse-swap="token"
-			hx-swap="beforeend"
+			hx-swap="beforeend scroll:#chat-messages:bottom"
 			sse-close="done"
 		>
 		</div>
@@ -70,7 +65,7 @@ templ AssistantMessageSSE(sessionID string) {
 
 templ AssistantMessage(text string) {
 	<div class="flex justify-start">
-		<div class="max-w-md rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap">
+		<div class="max-w-2xl rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap">
 			{ text }
 		</div>
 	</div>

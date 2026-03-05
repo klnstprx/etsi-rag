@@ -1,2 +1,9 @@
 @import "tailwindcss";
 @source "../templates/**/*.templ";
+
+/* Remove default <details> disclosure marker */
+summary { list-style: none; }
+summary::-webkit-details-marker { display: none; }
+
+/* Visual feedback during HTMX requests */
+.htmx-request { opacity: 0.7; cursor: wait; }

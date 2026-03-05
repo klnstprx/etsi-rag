@@ -7,6 +7,13 @@ type DashboardData struct {
 	ChunkCount   int
 	BackendCount int
 	Backends     []config.BackendConfig
+	HasObjStore  bool
+}
+
+type ServiceStatus struct {
+	Name    string
+	URL     string
+	Healthy bool
 }
 
 templ DashboardPage(data DashboardData) {
@@ -22,29 +29,65 @@ templ DashboardContent(data DashboardData) {
 		@StatCardInt("Chunks", data.ChunkCount)
 		@StatCardInt("Backends", data.BackendCount)
 	</dl>
-	<div class="bg-white rounded-lg shadow">
-		<div class="px-6 py-4 border-b border-gray-200">
-			<h3 class="text-lg font-medium text-gray-900">Backends</h3>
-		</div>
-		if len(data.Backends) == 0 {
-			<div class="p-6 text-sm text-gray-500">
-				No backends configured.
-				<a href="/admin/backends" class="text-blue-600 hover:underline">Add one</a>.
-			</div>
-		} else {
-			<div class="divide-y divide-gray-200">
-				for _, b := range data.Backends {
-					<div class="px-6 py-4 flex items-center justify-between">
-						<div>
-							<p class="text-sm font-medium text-gray-900">{ b.Name }</p>
-							<p class="text-xs text-gray-500">{ b.BaseURL }</p>
+	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+		@CardWithHeader("Backends") {
+			if len(data.Backends) == 0 {
+				<div class="p-6 text-sm text-gray-500">
+					No backends configured.
+					<a href="/admin/backends" hx-get="/admin/backends" hx-target="#main" hx-push-url="true" class="text-blue-600 hover:underline">Add one</a>.
+				</div>
+			} else {
+				<div class="divide-y divide-gray-200">
+					for _, b := range data.Backends {
+						<div class="px-6 py-4 flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">{ b.Name }</p>
+								<p class="text-xs text-gray-500">{ b.BaseURL }</p>
+							</div>
+							<div class="flex items-center gap-2">
+								@EnabledBadge(b.Enabled)
+								<span
+									hx-get={ "/admin/backends/" + b.Name + "/health" }
+									hx-trigger="load"
+									hx-swap="outerHTML"
+								>
+									@Badge("...", "gray")
+								</span>
+							</div>
 						</div>
-						<div class="flex items-center gap-2">
-							@EnabledBadge(b.Enabled)
-						</div>
-					</div>
-				}
-			</div>
+					}
+				</div>
+			}
+		}
+		if data.HasObjStore {
+			@CardWithHeader("Object Store (RustFS)") {
+				<div
+					hx-get="/admin/health/objectstore"
+					hx-trigger="load"
+					hx-swap="innerHTML"
+					class="p-6"
+				>
+					<p class="text-sm text-gray-400">Checking...</p>
+				</div>
+			}
 		}
 	</div>
+}
+
+templ HealthGrid(statuses []ServiceStatus) {
+	if len(statuses) == 0 {
+		<p class="text-sm text-gray-500">No services configured.</p>
+	} else {
+		<div class="space-y-3">
+			for _, s := range statuses {
+				<div class="flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium text-gray-900">{ s.Name }</p>
+						<p class="text-xs text-gray-500">{ s.URL }</p>
+					</div>
+					@StatusBadge(s.Healthy)
+				</div>
+			}
+		</div>
+	}
 }

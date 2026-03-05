@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"etsi-rag/internal/admin/templates"
+	"etsi-rag/internal/backend"
 	"etsi-rag/internal/config"
 )
 
@@ -48,10 +51,11 @@ func (h *Handler) BackendCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := config.BackendConfig{
-		Name:    r.FormValue("name"),
-		BaseURL: r.FormValue("base_url"),
-		APIKey:  r.FormValue("api_key"),
-		Enabled: r.FormValue("enabled") == "true",
+		Name:       r.FormValue("name"),
+		BaseURL:    r.FormValue("base_url"),
+		APIKey:     r.FormValue("api_key"),
+		Enabled:    r.FormValue("enabled") == "true",
+		IsLlamaCpp: r.FormValue("is_llama_cpp") == "true",
 	}
 
 	h.config.Backends = append(h.config.Backends, b)
@@ -93,6 +97,7 @@ func (h *Handler) BackendUpdate(w http.ResponseWriter, r *http.Request) {
 	h.config.Backends[idx].Name = r.FormValue("name")
 	h.config.Backends[idx].BaseURL = r.FormValue("base_url")
 	h.config.Backends[idx].Enabled = r.FormValue("enabled") == "true"
+	h.config.Backends[idx].IsLlamaCpp = r.FormValue("is_llama_cpp") == "true"
 
 	// Only overwrite API key if a new value was provided
 	if key := r.FormValue("api_key"); key != "" {
@@ -151,6 +156,33 @@ func (h *Handler) BackendHealth(w http.ResponseWriter, r *http.Request) {
 	healthy := checkBackendHealth(b.BaseURL)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	templates.StatusBadge(healthy).Render(r.Context(), w)
+}
+
+// BackendModels handles GET /admin/models?backend=X&current=Y — returns <option> elements.
+func (h *Handler) BackendModels(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("backend")
+	selected := r.URL.Query().Get("current")
+
+	b := h.config.GetBackend(name)
+	if b == nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		templates.ModelOptions(nil, selected).Render(r.Context(), w)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	models, err := backend.FetchModelIDs(ctx, b.BaseURL, b.APIKey)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("backend", name).Msg("fetching models")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		templates.ModelOptions(nil, selected).Render(r.Context(), w)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	templates.ModelOptions(models, selected).Render(r.Context(), w)
 }
 
 func checkBackendHealth(baseURL string) bool {

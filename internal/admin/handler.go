@@ -12,12 +12,13 @@ import (
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
+	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
 )
 
-//go:embed static/styles.css static/htmx.min.js static/htmx-sse.js
+//go:embed static/styles.css static/htmx.min.js static/htmx-sse.js static/htmx-remove-me.js
 var staticFiles embed.FS
 
 // Handler serves the admin UI.
@@ -29,6 +30,7 @@ type Handler struct {
 	agent        *agent.Agent
 	crawler      *crawler.Crawler
 	pipeline     *rag.Pipeline
+	objStore     *objectstore.Client
 	logger       zerolog.Logger
 	onConfigSave func()
 }
@@ -41,6 +43,7 @@ type HandlerConfig struct {
 	SessionStore *session.Store
 	Crawler      *crawler.Crawler
 	Pipeline     *rag.Pipeline
+	ObjStore     *objectstore.Client
 	Logger       zerolog.Logger
 	OnConfigSave func()
 }
@@ -54,6 +57,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		sessionStore: cfg.SessionStore,
 		crawler:      cfg.Crawler,
 		pipeline:     cfg.Pipeline,
+		objStore:     cfg.ObjStore,
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,
 	}
@@ -91,9 +95,15 @@ func (h *Handler) Routes() chi.Router {
 	r.Put("/backends/{name}", h.BackendUpdate)
 	r.Delete("/backends/{name}", h.BackendDelete)
 	r.Get("/backends/{name}/health", h.BackendHealth)
+	r.Get("/models", h.BackendModels)
+
+	r.Get("/documents", h.DocumentList)
+	r.Get("/documents/{id}", h.DocumentDetail)
+	r.Delete("/documents/{id}", h.DocumentDelete)
 
 	r.Get("/crawler", h.CrawlerPage)
 	r.Post("/crawler/run", h.CrawlerRun)
+	r.Post("/crawler/reprocess", h.CrawlerReprocess)
 	r.Delete("/crawler/run", h.CrawlerStop)
 	r.Get("/crawler/status", h.CrawlerStatus)
 	r.Post("/crawler/sources", h.SourceCreate)
@@ -105,6 +115,8 @@ func (h *Handler) Routes() chi.Router {
 	r.Post("/chat/send", h.ChatSend)
 	r.Get("/chat/stream/{sessionID}", h.ChatStream)
 	r.Post("/chat/reset", h.ChatReset)
+
+	r.Get("/health/objectstore", h.HealthObjectStore)
 
 	return r
 }

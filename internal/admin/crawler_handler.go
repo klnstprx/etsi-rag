@@ -15,7 +15,7 @@ import (
 func (h *Handler) crawlerData(ctx context.Context) templates.CrawlerData {
 	running := h.crawler != nil && h.crawler.IsRunning()
 
-	docs, _ := h.store.ListDocuments(ctx, nil)
+	docCount, _ := h.store.CountDocuments(ctx)
 	sources, _ := h.store.ListCrawlSources(ctx)
 	runs, _ := h.store.ListCrawlRuns(ctx, 10)
 
@@ -40,7 +40,7 @@ func (h *Handler) crawlerData(ctx context.Context) templates.CrawlerData {
 
 	return templates.CrawlerData{
 		Running:  running,
-		DocCount: len(docs),
+		DocCount: docCount,
 		Sources:  sources,
 		Runs:     runs,
 		Progress: progress,
@@ -55,34 +55,40 @@ func (h *Handler) CrawlerPage(w http.ResponseWriter, r *http.Request) {
 	render(w, r, page, content)
 }
 
-// CrawlerRun handles POST /admin/crawler/run.
-func (h *Handler) CrawlerRun(w http.ResponseWriter, r *http.Request) {
+// crawlerGuard checks common preconditions for crawler actions (configured, not running,
+// pipeline available and reachable). Returns true if the guard failed and a response was sent.
+func (h *Handler) crawlerGuard(w http.ResponseWriter, r *http.Request, label string) bool {
 	if h.crawler == nil {
 		http.Error(w, "crawler not configured", http.StatusServiceUnavailable)
-		return
+		return true
 	}
 
-	if h.crawler.IsRunning() {
-		data := h.crawlerData(r.Context())
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		templates.CrawlerContent(data).Render(r.Context(), w)
-		templates.Toast("Crawl already running", "warning").Render(r.Context(), w)
-		return
+	var msg string
+	var level string
+	switch {
+	case h.crawler.IsRunning():
+		msg, level = "Crawl already running", "warning"
+	case h.pipeline == nil:
+		msg, level = "Cannot "+label+": pipeline not configured", "error"
+	default:
+		if err := h.pipeline.Preflight(r.Context()); err != nil {
+			msg, level = "Cannot "+label+": "+err.Error(), "error"
+		}
 	}
 
-	// Pre-flight: verify embedding backend is reachable before launching crawl
-	if h.pipeline == nil {
+	if msg != "" {
 		data := h.crawlerData(r.Context())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		templates.CrawlerContent(data).Render(r.Context(), w)
-		templates.Toast("Cannot start crawl: pipeline not configured", "error").Render(r.Context(), w)
-		return
+		templates.Toast(msg, level).Render(r.Context(), w)
+		return true
 	}
-	if err := h.pipeline.Preflight(r.Context()); err != nil {
-		data := h.crawlerData(r.Context())
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		templates.CrawlerContent(data).Render(r.Context(), w)
-		templates.Toast("Cannot start crawl: "+err.Error(), "error").Render(r.Context(), w)
+	return false
+}
+
+// CrawlerRun handles POST /admin/crawler/run.
+func (h *Handler) CrawlerRun(w http.ResponseWriter, r *http.Request) {
+	if h.crawlerGuard(w, r, "start crawl") {
 		return
 	}
 
@@ -101,6 +107,29 @@ func (h *Handler) CrawlerRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	templates.CrawlerContent(data).Render(r.Context(), w)
 	templates.Toast("Crawl started", "success").Render(r.Context(), w)
+}
+
+// CrawlerReprocess handles POST /admin/crawler/reprocess.
+func (h *Handler) CrawlerReprocess(w http.ResponseWriter, r *http.Request) {
+	if h.crawlerGuard(w, r, "reprocess") {
+		return
+	}
+
+	go func() {
+		runID, err := h.crawler.Reprocess(context.Background())
+		if err != nil {
+			h.logger.Error().Err(err).Int64("run_id", runID).Msg("reprocess failed")
+		} else {
+			h.logger.Info().Int64("run_id", runID).Msg("reprocess completed")
+		}
+	}()
+
+	h.logger.Info().Msg("reprocess started")
+
+	data := h.crawlerData(r.Context())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	templates.CrawlerContent(data).Render(r.Context(), w)
+	templates.Toast("Reprocess started", "success").Render(r.Context(), w)
 }
 
 // CrawlerStop handles DELETE /admin/crawler/run.
@@ -154,7 +183,7 @@ func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
 		SeedURL:  r.FormValue("seed_url"),
 		Category: r.FormValue("category"),
 		Language: r.FormValue("language"),
-		Enabled:  r.FormValue("enabled") == "on",
+		Enabled:  r.FormValue("enabled") == "true",
 	}
 	if src.Language == "" {
 		src.Language = "es"
@@ -192,7 +221,7 @@ func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
 		SeedURL:  r.FormValue("seed_url"),
 		Category: r.FormValue("category"),
 		Language: r.FormValue("language"),
-		Enabled:  r.FormValue("enabled") == "on",
+		Enabled:  r.FormValue("enabled") == "true",
 	}
 
 	if err := h.store.UpdateCrawlSource(r.Context(), src); err != nil {

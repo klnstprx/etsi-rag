@@ -1,0 +1,266 @@
+package templates
+
+import (
+	"fmt"
+	"net/url"
+	"etsi-rag/internal/store"
+	"etsi-rag/internal/domain"
+)
+
+// DocumentsData bundles data for the documents list page.
+type DocumentsData struct {
+	Documents []store.DocumentSummary
+	Total     int
+	Page      int
+	PageSize  int
+	Search    string
+}
+
+// TotalPages returns the number of pages.
+func (d DocumentsData) TotalPages() int {
+	if d.Total == 0 {
+		return 1
+	}
+	return (d.Total + d.PageSize - 1) / d.PageSize
+}
+
+// DocumentDetailData bundles data for a single document view.
+type DocumentDetailData struct {
+	Document domain.Document
+	Chunks   []domain.Chunk
+}
+
+templ DocumentsPage(data DocumentsData) {
+	@Layout("Documents", "documents") {
+		@DocumentsContent(data)
+	}
+}
+
+templ DocumentsContent(data DocumentsData) {
+	@PageHeader("Documents")
+	<!-- Search + Stats -->
+	<div class="flex items-center justify-between mb-6">
+		<p class="text-sm text-gray-500">{ fmt.Sprintf("%d documents total", data.Total) }</p>
+		<form
+			class="flex gap-2"
+			hx-get="/admin/documents"
+			hx-target="#main"
+			hx-push-url="true"
+		>
+			<input
+				type="text"
+				name="q"
+				value={ data.Search }
+				placeholder="Search by title or URL..."
+				class="rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm px-3 py-2"
+			/>
+			@BtnPrimary("Search", templ.Attributes{"type": "submit"})
+			if data.Search != "" {
+				<a
+					href="/admin/documents"
+					hx-get="/admin/documents"
+					hx-target="#main"
+					hx-push-url="true"
+					class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+				>
+					Clear
+				</a>
+			}
+		</form>
+	</div>
+	<!-- Document Table -->
+	@TableWrap() {
+		<table class="min-w-full divide-y divide-gray-200">
+			<thead class="bg-gray-50">
+				<tr>
+					@Th("Title")
+					@Th("URL")
+					@Th("Lang")
+					@Th("Category")
+					@Th("Chunks")
+					@Th("Size")
+					@Th("Actions")
+				</tr>
+			</thead>
+			<tbody class="bg-white divide-y divide-gray-200">
+				for _, doc := range data.Documents {
+					<tr>
+						<td class="px-6 py-4 text-sm font-medium text-gray-900 max-w-xs truncate" title={ doc.Title }>
+							<a
+								href={ templ.SafeURL(fmt.Sprintf("/admin/documents/%s", doc.ID)) }
+								hx-get={ fmt.Sprintf("/admin/documents/%s", doc.ID) }
+								hx-target="#main"
+								hx-push-url="true"
+								class="text-blue-600 hover:text-blue-800 hover:underline"
+							>
+								{ truncate(doc.Title, 60) }
+							</a>
+						</td>
+						<td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
+							if doc.URL != nil {
+								<a href={ templ.SafeURL(*doc.URL) } target="_blank" class="hover:underline" title={ *doc.URL }>
+									{ truncate(*doc.URL, 50) }
+								</a>
+							} else {
+								<span class="text-gray-400">—</span>
+							}
+						</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ string(doc.Language) }</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ string(doc.Category) }</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ fmt.Sprintf("%d", doc.ChunkCount) }</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ formatSize(doc.ContentLen) }</td>
+						<td class="px-6 py-4 whitespace-nowrap">
+							@BtnLink("Delete", "red", templ.Attributes{
+								"hx-delete":  fmt.Sprintf("/admin/documents/%s", doc.ID),
+								"hx-target":  "#main",
+								"hx-swap":    "innerHTML",
+								"hx-confirm": "Delete this document and all its chunks?",
+							})
+						</td>
+					</tr>
+				}
+				if len(data.Documents) == 0 {
+					if data.Search != "" {
+						@EmptyRow(7, "No documents match your search.")
+					} else {
+						@EmptyRow(7, "No documents indexed yet.")
+					}
+				}
+			</tbody>
+		</table>
+	}
+	<!-- Pagination -->
+	if data.TotalPages() > 1 {
+		<div class="mt-4 flex items-center justify-between">
+			<p class="text-sm text-gray-700">
+				{ fmt.Sprintf("Page %d of %d", data.Page, data.TotalPages()) }
+			</p>
+			<div class="flex gap-2">
+				if data.Page > 1 {
+					<a
+						href={ templ.SafeURL(paginationURL(data.Page-1, data.Search)) }
+						hx-get={ paginationURL(data.Page-1, data.Search) }
+						hx-target="#main"
+						hx-push-url="true"
+						class="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+					>
+						Previous
+					</a>
+				}
+				if data.Page < data.TotalPages() {
+					<a
+						href={ templ.SafeURL(paginationURL(data.Page+1, data.Search)) }
+						hx-get={ paginationURL(data.Page+1, data.Search) }
+						hx-target="#main"
+						hx-push-url="true"
+						class="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+					>
+						Next
+					</a>
+				}
+			</div>
+		</div>
+	}
+}
+
+templ DocumentDetailPage(data DocumentDetailData) {
+	@Layout("Document", "documents") {
+		@DocumentDetailContent(data)
+	}
+}
+
+templ DocumentDetailContent(data DocumentDetailData) {
+	<!-- Breadcrumb -->
+	<div class="mb-4">
+		<a
+			href="/admin/documents"
+			hx-get="/admin/documents"
+			hx-target="#main"
+			hx-push-url="true"
+			class="text-sm text-blue-600 hover:text-blue-800"
+		>
+			&larr; Back to Documents
+		</a>
+	</div>
+	<div class="mb-8">
+		<h2 class="text-2xl font-bold text-gray-900">{ data.Document.Title }</h2>
+		<div class="mt-2 flex flex-wrap gap-4 text-sm text-gray-500">
+			<span>ID: <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">{ data.Document.ID }</code></span>
+			<span>Language: { string(data.Document.Language) }</span>
+			<span>Category: { string(data.Document.Category) }</span>
+			if data.Document.URL != nil {
+				<a href={ templ.SafeURL(*data.Document.URL) } target="_blank" class="text-blue-600 hover:underline">
+					Source URL
+				</a>
+			}
+		</div>
+	</div>
+	<!-- Full Content -->
+	<div class="mb-8">
+		<h3 class="text-lg font-medium text-gray-900 mb-3">
+			Full Content
+			<span class="text-sm font-normal text-gray-500">({ formatSize(len(data.Document.Content)) })</span>
+		</h3>
+		@Card() {
+			<div class="p-6 max-h-96 overflow-y-auto">
+				<pre class="text-sm text-gray-800 whitespace-pre-wrap break-words">{ data.Document.Content }</pre>
+			</div>
+		}
+	</div>
+	<!-- Chunks -->
+	<div>
+		<h3 class="text-lg font-medium text-gray-900 mb-3">
+			Chunks
+			<span class="text-sm font-normal text-gray-500">({ fmt.Sprintf("%d", len(data.Chunks)) })</span>
+		</h3>
+		<div class="space-y-4">
+			for _, chunk := range data.Chunks {
+				@Card() {
+					<div class="p-4">
+						<div class="flex items-center justify-between mb-2">
+							<span class="text-xs font-medium text-gray-500">
+								Chunk #{ fmt.Sprintf("%d", chunk.ChunkIndex) }
+							</span>
+							<span class="text-xs text-gray-400">
+								{ formatSize(len(chunk.Content)) }
+							</span>
+						</div>
+						<pre class="text-sm text-gray-700 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{ chunk.Content }</pre>
+					</div>
+				}
+			}
+			if len(data.Chunks) == 0 {
+				<p class="text-sm text-gray-500">No chunks found for this document.</p>
+			}
+		</div>
+	</div>
+}
+
+// truncate shortens a string to maxLen, appending "..." if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// formatSize formats a byte count as a human-readable string.
+func formatSize(bytes int) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	kb := float64(bytes) / 1024
+	if kb < 1024 {
+		return fmt.Sprintf("%.1f KB", kb)
+	}
+	mb := kb / 1024
+	return fmt.Sprintf("%.1f MB", mb)
+}
+
+// paginationURL builds a pagination link preserving search.
+func paginationURL(page int, search string) string {
+	if search != "" {
+		return fmt.Sprintf("/admin/documents?page=%d&q=%s", page, url.QueryEscape(search))
+	}
+	return fmt.Sprintf("/admin/documents?page=%d", page)
+}
