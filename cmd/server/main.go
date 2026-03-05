@@ -2,27 +2,30 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
-	"time"
-
-	"github.com/rs/zerolog"
-
 	"etsi-rag/internal/admin"
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/api"
+	"etsi-rag/internal/backend"
 	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/objectstore"
+	"etsi-rag/internal/prompts"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
+	"etsi-rag/internal/tokencount"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/rs/zerolog"
 )
 
 func main() {
@@ -43,15 +46,16 @@ func run(logger zerolog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	configPath := config.ConfigPath(configDir)
 
 	logger.Info().
 		Str("host", cfg.Server.Host).
 		Int("port", cfg.Server.Port).
-		Str("db_path", cfg.VectorStore.Path).
+		Str("db_path", cfg.Database.Path).
 		Msg("configuration loaded")
 
 	// Initialize database
-	dbPath := cfg.VectorStore.Path
+	dbPath := cfg.Database.Path
 	if dbPath != ":memory:" {
 		dir := filepath.Dir(dbPath)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -73,14 +77,14 @@ func run(logger zerolog.Logger) error {
 
 	// Resolve backends and create LLM clients per stage (graceful: nil on failure)
 	embeddingClient, err := clientForStage(cfg, "embedding", cfg.Embedding.Backend, llm.ClientConfig{
-		EmbeddingModel: cfg.Embedding.Model,
+		Model: cfg.Embedding.Model,
 	}, logger)
 	if err != nil {
 		logger.Warn().Err(err).Msg("embedding backend not available")
 	}
 
 	chatClient, err := clientForStage(cfg, "chat", cfg.Chat.Backend, llm.ClientConfig{
-		ChatModel:   cfg.Chat.Model,
+		Model:       cfg.Chat.Model,
 		MaxTokens:   int64(cfg.Chat.MaxTokens),
 		Temperature: cfg.Chat.Temperature,
 	}, logger)
@@ -88,11 +92,16 @@ func run(logger zerolog.Logger) error {
 		logger.Warn().Err(err).Msg("chat backend not available")
 	}
 
-	// Initialize chunker
-	chunker := chunking.NewRecursiveCharacterChunker(cfg.Chunking)
+	// Initialize token counter, probe llama.cpp for auto-detection, then create chunker
+	embeddingCounter, err := counterForBackend(cfg, cfg.Embedding.Backend, cfg.Embedding.Model, logger)
+	if err != nil {
+		logger.Warn().Err(err).Msg("token counter not available (fix via admin UI)")
+	}
+	probeLlamaCpp(cfg, logger)
+	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
 
 	// Initialize RAG pipeline (may have nil embedder/chatter — guarded in pipeline methods)
-	pipeline := rag.NewPipeline(sqliteStore, embeddingClient, chatClient, chunker, cfg.RAG)
+	pipeline := rag.NewPipeline(sqliteStore, embeddingClient, chatClient, chunker, embeddingCounter, cfg.RAG)
 
 	// Initialize object store (graceful: nil on failure)
 	objStore, err := objectstore.New(cfg.ObjectStore)
@@ -123,6 +132,7 @@ func run(logger zerolog.Logger) error {
 	handler := api.NewHandler(api.HandlerConfig{
 		EmbeddingClient: embeddingClient,
 		ChatClient:      chatClient,
+		Counter:         embeddingCounter,
 		Pipeline:        pipeline,
 		Store:           sqliteStore,
 		SessionStore:    sessionStore,
@@ -133,7 +143,7 @@ func run(logger zerolog.Logger) error {
 	var agentInstance *agent.Agent
 	if cfg.Agent.Backend != "" {
 		agentClient, err := clientForStage(cfg, "agent", cfg.Agent.Backend, llm.ClientConfig{
-			ChatModel:   cfg.Agent.Model,
+			Model:       cfg.Agent.Model,
 			MaxTokens:   int64(cfg.Agent.MaxTokens),
 			Temperature: cfg.Agent.Temperature,
 		}, logger)
@@ -144,7 +154,7 @@ func run(logger zerolog.Logger) error {
 				agent.NewRAGSearchTool(pipeline),
 				agent.NewListDocumentsTool(sqliteStore),
 			}
-			agentInstance = agent.NewAgent(agentClient, tools, agentSystemPrompt, logger)
+			agentInstance = agent.NewAgent(agentClient, tools, prompts.Agent, logger)
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent initialized")
 		}
 	} else {
@@ -152,7 +162,6 @@ func run(logger zerolog.Logger) error {
 	}
 
 	// Create admin handler
-	configPath := filepath.Join(configDir, "default.toml")
 	adminHandler := admin.NewHandler(admin.HandlerConfig{
 		Store:        sqliteStore,
 		Config:       cfg,
@@ -160,6 +169,7 @@ func run(logger zerolog.Logger) error {
 		SessionStore: sessionStore,
 		Crawler:      crawlerInstance,
 		Pipeline:     pipeline,
+		ObjStore:     objStore,
 		Logger:       logger,
 	})
 	adminHandler.SetAgent(agentInstance)
@@ -209,6 +219,9 @@ func run(logger zerolog.Logger) error {
 	}
 
 	// Cleanup
+	if crawlerInstance != nil {
+		crawlerInstance.Close()
+	}
 	sessionStore.Close()
 	if err := sqliteStore.Close(); err != nil {
 		logger.Warn().Err(err).Msg("error closing database")
@@ -247,7 +260,7 @@ func rebuildClients(
 
 	// Embedding
 	if ec, err := clientForStage(cfg, "embedding", cfg.Embedding.Backend, llm.ClientConfig{
-		EmbeddingModel: cfg.Embedding.Model,
+		Model: cfg.Embedding.Model,
 	}, logger); err != nil {
 		logger.Warn().Err(err).Msg("embedding client rebuild failed")
 		pipeline.SetEmbedder(nil)
@@ -257,9 +270,19 @@ func rebuildClients(
 		apiHandler.SetEmbeddingClient(ec)
 	}
 
+	// Rebuild token counter and chunker
+	counter, err := counterForBackend(cfg, cfg.Embedding.Backend, cfg.Embedding.Model, logger)
+	if err != nil {
+		logger.Warn().Err(err).Msg("token counter rebuild failed (fix via admin UI)")
+	}
+	probeLlamaCpp(cfg, logger)
+	pipeline.SetCounter(counter)
+	apiHandler.SetCounter(counter)
+	pipeline.SetChunker(chunking.NewStructureAwareChunker(cfg.Chunking, counter, cfg.Embedding.MaxTokens))
+
 	// Chat
 	if cc, err := clientForStage(cfg, "chat", cfg.Chat.Backend, llm.ClientConfig{
-		ChatModel:   cfg.Chat.Model,
+		Model:       cfg.Chat.Model,
 		MaxTokens:   int64(cfg.Chat.MaxTokens),
 		Temperature: cfg.Chat.Temperature,
 	}, logger); err != nil {
@@ -274,7 +297,7 @@ func rebuildClients(
 	// Agent
 	if cfg.Agent.Backend != "" {
 		if ac, err := clientForStage(cfg, "agent", cfg.Agent.Backend, llm.ClientConfig{
-			ChatModel:   cfg.Agent.Model,
+			Model:       cfg.Agent.Model,
 			MaxTokens:   int64(cfg.Agent.MaxTokens),
 			Temperature: cfg.Agent.Temperature,
 		}, logger); err != nil {
@@ -285,7 +308,7 @@ func rebuildClients(
 				agent.NewRAGSearchTool(pipeline),
 				agent.NewListDocumentsTool(st),
 			}
-			adminHandler.SetAgent(agent.NewAgent(ac, tools, agentSystemPrompt, logger))
+			adminHandler.SetAgent(agent.NewAgent(ac, tools, prompts.Agent, logger))
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent rebuilt")
 		}
 	} else {
@@ -293,10 +316,48 @@ func rebuildClients(
 	}
 }
 
-const agentSystemPrompt = `You are a helpful assistant for ETSI Informatica at the University of Malaga.
-You have access to a RAG knowledge base with information about degrees, courses, procedures, and services.
-Use the rag_search tool to find relevant information before answering questions.
-Use the list_documents tool to see what documents are available.
-Always base your answers on the information found in the knowledge base when possible.
-If you cannot find relevant information, say so honestly.
-Respond in the same language as the user's question.`
+// probeLlamaCpp queries a llama.cpp backend's /props and /v1/models endpoints
+// to auto-detect embedding context window and dimension, updating cfg in-place.
+func probeLlamaCpp(cfg *config.Config, logger zerolog.Logger) {
+	b := cfg.GetBackend(cfg.Embedding.Backend)
+	if b == nil || !b.IsLlamaCpp {
+		return
+	}
+
+	props, err := backend.FetchLlamaCppProps(context.Background(), b.BaseURL, nil)
+	if err != nil {
+		logger.Warn().Err(err).Str("baseURL", b.BaseURL).Msg("could not probe llama.cpp, using config values")
+		return
+	}
+
+	if props.ContextSize > 0 {
+		logger.Info().Int("n_ctx", props.ContextSize).Msg("auto-detected embedding context window")
+		cfg.Embedding.MaxTokens = props.ContextSize
+	}
+	if props.EmbeddingDim > 0 {
+		logger.Info().Int("n_embd", props.EmbeddingDim).Msg("auto-detected embedding dimension")
+		cfg.Embedding.Dimension = props.EmbeddingDim
+	}
+	if props.ModelPath != "" {
+		logger.Info().Str("model_path", props.ModelPath).Msg("llama.cpp model")
+	}
+}
+
+// counterForBackend creates an appropriate token counter for the given backend.
+func counterForBackend(cfg *config.Config, backendName, model string, logger zerolog.Logger) (tokencount.Counter, error) {
+	b := cfg.GetBackend(backendName)
+	if b == nil {
+		return nil, fmt.Errorf("no enabled backend named %q for token counter", backendName)
+	}
+	if b.IsLlamaCpp {
+		base := strings.TrimSuffix(b.BaseURL, "/v1")
+		logger.Info().Str("backend", b.Name).Msg("using llama.cpp token counter")
+		return tokencount.NewLlamaCppCounter(base, nil), nil
+	}
+	tc, err := tokencount.NewTiktokenCounter(model)
+	if err != nil {
+		return nil, fmt.Errorf("tiktoken init for model %q: %w", model, err)
+	}
+	logger.Info().Str("backend", b.Name).Str("model", model).Msg("using tiktoken counter")
+	return tc, nil
+}

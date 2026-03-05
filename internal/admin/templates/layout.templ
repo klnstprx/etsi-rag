@@ -30,7 +30,7 @@ templ Sidebar(activePage string) {
 			<h1 class="text-lg font-bold text-white">ETSI RAG</h1>
 			<p class="text-xs text-gray-500">Admin Panel</p>
 		</div>
-		<nav class="flex-1 p-4 space-y-1" aria-label="Main navigation">
+		<nav class="flex-1 p-4 space-y-1" aria-label="Main navigation" hx-boost="true">
 			@NavLink("/admin/", "Dashboard", activePage == "dashboard")
 			@NavLink("/admin/backends", "Backends", activePage == "backends")
 			@NavLink("/admin/config", "Config", activePage == "config")
@@ -47,9 +47,6 @@ templ Sidebar(activePage string) {
 templ NavLink(href string, label string, active bool) {
 	<a
 		href={ templ.SafeURL(href) }
-		hx-get={ href }
-		hx-target="#main"
-		hx-push-url="true"
 		if active {
 			class="block px-3 py-2 rounded-md bg-gray-800 text-white text-sm font-medium"
 		} else {

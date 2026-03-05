@@ -139,9 +139,9 @@ type CrawlerConfig struct {
 	MaxDepth       int           `koanf:"max_depth"`
 	MaxPages       int           `koanf:"max_pages"`
 	Concurrency    int           `koanf:"concurrency"`
-	MaxBodySize    int64         `koanf:"max_body_size"`    // max response body in bytes, 0 = unlimited
-	EmbedWorkers   int           `koanf:"embed_workers"`    // concurrent embed stage workers
-	JSPatterns     []string      `koanf:"js_patterns"`      // URL path prefixes requiring JS rendering
+	MaxBodySize    int64         `koanf:"max_body_size"` // max response body in bytes, 0 = unlimited
+	EmbedWorkers   int           `koanf:"embed_workers"` // concurrent embed stage workers
+	JSPatterns     []string      `koanf:"js_patterns"`   // URL path prefixes requiring JS rendering
 }
 
 // ObjectStoreConfig holds S3-compatible object storage settings (RustFS).

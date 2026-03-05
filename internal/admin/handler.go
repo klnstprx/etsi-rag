@@ -121,12 +121,14 @@ func (h *Handler) Routes() chi.Router {
 	return r
 }
 
-// isHTMX checks if the request is from HTMX.
+// isHTMX checks if the request is from HTMX (but not a boosted navigation).
 func isHTMX(r *http.Request) bool {
-	return r.Header.Get("HX-Request") != ""
+	return r.Header.Get("HX-Request") != "" && r.Header.Get("HX-Boosted") == ""
 }
 
 // render renders a full page or HTMX fragment.
+// Boosted navigations (hx-boost) receive the full page so HTMX can swap the
+// entire body, which updates both the sidebar active state and the main content.
 func render(w http.ResponseWriter, r *http.Request, page, fragment templ.Component) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if isHTMX(r) {
