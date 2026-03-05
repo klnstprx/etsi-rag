@@ -1,0 +1,146 @@
+package templates
+
+import (
+	"fmt"
+	"etsi-rag/internal/domain"
+)
+
+templ Toast(message string, kind string) {
+	<div id="toast-container" hx-swap-oob="afterbegin">
+		<div
+			if kind == "success" {
+				class="px-4 py-3 rounded-lg shadow-lg text-sm bg-green-600 text-white"
+			} else if kind == "error" {
+				class="px-4 py-3 rounded-lg shadow-lg text-sm bg-red-600 text-white"
+			} else {
+				class="px-4 py-3 rounded-lg shadow-lg text-sm bg-blue-600 text-white"
+			}
+			role="alert"
+			_="on load wait 3s then remove me"
+		>
+			{ message }
+		</div>
+	</div>
+}
+
+templ StatusBadge(healthy bool) {
+	if healthy {
+		<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+			Healthy
+		</span>
+	} else {
+		<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+			Unhealthy
+		</span>
+	}
+}
+
+templ EnabledBadge(enabled bool) {
+	if enabled {
+		<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+			Enabled
+		</span>
+	} else {
+		<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+			Disabled
+		</span>
+	}
+}
+
+templ ConfirmDelete(targetURL string) {
+	<div id="modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+		<div class="bg-white rounded-lg p-6 max-w-sm mx-4">
+			<h3 class="text-lg font-medium text-gray-900 mb-2">Confirm Delete</h3>
+			<p class="text-sm text-gray-500 mb-4">Are you sure? This action cannot be undone.</p>
+			<div class="flex justify-end gap-3">
+				<button
+					class="px-3 py-2 text-sm text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+					onclick="document.getElementById('modal').remove()"
+				>
+					Cancel
+				</button>
+				<button
+					class="px-3 py-2 text-sm text-white bg-red-600 rounded-md hover:bg-red-700"
+					hx-delete={ targetURL }
+					hx-target="#main"
+					hx-swap="innerHTML"
+					onclick="document.getElementById('modal').remove()"
+				>
+					Delete
+				</button>
+			</div>
+		</div>
+	</div>
+}
+
+templ PageHeader(title string) {
+	<div class="mb-8">
+		<h2 class="text-2xl font-bold text-gray-900">{ title }</h2>
+	</div>
+}
+
+templ StatCard(label string, value string) {
+	<div class="bg-white rounded-lg shadow p-6">
+		<dt class="text-sm font-medium text-gray-500 truncate">{ label }</dt>
+		<dd class="mt-1 text-3xl font-semibold text-gray-900">{ value }</dd>
+	</div>
+}
+
+templ StatCardInt(label string, value int) {
+	@StatCard(label, fmt.Sprintf("%d", value))
+}
+
+// StageStat is a label/value pair for stage progress cards.
+type StageStat struct {
+	Label string
+	Value int64
+}
+
+templ StageCard(name string, active bool, stats []StageStat) {
+	<div class="bg-white rounded-lg shadow p-4 border-l-4 border-blue-500">
+		<div class="flex items-center gap-2 mb-3">
+			if active {
+				<span class="relative flex h-2.5 w-2.5">
+					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+					<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
+				</span>
+			} else {
+				<span class="inline-flex rounded-full h-2.5 w-2.5 bg-gray-300"></span>
+			}
+			<h4 class="text-sm font-semibold text-gray-900">{ name }</h4>
+		</div>
+		<dl class="space-y-1">
+			for _, s := range stats {
+				<div class="flex justify-between text-sm">
+					<dt class="text-gray-500">{ s.Label }</dt>
+					<dd class="font-medium text-gray-900">{ fmt.Sprintf("%d", s.Value) }</dd>
+				</div>
+			}
+		</dl>
+	</div>
+}
+
+templ RunStatusBadge(status domain.CrawlRunStatus) {
+	switch status {
+		case "completed":
+			<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+				Completed
+			</span>
+		case "failed":
+			<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+				Failed
+			</span>
+		case "running":
+			<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+				Running
+			</span>
+		case "cancelled":
+			<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+				Cancelled
+			</span>
+		default:
+			<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+				{ string(status) }
+			</span>
+	}
+}

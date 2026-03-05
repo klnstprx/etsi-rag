@@ -1,0 +1,77 @@
+package templates
+
+templ ChatPage(sessionID string) {
+	@Layout("Chat", "chat") {
+		@ChatContent(sessionID)
+	}
+}
+
+templ ChatContent(sessionID string) {
+	@PageHeader("Agent Chat")
+	<div class="bg-white rounded-lg shadow flex flex-col" style="height: calc(100vh - 12rem);">
+		<div id="chat-messages" class="flex-1 overflow-y-auto p-6 space-y-4">
+			<div class="text-sm text-gray-500 text-center">Start a conversation with the RAG agent.</div>
+		</div>
+		<div class="border-t border-gray-200 p-4">
+			<form
+				hx-post="/admin/chat/send"
+				hx-target="#chat-messages"
+				hx-swap="beforeend"
+				hx-on::after-request="this.reset(); document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight"
+				class="flex gap-3"
+			>
+				<input type="hidden" name="session_id" value={ sessionID }/>
+				<input
+					type="text"
+					name="message"
+					required
+					autocomplete="off"
+					placeholder="Type a message..."
+					class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2 border"
+				/>
+				<button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">
+					Send
+				</button>
+				<button
+					type="button"
+					hx-post="/admin/chat/reset"
+					hx-target="#main"
+					hx-swap="innerHTML"
+					class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+				>
+					Reset
+				</button>
+			</form>
+		</div>
+	</div>
+}
+
+templ UserMessage(text string) {
+	<div class="flex justify-end">
+		<div class="max-w-md rounded-lg px-4 py-2 bg-blue-600 text-white text-sm">
+			{ text }
+		</div>
+	</div>
+}
+
+templ AssistantMessageSSE(sessionID string) {
+	<div class="flex justify-start">
+		<div
+			class="max-w-md rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm"
+			hx-ext="sse"
+			sse-connect={ "/admin/chat/stream/" + sessionID }
+			sse-swap="token"
+			hx-swap="beforeend"
+			sse-close="done"
+		>
+		</div>
+	</div>
+}
+
+templ AssistantMessage(text string) {
+	<div class="flex justify-start">
+		<div class="max-w-md rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap">
+			{ text }
+		</div>
+	</div>
+}

@@ -1,0 +1,50 @@
+package templates
+
+import "etsi-rag/internal/config"
+
+type DashboardData struct {
+	DocCount     int
+	ChunkCount   int
+	BackendCount int
+	Backends     []config.BackendConfig
+}
+
+templ DashboardPage(data DashboardData) {
+	@Layout("Dashboard", "dashboard") {
+		@DashboardContent(data)
+	}
+}
+
+templ DashboardContent(data DashboardData) {
+	@PageHeader("Dashboard")
+	<dl class="grid grid-cols-1 gap-5 sm:grid-cols-3 mb-8">
+		@StatCardInt("Documents", data.DocCount)
+		@StatCardInt("Chunks", data.ChunkCount)
+		@StatCardInt("Backends", data.BackendCount)
+	</dl>
+	<div class="bg-white rounded-lg shadow">
+		<div class="px-6 py-4 border-b border-gray-200">
+			<h3 class="text-lg font-medium text-gray-900">Backends</h3>
+		</div>
+		if len(data.Backends) == 0 {
+			<div class="p-6 text-sm text-gray-500">
+				No backends configured.
+				<a href="/admin/backends" class="text-blue-600 hover:underline">Add one</a>.
+			</div>
+		} else {
+			<div class="divide-y divide-gray-200">
+				for _, b := range data.Backends {
+					<div class="px-6 py-4 flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium text-gray-900">{ b.Name }</p>
+							<p class="text-xs text-gray-500">{ b.BaseURL }</p>
+						</div>
+						<div class="flex items-center gap-2">
+							@EnabledBadge(b.Enabled)
+						</div>
+					</div>
+				}
+			</div>
+		}
+	</div>
+}

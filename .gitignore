@@ -1,0 +1,16 @@
+# Binary output
+bin/
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Database files
+data/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
