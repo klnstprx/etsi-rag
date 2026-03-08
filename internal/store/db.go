@@ -42,6 +42,7 @@ func Migrate(db *sql.DB, embeddingDimension int) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id);
+		CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at DESC);
 
 		CREATE TABLE IF NOT EXISTS chunk_embeddings (
 			chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
