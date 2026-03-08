@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	"golang.org/x/net/html"
 )
+
+var multiNewlineRe = regexp.MustCompile(`\n{3,}`)
 
 // HTMLResult contains the extracted content from an HTML page.
 type HTMLResult struct {
@@ -585,9 +588,7 @@ func normalizeStructured(s string) string {
 	result := strings.Join(lines, "\n")
 
 	// Collapse 3+ newlines to 2
-	for strings.Contains(result, "\n\n\n") {
-		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
-	}
+	result = multiNewlineRe.ReplaceAllString(result, "\n\n")
 
 	return strings.TrimSpace(result)
 }

@@ -461,6 +461,43 @@ func TestNormalizeStructured(t *testing.T) {
 	}
 }
 
+func TestNormalizeStructuredCollapsesBlankLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "three newlines collapsed to two",
+			input:    "a\n\n\nb",
+			expected: "a\n\nb",
+		},
+		{
+			name:     "many newlines collapsed to two",
+			input:    "a\n\n\n\n\n\n\nb",
+			expected: "a\n\nb",
+		},
+		{
+			name:     "two newlines preserved",
+			input:    "a\n\nb",
+			expected: "a\n\nb",
+		},
+		{
+			name:     "trailing spaces trimmed",
+			input:    "hello   \nworld  ",
+			expected: "hello\nworld",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeStructured(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeStructured(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestNormalizeWhitespace(t *testing.T) {
 	tests := []struct {
 		input string
