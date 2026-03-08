@@ -269,7 +269,6 @@ func (c *Crawler) embedStage(
 	cancelFn context.CancelFunc,
 	force bool,
 ) {
-	consecutiveFails := 0
 	var embedIngested, embedSkipped, embedFailed int
 
 	for item := range inCh {
@@ -318,15 +317,14 @@ func (c *Crawler) embedStage(
 			progress.EmbedFail.Add(1)
 			embedFailed++
 			c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
-			consecutiveFails++
-			if consecutiveFails >= 3 {
+			if progress.ConsecutiveEmbedFails.Add(1) >= 3 {
 				c.logger.Error().Msg("3 consecutive embed failures, aborting crawl")
 				cancelFn()
 				return
 			}
 			continue
 		}
-		consecutiveFails = 0
+		progress.ConsecutiveEmbedFails.Store(0)
 
 		progress.Ingested.Add(1)
 		embedIngested++

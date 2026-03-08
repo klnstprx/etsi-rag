@@ -43,9 +43,10 @@ type RunProgress struct {
 	ParseFail atomic.Int64
 
 	// Embed stage
-	Ingested  atomic.Int64
-	Skipped   atomic.Int64
-	EmbedFail atomic.Int64
+	Ingested              atomic.Int64
+	Skipped               atomic.Int64
+	EmbedFail             atomic.Int64
+	ConsecutiveEmbedFails atomic.Int64 // shared across all embed workers
 
 	// Stage activity indicators (1 = active, 0 = idle)
 	CrawlActive atomic.Int32
