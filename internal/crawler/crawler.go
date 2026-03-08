@@ -199,7 +199,7 @@ func (c *Crawler) startWorkers(
 	}
 
 	var parseWG sync.WaitGroup
-	for range 4 {
+	for range c.config.ParseWorkers {
 		parseWG.Add(1)
 		go func() {
 			defer parseWG.Done()
