@@ -20,7 +20,10 @@ type Browser struct {
 // The browser binary is auto-detected or downloaded.
 func NewBrowser(timeout time.Duration) (*Browser, error) {
 	path, _ := launcher.LookPath()
-	u := launcher.New().Bin(path).Headless(true).MustLaunch()
+	u, err := launcher.New().Bin(path).Headless(true).Launch()
+	if err != nil {
+		return nil, fmt.Errorf("launching browser: %w", err)
+	}
 
 	browser := rod.New().ControlURL(u)
 	if err := browser.Connect(); err != nil {
