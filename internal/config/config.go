@@ -141,7 +141,8 @@ type CrawlerConfig struct {
 	Concurrency    int           `koanf:"concurrency"`
 	MaxBodySize    int64         `koanf:"max_body_size"` // max response body in bytes, 0 = unlimited
 	EmbedWorkers   int           `koanf:"embed_workers"` // concurrent embed stage workers
-	ParseWorkers   int           `koanf:"parse_workers"` // concurrent parse stage workers
+	ParseWorkers   int           `koanf:"parse_workers"`   // concurrent parse stage workers
+	MaxEmbedFails  int           `koanf:"max_embed_fails"` // consecutive embed failures before aborting crawl
 	JSPatterns     []string      `koanf:"js_patterns"`   // URL path prefixes requiring JS rendering
 }
 
@@ -316,6 +317,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Crawler.ParseWorkers == 0 {
 		c.Crawler.ParseWorkers = 4
+	}
+	if c.Crawler.MaxEmbedFails == 0 {
+		c.Crawler.MaxEmbedFails = 3
 	}
 
 	if c.ObjectStore.Region == "" {

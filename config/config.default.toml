@@ -57,6 +57,7 @@ concurrency = 4
 max_body_size = 10485760
 embed_workers = 1
 parse_workers = 4
+max_embed_fails = 3
 js_patterns = ['/centers/subject/']
 
 [object_store]
