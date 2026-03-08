@@ -289,7 +289,9 @@ func (c *Crawler) embedStage(
 			// Unchanged — update timestamp only
 			existing.LastCrawledAt = &now
 			existing.Status = domain.CrawlPageFetched
-			c.store.UpsertCrawlPage(ctx, existing)
+			if err := c.store.UpsertCrawlPage(ctx, existing); err != nil {
+			c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert unchanged page failed")
+		}
 			progress.Skipped.Add(1)
 			embedSkipped++
 			continue
@@ -323,8 +325,8 @@ func (c *Crawler) embedStage(
 			progress.EmbedFail.Add(1)
 			embedFailed++
 			c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
-			if progress.ConsecutiveEmbedFails.Add(1) >= 3 {
-				c.logger.Error().Msg("3 consecutive embed failures, aborting crawl")
+			if progress.ConsecutiveEmbedFails.Add(1) >= int64(c.config.MaxEmbedFails) {
+				c.logger.Error().Int("threshold", c.config.MaxEmbedFails).Msg("consecutive embed failures exceeded threshold, aborting crawl")
 				cancelFn()
 				return
 			}
