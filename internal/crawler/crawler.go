@@ -527,7 +527,9 @@ func (c *Crawler) recordFailedPage(ctx context.Context, sourceID int64, pageURL 
 		Status:       domain.CrawlPageFailed,
 		ErrorMessage: &errMsg,
 	}
-	c.store.UpsertCrawlPage(ctx, page)
+	if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
+		c.logger.Warn().Err(err).Str("url", pageURL).Msg("failed to record page failure")
+	}
 }
 
 func (c *Crawler) finishRun(
