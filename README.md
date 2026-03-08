@@ -23,6 +23,25 @@ make run
 
 Requires an OpenAI-compatible LLM server (e.g., [llama-server](https://github.com/ggml-org/llama.cpp)) and [RustFS](https://github.com/nicholaskell/rustfs) for object storage.
 
+### RustFS (object storage)
+
+```bash
+podman run -d \
+  --name rustfs \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v rustfs-data:/data \
+  -e RUSTFS_ACCESS_KEY=minioadmin \
+  -e RUSTFS_SECRET_KEY=minioadmin \
+  -e RUSTFS_CONSOLE_ENABLE=true \
+  rustfs/rustfs:latest \
+  --console-enable \
+  /data
+
+# Start existing container
+podman start rustfs
+```
+
 ## Development
 
 ```bash
