@@ -206,6 +206,9 @@ func (c *Crawler) parseStage(
 	outCh chan<- ParseItem,
 	progress *RunProgress,
 ) {
+	progress.ParseActive.Add(1)
+	defer progress.ParseActive.Add(-1)
+
 	for item := range inCh {
 		if ctx.Err() != nil {
 			return
@@ -269,6 +272,9 @@ func (c *Crawler) embedStage(
 	cancelFn context.CancelFunc,
 	force bool,
 ) {
+	progress.EmbedActive.Add(1)
+	defer progress.EmbedActive.Add(-1)
+
 	var embedIngested, embedSkipped, embedFailed int
 
 	for item := range inCh {
