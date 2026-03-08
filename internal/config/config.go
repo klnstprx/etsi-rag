@@ -1,12 +1,13 @@
 package config
 
 import (
-	"etsi-rag/internal/prompts"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
+
+	"etsi-rag/internal/prompts"
 
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
@@ -139,11 +140,11 @@ type CrawlerConfig struct {
 	MaxDepth       int           `koanf:"max_depth"`
 	MaxPages       int           `koanf:"max_pages"`
 	Concurrency    int           `koanf:"concurrency"`
-	MaxBodySize    int64         `koanf:"max_body_size"` // max response body in bytes, 0 = unlimited
-	EmbedWorkers   int           `koanf:"embed_workers"` // concurrent embed stage workers
+	MaxBodySize    int64         `koanf:"max_body_size"`   // max response body in bytes, 0 = unlimited
+	EmbedWorkers   int           `koanf:"embed_workers"`   // concurrent embed stage workers
 	ParseWorkers   int           `koanf:"parse_workers"`   // concurrent parse stage workers
 	MaxEmbedFails  int           `koanf:"max_embed_fails"` // consecutive embed failures before aborting crawl
-	JSPatterns     []string      `koanf:"js_patterns"`   // URL path prefixes requiring JS rendering
+	JSPatterns     []string      `koanf:"js_patterns"`     // URL path prefixes requiring JS rendering
 }
 
 // ObjectStoreConfig holds S3-compatible object storage settings (RustFS).

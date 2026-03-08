@@ -290,8 +290,8 @@ func (c *Crawler) embedStage(
 			existing.LastCrawledAt = &now
 			existing.Status = domain.CrawlPageFetched
 			if err := c.store.UpsertCrawlPage(ctx, existing); err != nil {
-			c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert unchanged page failed")
-		}
+				c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert unchanged page failed")
+			}
 			progress.Skipped.Add(1)
 			embedSkipped++
 			continue

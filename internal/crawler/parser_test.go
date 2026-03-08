@@ -516,3 +516,60 @@ func TestNormalizeWhitespace(t *testing.T) {
 		}
 	}
 }
+
+func makeElement(tag string, attrs ...html.Attribute) *html.Node {
+	return &html.Node{
+		Type: html.ElementNode,
+		Data: tag,
+		Attr: attrs,
+	}
+}
+
+func TestIsBoilerplate(t *testing.T) {
+	tests := []struct {
+		name string
+		node *html.Node
+		want bool
+	}{
+		// Tag-based boilerplate
+		{"script tag", makeElement("script"), true},
+		{"style tag", makeElement("style"), true},
+		{"noscript tag", makeElement("noscript"), true},
+		{"nav tag", makeElement("nav"), true},
+		{"header tag", makeElement("header"), true},
+		{"footer tag", makeElement("footer"), true},
+		// Non-boilerplate tags
+		{"div tag", makeElement("div"), false},
+		{"p tag", makeElement("p"), false},
+		{"main tag", makeElement("main"), false},
+		{"article tag", makeElement("article"), false},
+		// Class-based boilerplate
+		{"modal class", makeElement("div", html.Attribute{Key: "class", Val: "modal-dialog"}), true},
+		{"cookie class", makeElement("div", html.Attribute{Key: "class", Val: "cookie-banner"}), true},
+		{"overlay class", makeElement("div", html.Attribute{Key: "class", Val: "page-overlay"}), true},
+		{"beforecontent class", makeElement("div", html.Attribute{Key: "class", Val: "beforecontent-wrapper"}), true},
+		{"aftercontent class", makeElement("div", html.Attribute{Key: "class", Val: "aftercontent"}), true},
+		{"blockcontainerplace class", makeElement("div", html.Attribute{Key: "class", Val: "blockcontainerplace"}), true},
+		{"blockplace class", makeElement("div", html.Attribute{Key: "class", Val: "blockplace-1"}), true},
+		// ID-based boilerplate
+		{"modal id", makeElement("div", html.Attribute{Key: "id", Val: "modal-login"}), true},
+		{"cookie id", makeElement("div", html.Attribute{Key: "id", Val: "cookie-consent"}), true},
+		{"beforecontent id", makeElement("div", html.Attribute{Key: "id", Val: "beforecontent01"}), true},
+		{"aftercontent id", makeElement("div", html.Attribute{Key: "id", Val: "aftercontent02"}), true},
+		// Non-boilerplate with class/id
+		{"content class", makeElement("div", html.Attribute{Key: "class", Val: "content-area"}), false},
+		{"main id", makeElement("div", html.Attribute{Key: "id", Val: "main_content"}), false},
+		// Non-element node
+		{"text node", &html.Node{Type: html.TextNode, Data: "hello"}, false},
+		// Case insensitivity
+		{"MODAL class uppercase", makeElement("div", html.Attribute{Key: "class", Val: "MODAL-Dialog"}), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isBoilerplate(tt.node)
+			if got != tt.want {
+				t.Errorf("isBoilerplate(%s) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
