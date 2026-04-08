@@ -11,6 +11,7 @@ import (
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/session"
+	"etsi-rag/internal/tokencount"
 )
 
 // ChatResult is the result of an agent conversation turn.
@@ -21,24 +22,33 @@ type ChatResult struct {
 
 // Agent orchestrates LLM tool-calling loops with session management.
 type Agent struct {
-	mu           sync.RWMutex
-	client       *llm.ChatClient
-	tools        []Tool
-	system       string
-	maxIter      int
-	sessionStore *session.Store
-	logger       zerolog.Logger
+	mu            sync.RWMutex
+	client        *llm.ChatClient
+	tools         []Tool
+	system        string
+	maxIter       int
+	counter       tokencount.Counter
+	contextWindow int
+	sessionStore  *session.Store
+	logger        zerolog.Logger
 }
 
 // NewAgent creates a new agent with the given configuration.
-func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
+// counter and contextWindow enable tool output size guards. If either is nil/zero,
+// the guard is disabled and a warning is logged.
+func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, counter tokencount.Counter, contextWindow int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
+	if counter == nil || contextWindow <= 0 {
+		logger.Warn().Msg("agent tool output guards disabled (no token counter or context window)")
+	}
 	return &Agent{
-		client:       client,
-		tools:        tools,
-		system:       system,
-		maxIter:      maxIter,
-		sessionStore: sessionStore,
-		logger:       logger,
+		client:        client,
+		tools:         tools,
+		system:        system,
+		maxIter:       maxIter,
+		counter:       counter,
+		contextWindow: contextWindow,
+		sessionStore:  sessionStore,
+		logger:        logger,
 	}
 }
 
@@ -70,6 +80,20 @@ func (a *Agent) SetMaxIterations(n int) {
 	a.mu.Unlock()
 }
 
+// SetCounter swaps the token counter (thread-safe).
+func (a *Agent) SetCounter(c tokencount.Counter) {
+	a.mu.Lock()
+	a.counter = c
+	a.mu.Unlock()
+}
+
+// SetContextWindow swaps the context window size (thread-safe).
+func (a *Agent) SetContextWindow(n int) {
+	a.mu.Lock()
+	a.contextWindow = n
+	a.mu.Unlock()
+}
+
 func (a *Agent) getClient() *llm.ChatClient {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -86,6 +110,18 @@ func (a *Agent) getTools() []Tool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.tools
+}
+
+func (a *Agent) getCounter() tokencount.Counter {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.counter
+}
+
+func (a *Agent) getContextWindow() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.contextWindow
 }
 
 func (a *Agent) getMaxIter() int {
@@ -264,6 +300,8 @@ func (a *Agent) runToolLoop(
 				result = fmt.Sprintf("Error: %s", err.Error())
 			}
 
+			result = a.checkToolResult(ctx, tc.Function.Name, result)
+
 			a.logger.Debug().
 				Str("tool", tc.Function.Name).
 				Str("args", tc.Function.Arguments).
@@ -293,6 +331,40 @@ func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string, s
 		}
 	}
 	return "", fmt.Errorf("unknown tool: %s", name)
+}
+
+// checkToolResult validates that a tool result fits within the context budget.
+// If the result is too large, it returns an error message instead so the LLM
+// can self-correct (e.g., refine a query). Returns the result unchanged if
+// within budget or if guards are disabled (no counter/context window).
+func (a *Agent) checkToolResult(ctx context.Context, toolName string, result string) string {
+	counter := a.getCounter()
+	contextWindow := a.getContextWindow()
+	if counter == nil || contextWindow <= 0 {
+		return result
+	}
+
+	maxTokens := contextWindow / 4
+	if maxTokens < 256 {
+		maxTokens = 256
+	}
+
+	tokens, err := counter.Count(ctx, result)
+	if err != nil {
+		a.logger.Warn().Err(err).Str("tool", toolName).Msg("failed to count tool result tokens")
+		return result
+	}
+
+	if tokens > maxTokens {
+		a.logger.Warn().
+			Str("tool", toolName).
+			Int("tokens", tokens).
+			Int("budget", maxTokens).
+			Msg("tool result exceeded token budget")
+		return fmt.Sprintf("Tool result too large (%d tokens, budget %d). Refine your query or use more specific parameters.", tokens, maxTokens)
+	}
+
+	return result
 }
 
 // toolCallsToParams converts response tool calls to param tool calls.

@@ -72,7 +72,7 @@ func TestFetchLlamaCppProps(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 
-			props, err := FetchLlamaCppProps(context.Background(), srv.URL, nil)
+			props, err := FetchLlamaCppProps(context.Background(), srv.URL, "", nil)
 
 			if tt.wantErr {
 				if err == nil {
@@ -98,7 +98,7 @@ func TestFetchLlamaCppProps(t *testing.T) {
 }
 
 func TestFetchLlamaCppPropsUnreachable(t *testing.T) {
-	_, err := FetchLlamaCppProps(context.Background(), "http://127.0.0.1:1", nil)
+	_, err := FetchLlamaCppProps(context.Background(), "http://127.0.0.1:1", "", nil)
 	if err == nil {
 		t.Error("expected error for unreachable server")
 	}

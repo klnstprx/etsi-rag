@@ -136,7 +136,11 @@ func run(logger zerolog.Logger) error {
 				agent.NewListDocumentsTool(sqliteStore),
 			}
 			systemPrompt := agentSystemPrompt(cfg)
-			agentInstance = agent.NewAgent(agentClient, tools, systemPrompt, cfg.Agent.MaxIterations, sessionStore, logger)
+			agentCounter, err := counterForBackend(cfg, cfg.Agent.Backend, cfg.Agent.Model, logger)
+			if err != nil {
+				logger.Warn().Err(err).Msg("agent token counter not available, tool output guards disabled")
+			}
+			agentInstance = agent.NewAgent(agentClient, tools, systemPrompt, cfg.Agent.MaxIterations, agentCounter, cfg.Agent.ContextWindow, sessionStore, logger)
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent initialized")
 		}
 	} else {
@@ -320,7 +324,11 @@ func rebuildClients(
 				agent.NewListDocumentsTool(st),
 			}
 			systemPrompt := agentSystemPrompt(cfg)
-			a := agent.NewAgent(ac, tools, systemPrompt, cfg.Agent.MaxIterations, sessionStore, logger)
+			agentCounter, counterErr := counterForBackend(cfg, cfg.Agent.Backend, cfg.Agent.Model, logger)
+			if counterErr != nil {
+				logger.Warn().Err(counterErr).Msg("agent token counter rebuild failed, tool output guards disabled")
+			}
+			a := agent.NewAgent(ac, tools, systemPrompt, cfg.Agent.MaxIterations, agentCounter, cfg.Agent.ContextWindow, sessionStore, logger)
 			adminHandler.SetAgent(a)
 			apiHandler.SetAgent(a)
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent rebuilt")
@@ -337,32 +345,37 @@ func probeLlamaCppBackends(cfg *config.Config, logger zerolog.Logger) {
 	type stageRef struct {
 		name    string
 		backend string
+		model   string
 	}
 	stages := []stageRef{
-		{"embedding", cfg.Embedding.Backend},
-		{"agent", cfg.Agent.Backend},
+		{"embedding", cfg.Embedding.Backend, cfg.Embedding.Model},
+		{"agent", cfg.Agent.Backend, cfg.Agent.Model},
 	}
 
-	probed := make(map[string]*backend.LlamaCppProps)
+	type probeResult struct {
+		props *backend.LlamaCppProps
+	}
+	probed := make(map[string]*backend.LlamaCppProps) // key: "backend:model"
 	for _, s := range stages {
 		if s.backend == "" {
 			continue
 		}
-		if _, done := probed[s.backend]; done {
+		key := s.backend + ":" + s.model
+		if _, done := probed[key]; done {
 			continue
 		}
 		b := cfg.GetBackend(s.backend)
 		if b == nil || !b.IsLlamaCpp {
 			continue
 		}
-		props, err := backend.FetchLlamaCppProps(context.Background(), b.BaseURL, nil)
+		props, err := backend.FetchLlamaCppProps(context.Background(), b.BaseURL, s.model, nil)
 		if err != nil {
-			logger.Warn().Err(err).Str("backend", b.Name).
+			logger.Warn().Err(err).Str("backend", b.Name).Str("model", s.model).
 				Msg("could not probe llama.cpp backend, using config values")
 			continue
 		}
-		probed[s.backend] = props
-		logger.Info().Str("backend", b.Name).
+		probed[key] = props
+		logger.Info().Str("backend", b.Name).Str("model", s.model).
 			Int("n_ctx", props.ContextSize).
 			Int("n_embd", props.EmbeddingDim).
 			Str("model_path", props.ModelPath).
@@ -370,7 +383,8 @@ func probeLlamaCppBackends(cfg *config.Config, logger zerolog.Logger) {
 	}
 
 	// Apply embedding-specific results
-	if props, ok := probed[cfg.Embedding.Backend]; ok {
+	embKey := cfg.Embedding.Backend + ":" + cfg.Embedding.Model
+	if props, ok := probed[embKey]; ok {
 		if props.ContextSize > 0 {
 			cfg.Embedding.MaxTokens = props.ContextSize
 		}
@@ -380,7 +394,8 @@ func probeLlamaCppBackends(cfg *config.Config, logger zerolog.Logger) {
 	}
 
 	// Apply agent context window
-	if props, ok := probed[cfg.Agent.Backend]; ok && props.ContextSize > 0 {
+	agentKey := cfg.Agent.Backend + ":" + cfg.Agent.Model
+	if props, ok := probed[agentKey]; ok && props.ContextSize > 0 {
 		cfg.Agent.ContextWindow = props.ContextSize
 		if cfg.Agent.MaxTokens > props.ContextSize {
 			logger.Warn().Int("max_tokens", cfg.Agent.MaxTokens).Int("context_window", props.ContextSize).

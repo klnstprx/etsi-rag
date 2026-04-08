@@ -19,7 +19,8 @@ type LlamaCppProps struct {
 // FetchLlamaCppProps queries a llama.cpp server's /props and /v1/models endpoints
 // to auto-detect context window size, embedding dimension, and model path.
 // baseURL may or may not include /v1 — it will be stripped automatically.
-func FetchLlamaCppProps(ctx context.Context, baseURL string, client *http.Client) (*LlamaCppProps, error) {
+// model is passed as a query parameter to /props for model-router support (may be empty).
+func FetchLlamaCppProps(ctx context.Context, baseURL, model string, client *http.Client) (*LlamaCppProps, error) {
 	baseURL = strings.TrimSuffix(baseURL, "/v1")
 	if client == nil {
 		client = http.DefaultClient
@@ -35,7 +36,7 @@ func FetchLlamaCppProps(ctx context.Context, baseURL string, client *http.Client
 	modelsCh := make(chan result, 1)
 
 	go func() {
-		p, err := fetchProps(ctx, client, baseURL)
+		p, err := fetchProps(ctx, client, baseURL, model)
 		propsCh <- result{props: p, err: err}
 	}()
 	go func() {
@@ -111,8 +112,12 @@ type modelsResponse struct {
 	} `json:"data"`
 }
 
-func fetchProps(ctx context.Context, client *http.Client, baseURL string) (*propsResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/props", nil)
+func fetchProps(ctx context.Context, client *http.Client, baseURL, model string) (*propsResponse, error) {
+	u := baseURL + "/props"
+	if model != "" {
+		u += "?model=" + model
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

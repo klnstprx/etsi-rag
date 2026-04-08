@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -16,6 +17,8 @@ import (
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/session"
+	"etsi-rag/internal/testutil"
+	"etsi-rag/internal/tokencount"
 )
 
 // --- Test helpers ---
@@ -91,6 +94,11 @@ func newSequentialLLM(t *testing.T, responses []map[string]any) *httptest.Server
 
 func newTestAgent(t *testing.T, srv *httptest.Server, tools []Tool, maxIter int) (*Agent, *session.Store) {
 	t.Helper()
+	return newTestAgentWithCounter(t, srv, tools, maxIter, nil, 0)
+}
+
+func newTestAgentWithCounter(t *testing.T, srv *httptest.Server, tools []Tool, maxIter int, counter tokencount.Counter, contextWindow int) (*Agent, *session.Store) {
+	t.Helper()
 	client := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL:     srv.URL,
 		Model:       "test-model",
@@ -99,7 +107,7 @@ func newTestAgent(t *testing.T, srv *httptest.Server, tools []Tool, maxIter int)
 	})
 	ss := session.NewStore(config.SessionConfig{MaxMessages: 50, TTLSeconds: 3600})
 	t.Cleanup(ss.Close)
-	ag := NewAgent(client, tools, "You are a test assistant.", maxIter, ss, zerolog.Nop())
+	ag := NewAgent(client, tools, "You are a test assistant.", maxIter, counter, contextWindow, ss, zerolog.Nop())
 	return ag, ss
 }
 
@@ -292,5 +300,91 @@ func TestChatPassthrough(t *testing.T) {
 	}
 	if result.Response != "Passthrough response" {
 		t.Errorf("response = %q, want %q", result.Response, "Passthrough response")
+	}
+}
+
+// largeTool returns a tool that produces a result with the given number of words.
+func largeTool(wordCount int) Tool {
+	return Tool{
+		Name:        "large",
+		Description: "Returns a large result",
+		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
+		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
+			words := make([]string, wordCount)
+			for i := range words {
+				words[i] = "word"
+			}
+			return strings.Join(words, " "), nil
+		},
+	}
+}
+
+func TestChat_ToolResultTooLarge(t *testing.T) {
+	// contextWindow=1000, budget=250 tokens. Tool returns 300 words (= 300 tokens with MockCounter).
+	// Agent should replace the result with an error message so the LLM can self-correct.
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("large", "call-1", `{}`),
+		chatResp("I see the result was too large"),
+	})
+	defer srv.Close()
+
+	counter := &testutil.MockCounter{}
+	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(300)}, 5, counter, 1000)
+	sessionID := ss.Create()
+
+	result, err := ag.Chat(context.Background(), sessionID, "get big data")
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if result.Response != "I see the result was too large" {
+		t.Errorf("response = %q, want self-correction response", result.Response)
+	}
+
+	// Verify the tool result in session is the error feedback, not the 300-word blob.
+	sess := ss.Get(sessionID)
+	msgs := sess.GetMessages()
+	for _, msg := range msgs {
+		if msg.OfTool != nil {
+			content := msg.OfTool.Content.OfString.Value
+			if len(content) > 500 {
+				t.Errorf("tool result in session should be error feedback, got %d chars", len(content))
+			}
+			if !strings.Contains(content, "too large") {
+				t.Errorf("tool result should contain 'too large' feedback, got %q", content)
+			}
+		}
+	}
+}
+
+func TestChat_ToolResultWithinBudget(t *testing.T) {
+	// contextWindow=1000, budget=250 tokens. Tool returns 100 words — within budget.
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("large", "call-1", `{}`),
+		chatResp("Got the data"),
+	})
+	defer srv.Close()
+
+	counter := &testutil.MockCounter{}
+	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(100)}, 5, counter, 1000)
+	sessionID := ss.Create()
+
+	result, err := ag.Chat(context.Background(), sessionID, "get data")
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if result.Response != "Got the data" {
+		t.Errorf("response = %q, want %q", result.Response, "Got the data")
+	}
+
+	// Verify the tool result in session is the actual content, not truncated.
+	sess := ss.Get(sessionID)
+	msgs := sess.GetMessages()
+	for _, msg := range msgs {
+		if msg.OfTool != nil {
+			content := msg.OfTool.Content.OfString.Value
+			if strings.Contains(content, "too large") {
+				t.Error("tool result should NOT be rejected — it's within budget")
+			}
+		}
 	}
 }
