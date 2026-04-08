@@ -107,15 +107,20 @@ templ FormSelect(name, label, value string, options []string) {
 	</div>
 }
 
-// FormModelSelect renders a model <select> that loads options from a backend via HTMX.
-// backendFieldID is the CSS id of the backend <select> that triggers reloading.
-// section is used to namespace the element ids.
+// FormModelSelect renders a model <select> that fetches available models from the
+// selected backend when clicked. section namespaces the element ids so multiple
+// config sections (embedding, agent) can coexist on the same page.
 templ FormModelSelect(name, label, value, section string, backendNames []string) {
 	<div>
 		<label class="block text-sm font-medium text-gray-700">{ label }</label>
 		<select
 			id={ fmt.Sprintf("%s-model", section) }
 			name={ name }
+			hx-get="/admin/models"
+			hx-trigger="focus"
+			hx-target={ fmt.Sprintf("#%s-model", section) }
+			hx-swap="innerHTML"
+			hx-include={ fmt.Sprintf("#%s-backend, #%s-model-current", section, section) }
 			class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
 		>
 			if value != "" {
@@ -124,9 +129,7 @@ templ FormModelSelect(name, label, value, section string, backendNames []string)
 				<option value="">Select backend first...</option>
 			}
 		</select>
-		if len(backendNames) > 0 {
-			<input type="hidden" id={ fmt.Sprintf("%s-model-current", section) } name="current" value={ value }/>
-		}
+		<input type="hidden" id={ fmt.Sprintf("%s-model-current", section) } name="current" value={ value }/>
 	</div>
 }
 
