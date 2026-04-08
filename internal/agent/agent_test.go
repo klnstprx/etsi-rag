@@ -13,6 +13,8 @@ import (
 	"github.com/openai/openai-go"
 	"github.com/rs/zerolog"
 
+	"time"
+
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
@@ -165,7 +167,7 @@ func TestChat_SimpleResponse(t *testing.T) {
 	ag, ss := newTestAgent(t, srv, nil, 5)
 	sessionID := ss.Create()
 
-	result, err := ag.Chat(context.Background(), sessionID, "Hi")
+	result, err := ag.Chat(context.Background(), sessionID, "Hi", nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -200,7 +202,7 @@ func TestChat_WithToolCall(t *testing.T) {
 	ag, ss := newTestAgent(t, srv, []Tool{sourceTool()}, 5)
 	sessionID := ss.Create()
 
-	result, err := ag.Chat(context.Background(), sessionID, "Search for test")
+	result, err := ag.Chat(context.Background(), sessionID, "Search for test", nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestChat_MaxIterationsExceeded(t *testing.T) {
 	ag, ss := newTestAgent(t, srv, []Tool{echoTool()}, 3)
 	sessionID := ss.Create()
 
-	_, err := ag.Chat(context.Background(), sessionID, "loop forever")
+	_, err := ag.Chat(context.Background(), sessionID, "loop forever", nil)
 	if err == nil {
 		t.Fatal("expected error for max iterations exceeded")
 	}
@@ -257,7 +259,7 @@ func TestChat_ToolError(t *testing.T) {
 	ag, ss := newTestAgent(t, srv, []Tool{errorTool()}, 5)
 	sessionID := ss.Create()
 
-	result, err := ag.Chat(context.Background(), sessionID, "try the broken tool")
+	result, err := ag.Chat(context.Background(), sessionID, "try the broken tool", nil)
 	if err != nil {
 		t.Fatalf("Chat should not fail on tool error: %v", err)
 	}
@@ -272,7 +274,7 @@ func TestChat_SessionNotFound(t *testing.T) {
 
 	ag, _ := newTestAgent(t, srv, nil, 5)
 
-	_, err := ag.Chat(context.Background(), "nonexistent-session", "hello")
+	_, err := ag.Chat(context.Background(), "nonexistent-session", "hello", nil)
 	if err == nil {
 		t.Fatal("expected error for nonexistent session")
 	}
@@ -294,7 +296,7 @@ func TestChatPassthrough(t *testing.T) {
 		}},
 	}
 
-	result, err := ag.ChatPassthrough(context.Background(), messages)
+	result, err := ag.ChatPassthrough(context.Background(), messages, nil)
 	if err != nil {
 		t.Fatalf("ChatPassthrough: %v", err)
 	}
@@ -332,7 +334,7 @@ func TestChat_ToolResultTooLarge(t *testing.T) {
 	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(300)}, 5, counter, 1000)
 	sessionID := ss.Create()
 
-	result, err := ag.Chat(context.Background(), sessionID, "get big data")
+	result, err := ag.Chat(context.Background(), sessionID, "get big data", nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -356,6 +358,48 @@ func TestChat_ToolResultTooLarge(t *testing.T) {
 	}
 }
 
+// multiToolCallResp builds a chat completion JSON with multiple tool calls.
+func multiToolCallResp(calls []struct{ name, id, args string }) map[string]any {
+	toolCalls := make([]map[string]any, len(calls))
+	for i, c := range calls {
+		toolCalls[i] = map[string]any{
+			"id":   c.id,
+			"type": "function",
+			"function": map[string]any{
+				"name":      c.name,
+				"arguments": c.args,
+			},
+		}
+	}
+	return map[string]any{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion",
+		"created": 1234567890,
+		"model":   "test-model",
+		"choices": []map[string]any{
+			{
+				"index":         0,
+				"finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role":       "assistant",
+					"content":    "",
+					"tool_calls": toolCalls,
+				},
+			},
+		},
+		"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+}
+
+// collectEvents drains a ToolEvent channel into a slice.
+func collectEvents(ch <-chan ToolEvent) []ToolEvent {
+	var events []ToolEvent
+	for evt := range ch {
+		events = append(events, evt)
+	}
+	return events
+}
+
 func TestChat_ToolResultWithinBudget(t *testing.T) {
 	// contextWindow=1000, budget=250 tokens. Tool returns 100 words — within budget.
 	srv := newSequentialLLM(t, []map[string]any{
@@ -368,7 +412,7 @@ func TestChat_ToolResultWithinBudget(t *testing.T) {
 	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(100)}, 5, counter, 1000)
 	sessionID := ss.Create()
 
-	result, err := ag.Chat(context.Background(), sessionID, "get data")
+	result, err := ag.Chat(context.Background(), sessionID, "get data", nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -386,5 +430,269 @@ func TestChat_ToolResultWithinBudget(t *testing.T) {
 				t.Error("tool result should NOT be rejected — it's within budget")
 			}
 		}
+	}
+}
+
+// --- Tool Event Tests ---
+
+func TestChat_ToolEvents_Emitted(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("echo", "call-1", `{"msg":"hello"}`),
+		chatResp("Done"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{echoTool()}, 5)
+	sessionID := ss.Create()
+
+	events := make(chan ToolEvent, 16)
+	result, err := ag.Chat(context.Background(), sessionID, "test", events)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if result.Response != "Done" {
+		t.Errorf("response = %q, want %q", result.Response, "Done")
+	}
+
+	close(events)
+	evts := collectEvents(events)
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+
+	// Verify start event
+	start := evts[0]
+	if start.Type != "start" {
+		t.Errorf("event[0].Type = %q, want %q", start.Type, "start")
+	}
+	if start.CallID != "call-1" {
+		t.Errorf("event[0].CallID = %q, want %q", start.CallID, "call-1")
+	}
+	if start.Name != "echo" {
+		t.Errorf("event[0].Name = %q, want %q", start.Name, "echo")
+	}
+	if start.Args != `{"msg":"hello"}` {
+		t.Errorf("event[0].Args = %q, want %q", start.Args, `{"msg":"hello"}`)
+	}
+
+	// Verify done event
+	done := evts[1]
+	if done.Type != "done" {
+		t.Errorf("event[1].Type = %q, want %q", done.Type, "done")
+	}
+	if done.CallID != "call-1" {
+		t.Errorf("event[1].CallID = %q, want %q", done.CallID, "call-1")
+	}
+	if done.Name != "echo" {
+		t.Errorf("event[1].Name = %q, want %q", done.Name, "echo")
+	}
+	if done.Duration <= 0 {
+		t.Error("event[1].Duration should be > 0")
+	}
+	if done.Error {
+		t.Error("event[1].Error should be false")
+	}
+	if !strings.Contains(done.Result, "echo:") {
+		t.Errorf("event[1].Result = %q, should contain 'echo:'", done.Result)
+	}
+}
+
+func TestChat_ToolEvents_NilChannel(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("echo", "call-1", `{}`),
+		chatResp("Done"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{echoTool()}, 5)
+	sessionID := ss.Create()
+
+	// nil events channel should not panic
+	result, err := ag.Chat(context.Background(), sessionID, "test", nil)
+	if err != nil {
+		t.Fatalf("Chat with nil events: %v", err)
+	}
+	if result.Response != "Done" {
+		t.Errorf("response = %q, want %q", result.Response, "Done")
+	}
+}
+
+func TestChat_ToolEvents_MultipleTools(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		multiToolCallResp([]struct{ name, id, args string }{
+			{"echo", "call-1", `{"a":"1"}`},
+			{"echo", "call-2", `{"b":"2"}`},
+		}),
+		chatResp("Both done"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{echoTool()}, 5)
+	sessionID := ss.Create()
+
+	events := make(chan ToolEvent, 16)
+	result, err := ag.Chat(context.Background(), sessionID, "test", events)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if result.Response != "Both done" {
+		t.Errorf("response = %q, want %q", result.Response, "Both done")
+	}
+
+	close(events)
+	evts := collectEvents(events)
+	if len(evts) != 4 {
+		t.Fatalf("got %d events, want 4 (start/done for each tool)", len(evts))
+	}
+
+	// Verify order: start-1, done-1, start-2, done-2
+	expected := []struct {
+		typ    string
+		callID string
+	}{
+		{"start", "call-1"},
+		{"done", "call-1"},
+		{"start", "call-2"},
+		{"done", "call-2"},
+	}
+	for i, want := range expected {
+		if evts[i].Type != want.typ || evts[i].CallID != want.callID {
+			t.Errorf("event[%d] = {%s, %s}, want {%s, %s}",
+				i, evts[i].Type, evts[i].CallID, want.typ, want.callID)
+		}
+	}
+}
+
+func TestChat_ToolEvents_Error(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("fail", "call-1", `{}`),
+		chatResp("Recovered"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{errorTool()}, 5)
+	sessionID := ss.Create()
+
+	events := make(chan ToolEvent, 16)
+	_, err := ag.Chat(context.Background(), sessionID, "test", events)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	close(events)
+	evts := collectEvents(events)
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+
+	done := evts[1]
+	if !done.Error {
+		t.Error("done event should have Error=true for failed tool")
+	}
+	if !strings.Contains(done.Result, "Error:") {
+		t.Errorf("done.Result = %q, should contain 'Error:'", done.Result)
+	}
+}
+
+func TestChat_ToolEvents_NoToolCalls(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		chatResp("Direct response"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, nil, 5)
+	sessionID := ss.Create()
+
+	events := make(chan ToolEvent, 16)
+	result, err := ag.Chat(context.Background(), sessionID, "test", events)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if result.Response != "Direct response" {
+		t.Errorf("response = %q, want %q", result.Response, "Direct response")
+	}
+
+	close(events)
+	evts := collectEvents(events)
+	if len(evts) != 0 {
+		t.Errorf("got %d events, want 0 (no tool calls)", len(evts))
+	}
+}
+
+func TestChatPassthrough_ToolEvents(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("echo", "call-1", `{}`),
+		chatResp("Passthrough done"),
+	})
+	defer srv.Close()
+
+	ag, _ := newTestAgent(t, srv, []Tool{echoTool()}, 5)
+
+	messages := []openai.ChatCompletionMessageParamUnion{
+		{OfUser: &openai.ChatCompletionUserMessageParam{
+			Content: openai.ChatCompletionUserMessageParamContentUnion{
+				OfString: openai.String("test"),
+			},
+		}},
+	}
+
+	events := make(chan ToolEvent, 16)
+	result, err := ag.ChatPassthrough(context.Background(), messages, events)
+	if err != nil {
+		t.Fatalf("ChatPassthrough: %v", err)
+	}
+	if result.Response != "Passthrough done" {
+		t.Errorf("response = %q, want %q", result.Response, "Passthrough done")
+	}
+
+	close(events)
+	evts := collectEvents(events)
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Type != "start" || evts[1].Type != "done" {
+		t.Error("expected start+done events")
+	}
+}
+
+func TestChat_ToolEvents_Duration(t *testing.T) {
+	// Use a tool that sleeps briefly to verify duration tracking.
+	sleepTool := Tool{
+		Name:        "slow",
+		Description: "Sleeps briefly",
+		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
+		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
+			time.Sleep(50 * time.Millisecond)
+			return "done", nil
+		},
+	}
+
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("slow", "call-1", `{}`),
+		chatResp("OK"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{sleepTool}, 5)
+	sessionID := ss.Create()
+
+	events := make(chan ToolEvent, 16)
+	_, err := ag.Chat(context.Background(), sessionID, "test", events)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	close(events)
+	evts := collectEvents(events)
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+
+	done := evts[1]
+	if done.Duration < 50*time.Millisecond {
+		t.Errorf("duration = %v, want >= 50ms", done.Duration)
+	}
+	if done.Duration > 5*time.Second {
+		t.Errorf("duration = %v, unreasonably long", done.Duration)
 	}
 }

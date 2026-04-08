@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/openai/openai-go"
 	"github.com/rs/zerolog"
@@ -133,7 +134,8 @@ func (a *Agent) getMaxIter() int {
 // Chat handles a session-managed conversation turn.
 // It loads session history, runs the tool-calling loop, persists all messages,
 // and returns the response with collected sources.
-func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string) (*ChatResult, error) {
+// events may be nil; if non-nil, ToolEvent values are sent during tool execution.
+func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, events chan<- ToolEvent) (*ChatResult, error) {
 	client := a.getClient()
 	if client == nil {
 		return nil, fmt.Errorf("agent not configured")
@@ -174,7 +176,7 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string) 
 	var sources []domain.SourceReference
 
 	// Run tool loop
-	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources)
+	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources, events)
 	if err != nil {
 		return nil, err
 	}
@@ -189,10 +191,11 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string) 
 }
 
 // ChatStream handles a session-managed conversation turn with streaming final response.
-func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage string) (<-chan string, *ChatResult, error) {
+// events may be nil; if non-nil, ToolEvent values are sent during tool execution.
+func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage string, events chan<- ToolEvent) (<-chan string, *ChatResult, error) {
 	// For now, run the full turn, then stream the result as a single chunk.
 	// True streaming of the final LLM call can be added later.
-	result, err := a.Chat(ctx, sessionID, userMessage)
+	result, err := a.Chat(ctx, sessionID, userMessage, events)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -210,7 +213,8 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 
 // ChatPassthrough handles a stateless conversation (client provides full history).
 // No session management — the client is responsible for message history.
-func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (*ChatResult, error) {
+// events may be nil; if non-nil, ToolEvent values are sent during tool execution.
+func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, events chan<- ToolEvent) (*ChatResult, error) {
 	client := a.getClient()
 	if client == nil {
 		return nil, fmt.Errorf("agent not configured")
@@ -233,7 +237,7 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 
 	var sources []domain.SourceReference
 
-	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &sources)
+	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &sources, events)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +247,7 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 
 // runToolLoop executes the tool-calling loop and returns the final text response
 // plus all intermediate messages (assistant+tool messages, excluding the initial messages).
+// events may be nil; if non-nil, ToolEvent values are sent for each tool execution.
 func (a *Agent) runToolLoop(
 	ctx context.Context,
 	client *llm.ChatClient,
@@ -250,6 +255,7 @@ func (a *Agent) runToolLoop(
 	tools []Tool,
 	maxIter int,
 	sources *[]domain.SourceReference,
+	events chan<- ToolEvent,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
 	toolParams := make([]openai.ChatCompletionToolParam, len(tools))
 	for i, t := range tools {
@@ -294,7 +300,20 @@ func (a *Agent) runToolLoop(
 
 		// Execute each tool call
 		for _, tc := range choice.Message.ToolCalls {
+			if events != nil {
+				events <- ToolEvent{
+					Type:   "start",
+					CallID: tc.ID,
+					Name:   tc.Function.Name,
+					Args:   tc.Function.Arguments,
+				}
+			}
+
+			execStart := time.Now()
 			result, err := a.executeTool(ctx, tc.Function.Name, tc.Function.Arguments, sources)
+			execDuration := time.Since(execStart)
+			toolErr := err != nil
+
 			if err != nil {
 				a.logger.Warn().Err(err).Str("tool", tc.Function.Name).Msg("tool execution failed")
 				result = fmt.Sprintf("Error: %s", err.Error())
@@ -302,10 +321,22 @@ func (a *Agent) runToolLoop(
 
 			result = a.checkToolResult(ctx, tc.Function.Name, result)
 
+			if events != nil {
+				events <- ToolEvent{
+					Type:     "done",
+					CallID:   tc.ID,
+					Name:     tc.Function.Name,
+					Result:   result,
+					Duration: execDuration,
+					Error:    toolErr,
+				}
+			}
+
 			a.logger.Debug().
 				Str("tool", tc.Function.Name).
 				Str("args", tc.Function.Arguments).
 				Int("result_len", len(result)).
+				Dur("duration", execDuration).
 				Msg("tool executed")
 
 			toolMsg := openai.ChatCompletionMessageParamUnion{

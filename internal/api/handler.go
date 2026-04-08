@@ -156,7 +156,7 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 	sessionID, _ := h.sessionStore.GetOrCreate(sessionIDPtr)
 
 	// Run agent
-	result, err := ag.Chat(r.Context(), sessionID, userMsg)
+	result, err := ag.Chat(r.Context(), sessionID, userMsg, nil)
 	if err != nil {
 		ErrInternal(err).WriteJSON(w)
 		return
@@ -199,7 +199,7 @@ func (h *Handler) chatPassthrough(w http.ResponseWriter, r *http.Request, ag *ag
 		return
 	}
 
-	result, err := ag.ChatPassthrough(r.Context(), req.Messages)
+	result, err := ag.ChatPassthrough(r.Context(), req.Messages, nil)
 	if err != nil {
 		ErrInternal(err).WriteJSON(w)
 		return

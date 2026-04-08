@@ -1,10 +1,13 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -14,9 +17,10 @@ import (
 )
 
 // chatStream holds state for an active admin chat session.
-// The agent goroutine writes tokens; ChatStream reads them via SSE.
+// The agent goroutine writes tokens and tool events; ChatStream reads them via SSE.
 type chatStream struct {
 	tokens chan string
+	events chan agent.ToolEvent
 	cancel context.CancelFunc
 }
 
@@ -54,19 +58,21 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 	// Timeout is a safety net for orphaned goroutines (SSE never connects).
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	tokenChan := make(chan string, 64)
-	stream := &chatStream{tokens: tokenChan, cancel: cancel}
+	eventChan := make(chan agent.ToolEvent, 16)
+	stream := &chatStream{tokens: tokenChan, events: eventChan, cancel: cancel}
 
 	h.chatMu.Lock()
 	h.chatStreams[sessionID] = stream
 	h.chatMu.Unlock()
 
 	// Run agent in background if available.
-	// The goroutine only closes the channel when done — ChatStream handles
+	// The goroutine only closes the channels when done — ChatStream handles
 	// map cleanup, so the stream entry survives until the SSE client connects.
 	if h.agent != nil {
 		go func() {
 			defer close(tokenChan)
-			result, err := h.agent.Chat(ctx, sessionID, message)
+			defer close(eventChan)
+			result, err := h.agent.Chat(ctx, sessionID, message, eventChan)
 			if err != nil {
 				tokenChan <- fmt.Sprintf("[Error: %s]", err.Error())
 				return
@@ -76,6 +82,7 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 	} else {
 		go func() {
 			defer close(tokenChan)
+			defer close(eventChan)
 			tokenChan <- "Agent not configured. Please configure the [agent] section in config."
 		}()
 	}
@@ -117,19 +124,32 @@ func (h *Handler) ChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	events := stream.events
+	tokens := stream.tokens
+
 	for {
 		select {
-		case token, open := <-stream.tokens:
+		case evt, open := <-events:
 			if !open {
-				// Channel closed — agent finished.
-				fmt.Fprintf(w, "event: done\ndata: \n\n")
-				flusher.Flush()
-				return
+				events = nil
+			} else {
+				renderToolEvent(w, flusher, evt)
 			}
-			fmt.Fprintf(w, "event: token\ndata: %s\n\n", html.EscapeString(token))
-			flusher.Flush()
+		case token, open := <-tokens:
+			if !open {
+				tokens = nil
+			} else {
+				wrapped := fmt.Sprintf(`<div class="rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap">%s</div>`, html.EscapeString(token))
+				writeSSE(w, "token", wrapped)
+				flusher.Flush()
+			}
 		case <-r.Context().Done():
-			// SSE client disconnected — defer cancels the agent.
+			return
+		}
+
+		if events == nil && tokens == nil {
+			writeSSE(w, "done", "")
+			flusher.Flush()
 			return
 		}
 	}
@@ -142,4 +162,27 @@ func (h *Handler) ChatReset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	templates.ChatContent(sessionID).Render(r.Context(), w)
 	templates.Toast("Chat reset", "success").Render(r.Context(), w)
+}
+
+// writeSSE writes a properly formatted SSE event with multi-line data support.
+func writeSSE(w io.Writer, event, data string) {
+	fmt.Fprintf(w, "event: %s\n", event)
+	for _, line := range strings.Split(data, "\n") {
+		fmt.Fprintf(w, "data: %s\n", line)
+	}
+	fmt.Fprint(w, "\n")
+}
+
+// renderToolEvent renders a tool event as an SSE event with HTML data.
+func renderToolEvent(w http.ResponseWriter, flusher http.Flusher, evt agent.ToolEvent) {
+	var buf bytes.Buffer
+	switch evt.Type {
+	case "start":
+		templates.ToolCardLoading(evt.CallID, evt.Name).Render(context.Background(), &buf)
+		writeSSE(w, "tool_start", buf.String())
+	case "done":
+		templates.ToolCardDone(evt.CallID, evt.Name, evt.Duration, evt.Result, evt.Error).Render(context.Background(), &buf)
+		writeSSE(w, "tool_done", buf.String())
+	}
+	flusher.Flush()
 }

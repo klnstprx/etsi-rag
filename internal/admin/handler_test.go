@@ -13,6 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
+	"bytes"
+
+	"etsi-rag/internal/agent"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/session"
@@ -577,7 +580,7 @@ func TestChatStream_AfterFastSend(t *testing.T) {
 		t.Errorf("expected SSE done event, got %q", body)
 	}
 	if !strings.Contains(body, "Agent not configured") {
-		t.Errorf("expected placeholder message, got %q", body)
+		t.Errorf("expected placeholder message, got %q", body[:min(len(body), 500)])
 	}
 }
 
@@ -600,6 +603,122 @@ func TestChatReset(t *testing.T) {
 }
 
 // --- Crawler guard ---
+
+// --- writeSSE ---
+
+func TestWriteSSE_SingleLine(t *testing.T) {
+	var buf bytes.Buffer
+	writeSSE(&buf, "token", "hello")
+
+	want := "event: token\ndata: hello\n\n"
+	if got := buf.String(); got != want {
+		t.Errorf("writeSSE =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestWriteSSE_MultiLine(t *testing.T) {
+	var buf bytes.Buffer
+	writeSSE(&buf, "tool_start", "<div>\n<span>test</span>\n</div>")
+
+	want := "event: tool_start\ndata: <div>\ndata: <span>test</span>\ndata: </div>\n\n"
+	if got := buf.String(); got != want {
+		t.Errorf("writeSSE =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// --- ChatStream with tool events ---
+
+func TestChatStream_ToolEvents(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	sessionID := "test-session"
+
+	eventChan := make(chan agent.ToolEvent, 16)
+	tokenChan := make(chan string, 64)
+	stream := &chatStream{
+		tokens: tokenChan,
+		events: eventChan,
+		cancel: func() {},
+	}
+
+	h.chatMu.Lock()
+	h.chatStreams[sessionID] = stream
+	h.chatMu.Unlock()
+
+	// Send tool events + token + close channels (simulates agent goroutine)
+	go func() {
+		eventChan <- agent.ToolEvent{Type: "start", CallID: "call-1", Name: "rag_search", Args: `{"query":"test"}`}
+		eventChan <- agent.ToolEvent{Type: "done", CallID: "call-1", Name: "rag_search", Result: "found 3 results", Duration: 150 * time.Millisecond}
+		close(eventChan)
+		tokenChan <- "Here are the results"
+		close(tokenChan)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/"+sessionID, nil)
+	req = withChiParam(req, "sessionID", sessionID)
+	w := httptest.NewRecorder()
+
+	h.ChatStream(w, req)
+
+	body := w.Body.String()
+
+	if !strings.Contains(body, "event: tool_start") {
+		t.Error("expected tool_start SSE event")
+	}
+	if !strings.Contains(body, "event: tool_done") {
+		t.Error("expected tool_done SSE event")
+	}
+	if !strings.Contains(body, "rag_search") {
+		t.Error("expected tool name in SSE data")
+	}
+	if !strings.Contains(body, "event: token") {
+		t.Error("expected token SSE event")
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Error("expected done SSE event")
+	}
+}
+
+func TestChatStream_NoToolEvents(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	sessionID := "test-no-tools"
+
+	eventChan := make(chan agent.ToolEvent, 16)
+	tokenChan := make(chan string, 64)
+	stream := &chatStream{
+		tokens: tokenChan,
+		events: eventChan,
+		cancel: func() {},
+	}
+
+	h.chatMu.Lock()
+	h.chatStreams[sessionID] = stream
+	h.chatMu.Unlock()
+
+	// No tool events, just token
+	go func() {
+		close(eventChan)
+		tokenChan <- "Direct response"
+		close(tokenChan)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/"+sessionID, nil)
+	req = withChiParam(req, "sessionID", sessionID)
+	w := httptest.NewRecorder()
+
+	h.ChatStream(w, req)
+
+	body := w.Body.String()
+
+	if strings.Contains(body, "event: tool_start") {
+		t.Error("should not contain tool_start when no tools used")
+	}
+	if !strings.Contains(body, "event: token") {
+		t.Error("expected token SSE event")
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Error("expected done SSE event")
+	}
+}
 
 func TestCrawlerGuard_NilCrawler(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
