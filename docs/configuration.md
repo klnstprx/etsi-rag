@@ -10,7 +10,7 @@ Centralized configuration via TOML files and environment variables.
 config/config.default.toml  ->  config/{RUN_MODE}.toml  ->  APP__* env vars
 ```
 
-Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` loads `config/test.toml`). Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__CHAT__TEMPERATURE=0.5`).
+Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` loads `config/test.toml`). Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__AGENT__TEMPERATURE=0.5`).
 
 ## TOML Reference
 
@@ -27,21 +27,22 @@ backend = 'local-llama'       # references backend by name
 model = 'embedding-model'
 dimension = 4096
 max_tokens = 512              # embedding context window
-
-[chat]
-backend = 'local-llama'
-model = 'chat-model'
-max_tokens = 1024
-temperature = 0.7
+batch_size = 2                # texts per embedding API call
 
 [agent]
 backend = 'local-llama'
 model = 'chat-model'
-max_tokens = 1024
+max_tokens = 1024             # output token limit
 temperature = 0.7
+context_window = 0            # total context window (auto-detected for llama.cpp, 0 = unknown)
+max_iterations = 5            # max tool-calling iterations per turn
+system_prompt = ''            # custom system prompt (empty = use prompts/agent.md)
+
+[api]
+passthrough = false           # true = accept client messages directly, no session management
 
 [chunking]
-chunk_size = 256              # in tokens (not characters)
+max_chunk_size = 256          # in tokens (not characters)
 chunk_overlap = 32            # in tokens
 min_chunk_size = 64           # minimum chunk size in tokens
 
@@ -52,7 +53,16 @@ max_depth = 10
 max_pages = 2000
 concurrency = 4
 max_body_size = 10485760      # 10 MB
+min_content_length = 200      # skip pages shorter than this (chars), 0 = disabled
 js_patterns = ['/centers/subject/']
+
+[crawler.pdf]
+heading_patterns = [          # substring patterns for known PDF section headers
+    'DESCRIPCION', 'OBJETIVOS', 'CONTENIDOS', 'METODOLOGIA',
+    'EVALUACION', 'COMPETENCIAS', 'TEMARIO', 'BIBLIOGRAFIA',
+    'ACTIVIDADES FORMATIVAS', 'SISTEMA DE EVALUACION',
+    'RESULTADOS DE APRENDIZAJE',
+]
 
 [object_store]
 endpoint = 'http://localhost:9000'
@@ -64,15 +74,23 @@ region = 'us-east-1'
 
 ## Backend Resolution
 
-`main.go` uses `clientForStage()` to:
+`main.go` uses `embedClientForStage()` and `chatClientForStage()` to:
 1. Look up the backend by name from `[[backends]]` array
-2. Merge stage-specific config (model, max_tokens, temperature)
-3. Build an `llm.Client` with the resolved settings
+2. Merge stage-specific config (model, batch_size for embedding; model, max_tokens, temperature for agent)
+3. Build an `llm.EmbedClient` or `llm.ChatClient` with the resolved settings
 
 `counterForBackend()` creates the appropriate token counter:
 - `is_llama_cpp = true` -> `LlamaCppCounter` (HTTP `/tokenize` endpoint)
 - `is_llama_cpp = false` -> `TiktokenCounter` (tiktoken-go library)
 - Fallback -> `EstimateCounter` (len/4)
+
+## Auto-Detection (llama.cpp)
+
+`probeLlamaCppBackends()` probes each unique llama.cpp backend once at startup and after config changes:
+- **Embedding**: auto-detects `max_tokens` (n_ctx) and `dimension` (n_embd)
+- **Agent**: auto-detects `context_window` (n_ctx)
+- Logs a warning if `max_tokens` exceeds the probed `context_window`
+- Non-llama.cpp backends are skipped; set `context_window` manually if needed
 
 ## Persistence
 

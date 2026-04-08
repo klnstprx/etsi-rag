@@ -17,7 +17,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 |        +-->  api/         (OpenAI-compatible + RAG API)  |
 |        +-->  admin/       (templ + Tailwind + HTMX UI)   |
 |        +-->  agent/       (tool-calling LLM loop)        |
-|        +-->  rag/         (retrieve -> context -> gen)   |
+|        +-->  rag/         (retrieval service)             |
 |        +-->  crawler/     (BFS web crawler, 3-stage)     |
 |        +-->  llm/         (openai-go SDK wrapper)        |
 |        +-->  store/       (SQLite + cosine similarity)   |
@@ -27,7 +27,8 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 |        +-->  tokencount/  (token counting abstraction)   |
 |        +-->  prompts/     (system prompts)               |
 |        +-->  domain/      (core types)                   |
-|        +-->  data/        (data source abstraction)      |
+|        +-->  config/      (TOML + env var config)        |
+|        +-->  backend/     (LLM backend discovery)        |
 +----------------------------------------------------------+
 ```
 
@@ -38,8 +39,8 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `config` | Centralized config types, koanf loading (TOML + env vars), `WriteTo()` for persistence |
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
-| `agent` | Tool-calling LLM loop (max 5 iterations) with rag_search + list_documents tools |
-| `rag` | Pipeline orchestration (retrieve -> build context -> generate); takes separate embedder + chatter |
+| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with rag_search + list_documents tools; single entry point for all conversations |
+| `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
 | `crawler` | BFS web crawler: 3-stage pipeline (crawl -> parse -> embed), go-rod for JS pages, go-readability for content extraction, PDF support |
@@ -47,13 +48,13 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `chunking` | StructureAwareChunker (heading-boundary splitting), RecursiveTokenChunker (fallback), RecursiveCharacterChunker (char-based fallback) |
 | `tokencount` | Token counting: LlamaCppCounter (HTTP /tokenize), TiktokenCounter (tiktoken-go), EstimateCounter (len/4 fallback) |
 | `session` | Conversation state with TTL expiration |
-| `domain` | Core types: Document, Chunk, Backend, CrawlSource, Language, Category |
-| `data` | Data source abstraction + mock |
+| `domain` | Core types: Document, Chunk, SourceReference, Language, Category |
+| `backend` | LLM backend discovery (llama.cpp props, model listing) |
 | `prompts` | System prompt templates |
 
 ## Data Flow
 
-### RAG Pipeline
+### RAG Retrieval
 
 ```
 User query
@@ -62,13 +63,10 @@ User query
 [Embed query] --> [Vector search (cosine similarity)] --> [Top-K chunks]
     |
     v
-[Build context] --> [System prompt + retrieved chunks + conversation history]
-    |
-    v
-[Chat completion] --> [Streamed response to user]
+[Build context] --> [Formatted chunk text with token budget]
 ```
 
-The pipeline takes separate `embedder` and `chatter` LLM clients, allowing different backends/models for embedding vs. chat.
+The pipeline is a pure retrieval service — it takes an `embedder` only. Chat generation is handled by the agent, which calls `rag_search` as a tool.
 
 ### Crawl Pipeline
 
@@ -86,26 +84,32 @@ Three-stage concurrent pipeline using Go channels. Each source runs independent 
 
 ### Agent Loop
 
-```
-User message --> [Chat with tools] --> [Tool call?]
-                      ^                     |
-                      |                     v
-                      +---- [Execute tool (rag_search / list_documents)]
+The agent is the single entry point for all conversations. It owns the system prompt, manages sessions, and collects sources from `rag_search` tool calls.
 
-                (max 5 iterations)
 ```
+User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
+                                                  ^                     |
+                                                  |                     v
+                                                  +---- [Execute tool (rag_search / list_documents)]
+                                                        [Collect sources from rag_search]
+
+                                           (max_iterations configurable, default 5)
+```
+
+Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
+Hot-swap methods: `SetClient`, `SetSystem`, `SetTools`, `SetMaxIterations`.
 
 ## Key Design Patterns
 
-- **Backends as named endpoints**: `BackendConfig` has `IsLlamaCpp` flag; stage config (`[embedding]`, `[chat]`, `[agent]`) references backend by name + specifies model
-- **Split LLM dependencies**: Pipeline takes `embedder` + `chatter`; API handler takes `embeddingClient` + `chatClient`
-- **`main.go` as compositor**: `clientForStage()` resolves backend by name, merges with stage config, builds `llm.Client`. `counterForBackend()` creates the appropriate token counter
+- **Backends as named endpoints**: `BackendConfig` has `IsLlamaCpp` flag; stage config (`[embedding]`, `[agent]`) references backend by name + specifies model
+- **Agent as single chat entry point**: API handler delegates all chat to the agent; RAG pipeline is a pure retrieval service with no chat client
+- **`main.go` as compositor**: `embedClientForStage()` / `chatClientForStage()` resolve backend by name, merge with stage config, build `llm.EmbedClient` or `llm.ChatClient`. `counterForBackend()` creates the appropriate token counter
 - **Markdown throughout**: Parser emits markdown, stored as markdown, embedded as markdown, served to LLM as markdown
 - **Content archival**: Raw content stored in RustFS, enabling re-processing (new chunk size, new embedding model) without re-crawling
 
 ## Routes
 
-- **API**: `/v1/chat/completions`, `/v1/embeddings`, `/v1/rag/*`
+- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `/v1/rag/documents`
 - **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents, agent chat)
 - Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX + SSE
 

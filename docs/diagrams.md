@@ -195,7 +195,8 @@ flowchart TD
     Stage --> Resolve["GetBackend(name)"]
     Resolve --> Backend["BackendConfig"]
 
-    Backend --> Client["llm.Client"]
+    Backend --> EmbedClient["llm.EmbedClient"]
+    Backend --> ChatClient["llm.ChatClient"]
     Backend --> Counter{"IsLlamaCpp?"}
     Counter -->|"Yes"| LlamaCounter["LlamaCppCounter (HTTP /tokenize)"]
     Counter -->|"No"| Tiktoken["TiktokenCounter (tiktoken-go)"]
@@ -215,7 +216,6 @@ flowchart TB
     V1 --> Embeddings["POST /v1/embeddings"]
     V1 --> RAGRoutes["/v1/rag/*"]
 
-    RAGRoutes --> RAGChat["POST /v1/rag/chat"]
     RAGRoutes --> Ingest["POST /v1/rag/ingest"]
     RAGRoutes --> ListDocs["GET /v1/rag/documents"]
     RAGRoutes --> DeleteDoc["DELETE /v1/rag/documents/{id}"]
