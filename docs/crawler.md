@@ -17,6 +17,8 @@ Three-stage concurrent pipeline using Go channels:
 
 Each source runs its own BFS goroutine with independent rate limiting. Sources run concurrently, bounded by `config.Concurrency` (semaphore via `errgroup`).
 
+Stage concurrency is configurable: `parse_workers` (default 4) controls parallel parse goroutines, `embed_workers` (default 1) controls parallel embed goroutines. The embed stage aborts the crawl after `max_embed_fails` (default 3) consecutive failures to prevent wasting resources on a down embedding backend.
+
 ## Fetching
 
 Two fetch modes, selected by URL pattern matching against `js_patterns` config:

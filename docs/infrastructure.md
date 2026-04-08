@@ -49,7 +49,7 @@ Object key schema: `crawl/{html|pdf}/{url_sha256}`
 
 | Tool | Purpose |
 |------|---------|
-| Go 1.23+ | Compiler |
+| Go 1.25+ | Compiler |
 | `templ` | Template compiler (`.templ` -> `_templ.go`) |
 | `tailwindcss` | CSS (standalone CLI, no Node.js) |
 | `golangci-lint` | Linter (optional) |

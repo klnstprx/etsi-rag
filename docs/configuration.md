@@ -15,6 +15,12 @@ Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` lo
 ## TOML Reference
 
 ```toml
+[server]
+host = '127.0.0.1'
+port = 3000
+read_timeout = 15             # seconds
+write_timeout = 120           # seconds
+
 [[backends]]
 name = 'local-llama'
 base_url = 'http://localhost:1337/v1'
@@ -38,6 +44,13 @@ context_window = 0            # total context window (auto-detected for llama.cp
 max_iterations = 5            # max tool-calling iterations per turn
 system_prompt = ''            # custom system prompt (empty = use prompts/agent.md)
 
+[database]
+path = 'data/etsi-rag.db'
+
+[rag]
+top_k = 5                    # number of chunks to retrieve
+max_context_tokens = 2048    # token budget for retrieved context
+
 [api]
 passthrough = false           # true = accept client messages directly, no session management
 
@@ -45,15 +58,23 @@ passthrough = false           # true = accept client messages directly, no sessi
 max_chunk_size = 256          # in tokens (not characters)
 chunk_overlap = 32            # in tokens
 min_chunk_size = 64           # minimum chunk size in tokens
+separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators for RecursiveTokenChunker
+
+[session]
+max_messages = 10             # max messages per session
+ttl_seconds = 3600            # session expiry (1 hour)
 
 [crawler]
 request_delay = '500ms'
 request_timeout = '30s'
 max_depth = 10
-max_pages = 2000
+max_pages = 5000
 concurrency = 4
 max_body_size = 10485760      # 10 MB
 min_content_length = 200      # skip pages shorter than this (chars), 0 = disabled
+embed_workers = 1             # concurrent embed stage workers
+parse_workers = 4             # concurrent parse stage workers
+max_embed_fails = 3           # consecutive embed failures before aborting crawl
 js_patterns = ['/centers/subject/']
 
 [crawler.pdf]
@@ -61,7 +82,8 @@ heading_patterns = [          # substring patterns for known PDF section headers
     'DESCRIPCION', 'OBJETIVOS', 'CONTENIDOS', 'METODOLOGIA',
     'EVALUACION', 'COMPETENCIAS', 'TEMARIO', 'BIBLIOGRAFIA',
     'ACTIVIDADES FORMATIVAS', 'SISTEMA DE EVALUACION',
-    'RESULTADOS DE APRENDIZAJE',
+    'RESULTADOS DE APRENDIZAJE', 'EQUIPO DOCENTE',
+    'RECOMENDACIONES', 'DISTRIBUCION DEL TRABAJO',
 ]
 
 [object_store]

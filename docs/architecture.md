@@ -109,7 +109,8 @@ Hot-swap methods: `SetClient`, `SetSystem`, `SetTools`, `SetMaxIterations`.
 
 ## Routes
 
-- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `/v1/rag/documents`
+- **Health**: `GET /health`, `GET /v1/health`
+- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`
 - **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents, agent chat)
 - Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX + SSE
 
