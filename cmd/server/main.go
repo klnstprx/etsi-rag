@@ -132,7 +132,7 @@ func run(logger zerolog.Logger) error {
 			logger.Warn().Err(err).Msg("agent backend not available, agent disabled")
 		} else {
 			tools := []agent.Tool{
-				agent.NewRAGSearchTool(pipeline),
+				agent.NewSemanticSearchTool(pipeline),
 				agent.NewListDocumentsTool(sqliteStore),
 			}
 			systemPrompt := agentSystemPrompt(cfg)
@@ -320,7 +320,7 @@ func rebuildClients(
 			apiHandler.SetAgent(nil)
 		} else {
 			tools := []agent.Tool{
-				agent.NewRAGSearchTool(pipeline),
+				agent.NewSemanticSearchTool(pipeline),
 				agent.NewListDocumentsTool(st),
 			}
 			systemPrompt := agentSystemPrompt(cfg)

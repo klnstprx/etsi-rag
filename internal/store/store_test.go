@@ -240,6 +240,281 @@ func TestVectorSearch(t *testing.T) {
 	}
 }
 
+func TestSearchSimilar_TopKLimit(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Create one document with 5 chunks, each pointing in a slightly different direction.
+	doc := &domain.Document{
+		ID: "doc-1", Title: "Multi-chunk", Content: "content",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	chunks := []domain.Chunk{
+		{Content: "chunk-0", ChunkIndex: 0},
+		{Content: "chunk-1", ChunkIndex: 1},
+		{Content: "chunk-2", ChunkIndex: 2},
+		{Content: "chunk-3", ChunkIndex: 3},
+		{Content: "chunk-4", ChunkIndex: 4},
+	}
+	embeddings := [][]float32{
+		{1.0, 0.0, 0.0, 0.0},
+		{0.9, 0.1, 0.0, 0.0},
+		{0.5, 0.5, 0.0, 0.0},
+		{0.1, 0.9, 0.0, 0.0},
+		{0.0, 1.0, 0.0, 0.0},
+	}
+	if err := s.CreateChunks(ctx, "doc-1", chunks, embeddings); err != nil {
+		t.Fatal(err)
+	}
+
+	query := []float32{1.0, 0.0, 0.0, 0.0}
+
+	t.Run("topK less than total", func(t *testing.T) {
+		results, err := s.SearchSimilar(ctx, query, 3, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 3 {
+			t.Fatalf("got %d results, want 3", len(results))
+		}
+	})
+
+	t.Run("topK greater than total", func(t *testing.T) {
+		results, err := s.SearchSimilar(ctx, query, 100, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 5 {
+			t.Fatalf("got %d results, want 5 (all available)", len(results))
+		}
+	})
+
+	t.Run("topK zero returns empty", func(t *testing.T) {
+		results, err := s.SearchSimilar(ctx, query, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 0 {
+			t.Fatalf("got %d results, want 0", len(results))
+		}
+	})
+}
+
+func TestSearchSimilar_ScoreOrdering(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Three documents with orthogonal embeddings.
+	docs := []struct {
+		id, title string
+		embedding []float32
+	}{
+		{"doc-a", "Alpha", []float32{1.0, 0.0, 0.0, 0.0}},
+		{"doc-b", "Bravo", []float32{0.0, 1.0, 0.0, 0.0}},
+		{"doc-c", "Charlie", []float32{0.0, 0.0, 1.0, 0.0}},
+	}
+	for _, d := range docs {
+		if err := s.CreateDocument(ctx, &domain.Document{
+			ID: d.id, Title: d.title, Content: "c",
+			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateChunks(ctx, d.id,
+			[]domain.Chunk{{Content: d.title + " chunk", ChunkIndex: 0}},
+			[][]float32{d.embedding},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Query that is mostly Alpha, a bit Bravo, no Charlie.
+	query := []float32{0.8, 0.2, 0.0, 0.0}
+	results, err := s.SearchSimilar(ctx, query, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3", len(results))
+	}
+
+	// Verify descending score order.
+	for i := 1; i < len(results); i++ {
+		if results[i].Score > results[i-1].Score {
+			t.Errorf("results not sorted: [%d].Score=%f > [%d].Score=%f",
+				i, results[i].Score, i-1, results[i-1].Score)
+		}
+	}
+
+	// Alpha should be first, Bravo second.
+	if results[0].Document.Title != "Alpha" {
+		t.Errorf("first result = %q, want Alpha", results[0].Document.Title)
+	}
+	if results[1].Document.Title != "Bravo" {
+		t.Errorf("second result = %q, want Bravo", results[1].Document.Title)
+	}
+}
+
+func TestSearchSimilar_ChunkMetadata(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	url := "https://example.com/test"
+	doc := &domain.Document{
+		ID: "doc-1", Title: "Test Doc", Content: "full content",
+		URL: &url, Language: domain.LanguageEN, Category: domain.CategoryCourse,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := []domain.Chunk{
+		{Content: "intro text", ChunkIndex: 0, SectionTitle: "Introduction"},
+		{Content: "detail text", ChunkIndex: 1, SectionTitle: "Details"},
+	}
+	embeddings := [][]float32{
+		{1.0, 0.0, 0.0, 0.0},
+		{0.0, 1.0, 0.0, 0.0},
+	}
+	if err := s.CreateChunks(ctx, "doc-1", chunks, embeddings); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query matching the first chunk.
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+
+	r := results[0]
+
+	// Chunk fields
+	if r.Chunk.Content != "intro text" {
+		t.Errorf("chunk content = %q, want %q", r.Chunk.Content, "intro text")
+	}
+	if r.Chunk.ChunkIndex != 0 {
+		t.Errorf("chunk index = %d, want 0", r.Chunk.ChunkIndex)
+	}
+	if r.Chunk.SectionTitle != "Introduction" {
+		t.Errorf("section title = %q, want %q", r.Chunk.SectionTitle, "Introduction")
+	}
+	if r.Chunk.DocID != "doc-1" {
+		t.Errorf("chunk doc_id = %q, want %q", r.Chunk.DocID, "doc-1")
+	}
+
+	// Document fields (d.content deliberately excluded from query)
+	if r.Document.ID != "doc-1" {
+		t.Errorf("doc id = %q, want %q", r.Document.ID, "doc-1")
+	}
+	if r.Document.Title != "Test Doc" {
+		t.Errorf("doc title = %q, want %q", r.Document.Title, "Test Doc")
+	}
+	if r.Document.URL == nil || *r.Document.URL != url {
+		t.Errorf("doc url = %v, want %q", r.Document.URL, url)
+	}
+	if r.Document.Language != domain.LanguageEN {
+		t.Errorf("doc language = %q, want %q", r.Document.Language, domain.LanguageEN)
+	}
+	if r.Document.Category != domain.CategoryCourse {
+		t.Errorf("doc category = %q, want %q", r.Document.Category, domain.CategoryCourse)
+	}
+	if r.Document.Content != "" {
+		t.Errorf("doc content should be empty (not fetched), got %d bytes", len(r.Document.Content))
+	}
+}
+
+func TestSearchSimilar_MultipleChunksSameDocument(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	doc := &domain.Document{
+		ID: "doc-1", Title: "Big Doc", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two chunks from the same doc, both highly relevant.
+	chunks := []domain.Chunk{
+		{Content: "first section", ChunkIndex: 0},
+		{Content: "second section", ChunkIndex: 1},
+	}
+	embeddings := [][]float32{
+		{0.9, 0.1, 0.0, 0.0},
+		{0.8, 0.2, 0.0, 0.0},
+	}
+	if err := s.CreateChunks(ctx, "doc-1", chunks, embeddings); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+
+	// Both should reference the same document.
+	if results[0].Document.ID != "doc-1" || results[1].Document.ID != "doc-1" {
+		t.Error("expected both results from doc-1")
+	}
+	// First chunk (index 0) should score higher.
+	if results[0].Chunk.ChunkIndex != 0 {
+		t.Errorf("expected chunk 0 first, got chunk %d", results[0].Chunk.ChunkIndex)
+	}
+}
+
+func TestSearchSimilar_EmptyStore(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results on empty store, got %d", len(results))
+	}
+}
+
+func TestSearchSimilar_LanguageFilterExcludesAll(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Only Spanish documents.
+	doc := &domain.Document{
+		ID: "doc-es", Title: "Spanish Only", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateChunks(ctx, "doc-es",
+		[]domain.Chunk{{Content: "chunk", ChunkIndex: 0}},
+		[][]float32{{1.0, 0.0, 0.0, 0.0}},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Filter by English should return nothing.
+	langEN := domain.LanguageEN
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 10, &langEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results for non-matching language, got %d", len(results))
+	}
+}
+
 func TestEmbeddingDimensionValidation(t *testing.T) {
 	store := setupTestStore(t)
 

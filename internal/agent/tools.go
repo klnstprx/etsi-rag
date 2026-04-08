@@ -9,7 +9,7 @@ import (
 )
 
 // Tool defines a callable tool for the agent.
-// Execute receives a sources pointer so tools like rag_search can collect sources.
+// Execute receives a sources pointer so tools like semantic_search can collect sources.
 type Tool struct {
 	Name        string
 	Description string

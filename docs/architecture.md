@@ -39,7 +39,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `config` | Centralized config types, koanf loading (TOML + env vars), `WriteTo()` for persistence |
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
-| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with rag_search + list_documents tools; single entry point for all conversations |
+| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with semantic_search + list_documents tools; single entry point for all conversations |
 | `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
@@ -66,7 +66,7 @@ User query
 [Build context] --> [Formatted chunk text with token budget]
 ```
 
-The pipeline is a pure retrieval service — it takes an `embedder` only. Chat generation is handled by the agent, which calls `rag_search` as a tool.
+The pipeline is a pure retrieval service — it takes an `embedder` only. Chat generation is handled by the agent, which calls `semantic_search` as a tool.
 
 ### Crawl Pipeline
 
@@ -84,14 +84,14 @@ Three-stage concurrent pipeline using Go channels. Each source runs independent 
 
 ### Agent Loop
 
-The agent is the single entry point for all conversations. It owns the system prompt, manages sessions, and collects sources from `rag_search` tool calls.
+The agent is the single entry point for all conversations. It owns the system prompt, manages sessions, and collects sources from `semantic_search` tool calls.
 
 ```
 User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
                                                   ^                     |
                                                   |                     v
-                                                  +---- [Execute tool (rag_search / list_documents)]
-                                                        [Collect sources from rag_search]
+                                                  +---- [Execute tool (semantic_search / list_documents)]
+                                                        [Collect sources from semantic_search]
 
                                            (max_iterations configurable, default 5)
 ```

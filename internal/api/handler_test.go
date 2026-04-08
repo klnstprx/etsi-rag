@@ -56,9 +56,8 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	counter := &testutil.MockCounter{}
 	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100})
 	pipeline := rag.NewPipeline(s, mock, chunker, counter, config.RAGConfig{
-		TopK:                5,
-		SimilarityThreshold: 0.0,
-		MaxContextTokens:    1024,
+		TopK:             5,
+		MaxContextTokens: 1024,
 	})
 	sessionStore := session.NewStore(config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600})
 	t.Cleanup(sessionStore.Close)

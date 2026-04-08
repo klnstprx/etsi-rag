@@ -32,7 +32,6 @@ path = 'data/etsi-rag.db'
 
 [rag]
 top_k = 5
-similarity_threshold = 0.7
 max_context_tokens = 2048
 
 [api]

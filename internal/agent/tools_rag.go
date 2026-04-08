@@ -13,19 +13,19 @@ import (
 	"github.com/openai/openai-go"
 )
 
-// RAGSearchArgs holds the arguments for the rag_search tool.
-type RAGSearchArgs struct {
+// SemanticSearchArgs holds the arguments for the semantic_search tool.
+type SemanticSearchArgs struct {
 	Query    string  `json:"query"`
 	Language *string `json:"language,omitempty"`
 	TopK     *int    `json:"top_k,omitempty"`
 }
 
-// NewRAGSearchTool creates a tool that searches the RAG knowledge base.
+// NewSemanticSearchTool creates a tool that performs semantic search over indexed documents.
 // It uses BuildContext to format results and collects source references.
-func NewRAGSearchTool(pipeline *rag.Pipeline) Tool {
+func NewSemanticSearchTool(pipeline *rag.Pipeline) Tool {
 	return Tool{
-		Name:        "rag_search",
-		Description: "Search the RAG knowledge base for relevant documents. Use this when you need to find information about ETSI courses, degrees, procedures, or other university information.",
+		Name:        "semantic_search",
+		Description: "Semantic search over indexed documents. Use this to find information about ETSI courses, degrees, procedures, or other university information.",
 		Parameters: openai.FunctionParameters{
 			"type": "object",
 			"properties": map[string]any{
@@ -46,7 +46,7 @@ func NewRAGSearchTool(pipeline *rag.Pipeline) Tool {
 			"required": []string{"query"},
 		},
 		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
-			var args RAGSearchArgs
+			var args SemanticSearchArgs
 			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 				return "", fmt.Errorf("parsing args: %w", err)
 			}

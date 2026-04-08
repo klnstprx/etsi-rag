@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -95,6 +96,11 @@ func (c *EmbedClient) EmbedBatch(ctx context.Context, texts []string) ([][]float
 		if err != nil {
 			return nil, fmt.Errorf("creating batch embeddings: %w", err)
 		}
+
+		// Sort by Index to guarantee input-order alignment regardless of server response order.
+		sort.Slice(resp.Data, func(a, b int) bool {
+			return resp.Data[a].Index < resp.Data[b].Index
+		})
 
 		for _, d := range resp.Data {
 			result = append(result, float64sToFloat32s(d.Embedding))

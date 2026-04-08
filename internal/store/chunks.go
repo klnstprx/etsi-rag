@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"etsi-rag/internal/domain"
 )
@@ -177,6 +178,10 @@ func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, to
 			return nil, fmt.Errorf("scanning embedding: %w", err)
 		}
 		vec := deserializeFloat32(blob)
+		if len(vec) != s.embeddingDimension {
+			return nil, fmt.Errorf("stored embedding dimension mismatch for chunk %d: expected %d, got %d",
+				chunkID, s.embeddingDimension, len(vec))
+		}
 		sim := cosineSimilarity(embedding, vec)
 		scores = append(scores, scored{chunkID: chunkID, score: sim})
 	}
@@ -199,28 +204,52 @@ func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, to
 	}
 	topScores := scores[:topK]
 
-	// Fetch chunk + document data for top-K IDs
-	results := make([]SearchResult, 0, topK)
+	// Build score lookup and placeholder list for batched fetch
+	scoreMap := make(map[int64]float32, topK)
+	placeholders := make([]string, topK)
+	fetchArgs := make([]interface{}, topK)
+	for i, sc := range topScores {
+		scoreMap[sc.chunkID] = sc.score
+		placeholders[i] = "?"
+		fetchArgs[i] = sc.chunkID
+	}
+
+	// Fetch chunk + document metadata for all top-K IDs in one query.
+	// Deliberately excludes d.content — callers only need d.id, d.title, d.url.
 	fetchQuery := `
 		SELECT
 			c.id, c.doc_id, c.content, c.chunk_index, c.section_title,
-			d.id, d.title, d.content, d.url, d.language, d.category
+			d.id, d.title, d.url, d.language, d.category
 		FROM chunks c
 		JOIN documents d ON d.id = c.doc_id
-		WHERE c.id = ?
+		WHERE c.id IN (` + strings.Join(placeholders, ",") + `)
 	`
-	for _, sc := range topScores {
+	fetchRows, err := s.db.QueryContext(ctx, fetchQuery, fetchArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("fetching top-K chunks: %w", err)
+	}
+	defer fetchRows.Close()
+
+	results := make([]SearchResult, 0, topK)
+	for fetchRows.Next() {
 		var r SearchResult
-		scanErr := s.db.QueryRowContext(ctx, fetchQuery, sc.chunkID).Scan(
+		if err := fetchRows.Scan(
 			&r.Chunk.ID, &r.Chunk.DocID, &r.Chunk.Content, &r.Chunk.ChunkIndex, &r.Chunk.SectionTitle,
-			&r.Document.ID, &r.Document.Title, &r.Document.Content, &r.Document.URL, &r.Document.Language, &r.Document.Category,
-		)
-		if scanErr != nil {
-			return nil, fmt.Errorf("fetching chunk %d: %w", sc.chunkID, scanErr)
+			&r.Document.ID, &r.Document.Title, &r.Document.URL, &r.Document.Language, &r.Document.Category,
+		); err != nil {
+			return nil, fmt.Errorf("scanning result: %w", err)
 		}
-		r.Score = sc.score
+		r.Score = scoreMap[r.Chunk.ID]
 		results = append(results, r)
 	}
+	if err := fetchRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating results: %w", err)
+	}
+
+	// Re-sort by score descending — the IN query doesn't preserve order.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
 
 	return results, nil
 }

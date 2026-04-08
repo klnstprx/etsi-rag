@@ -59,9 +59,8 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 	}
 
 	p := NewPipeline(s, mock, chunker, &testutil.MockCounter{}, config.RAGConfig{
-		TopK:                5,
-		SimilarityThreshold: 0.0, // accept all
-		MaxContextTokens:    1024,
+		TopK:             5,
+		MaxContextTokens: 1024,
 	})
 
 	return p, s

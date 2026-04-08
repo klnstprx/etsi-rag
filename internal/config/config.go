@@ -111,9 +111,8 @@ type DatabaseConfig struct {
 
 // RAGConfig holds RAG pipeline settings.
 type RAGConfig struct {
-	TopK                int     `koanf:"top_k"`
-	SimilarityThreshold float64 `koanf:"similarity_threshold"`
-	MaxContextTokens    int     `koanf:"max_context_tokens"`
+	TopK             int `koanf:"top_k"`
+	MaxContextTokens int `koanf:"max_context_tokens"`
 }
 
 // ChunkingConfig holds document chunking settings.

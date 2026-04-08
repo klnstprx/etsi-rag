@@ -38,7 +38,6 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Server.WriteTimeout = formInt(r, "write_timeout", h.config.Server.WriteTimeout)
 	case "rag":
 		h.config.RAG.TopK = formInt(r, "top_k", h.config.RAG.TopK)
-		h.config.RAG.SimilarityThreshold = formFloat(r, "similarity_threshold", h.config.RAG.SimilarityThreshold)
 		h.config.RAG.MaxContextTokens = formInt(r, "max_context_tokens", h.config.RAG.MaxContextTokens)
 	case "chunking":
 		h.config.Chunking.MaxChunkSize = formInt(r, "max_chunk_size", h.config.Chunking.MaxChunkSize)
@@ -162,7 +161,6 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 			Name: "rag",
 			Fields: []templates.ConfigField{
 				{Key: "top_k", Label: "Top K", Value: strconv.Itoa(cfg.RAG.TopK), Type: "number"},
-				{Key: "similarity_threshold", Label: "Similarity Threshold", Value: fmt.Sprintf("%.2f", cfg.RAG.SimilarityThreshold), Type: "text"},
 				{Key: "max_context_tokens", Label: "Max Context Tokens", Value: strconv.Itoa(cfg.RAG.MaxContextTokens), Type: "number"},
 			},
 		},

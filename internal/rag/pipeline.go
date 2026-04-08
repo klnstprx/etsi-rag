@@ -146,15 +146,12 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, language *string,
 		return nil, fmt.Errorf("searching: %w", err)
 	}
 
-	// Filter by threshold and build result
+	// Build result
 	var chunks []ScoredChunk
 	seen := map[string]bool{}
 	var docs []domain.Document
 
 	for _, r := range results {
-		if float64(r.Score) < cfg.SimilarityThreshold {
-			continue
-		}
 		chunks = append(chunks, ScoredChunk{
 			Chunk: r.Chunk,
 			Score: r.Score,

@@ -188,9 +188,8 @@ func TestConfigSave_RAG(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
 	form := url.Values{
-		"top_k":                {"10"},
-		"similarity_threshold": {"0.75"},
-		"max_context_tokens":   {"4096"},
+		"top_k":              {"10"},
+		"max_context_tokens": {"4096"},
 	}
 	req := postForm("/admin/config/rag", form)
 	req = withChiParam(req, "section", "rag")
@@ -200,9 +199,6 @@ func TestConfigSave_RAG(t *testing.T) {
 
 	if h.config.RAG.TopK != 10 {
 		t.Errorf("TopK = %d, want 10", h.config.RAG.TopK)
-	}
-	if h.config.RAG.SimilarityThreshold != 0.75 {
-		t.Errorf("SimilarityThreshold = %f, want 0.75", h.config.RAG.SimilarityThreshold)
 	}
 	if h.config.RAG.MaxContextTokens != 4096 {
 		t.Errorf("MaxContextTokens = %d, want 4096", h.config.RAG.MaxContextTokens)
@@ -646,8 +642,8 @@ func TestChatStream_ToolEvents(t *testing.T) {
 
 	// Send tool events + token + close channels (simulates agent goroutine)
 	go func() {
-		eventChan <- agent.ToolEvent{Type: "start", CallID: "call-1", Name: "rag_search", Args: `{"query":"test"}`}
-		eventChan <- agent.ToolEvent{Type: "done", CallID: "call-1", Name: "rag_search", Result: "found 3 results", Duration: 150 * time.Millisecond}
+		eventChan <- agent.ToolEvent{Type: "start", CallID: "call-1", Name: "semantic_search", Args: `{"query":"test"}`}
+		eventChan <- agent.ToolEvent{Type: "done", CallID: "call-1", Name: "semantic_search", Result: "found 3 results", Duration: 150 * time.Millisecond}
 		close(eventChan)
 		tokenChan <- "Here are the results"
 		close(tokenChan)
@@ -667,7 +663,7 @@ func TestChatStream_ToolEvents(t *testing.T) {
 	if !strings.Contains(body, "event: tool_done") {
 		t.Error("expected tool_done SSE event")
 	}
-	if !strings.Contains(body, "rag_search") {
+	if !strings.Contains(body, "semantic_search") {
 		t.Error("expected tool name in SSE data")
 	}
 	if !strings.Contains(body, "event: token") {

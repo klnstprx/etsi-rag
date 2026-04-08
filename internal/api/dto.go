@@ -16,7 +16,7 @@ type ChatCompletionRequest = openai.ChatCompletionNewParams
 type ChatCompletionResponse = openai.ChatCompletion
 
 // ChatCompletionWithSources extends the chat response with source references.
-// Used in session mode to return sources collected by the agent's rag_search tool.
+// Used in session mode to return sources collected by the agent's semantic_search tool.
 type ChatCompletionWithSources struct {
 	openai.ChatCompletion
 

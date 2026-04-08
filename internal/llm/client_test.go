@@ -376,6 +376,45 @@ func TestEmbedBatch_Values(t *testing.T) {
 	}
 }
 
+func TestEmbedBatch_OutOfOrderIndices(t *testing.T) {
+	// Server returns embeddings with indices in reverse order.
+	// EmbedBatch must sort by Index so the caller gets embeddings aligned to the input order.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  "test-model",
+			"data": []map[string]any{
+				{"object": "embedding", "index": 2, "embedding": []float64{0.0, 0.0, 1.0}},
+				{"object": "embedding", "index": 0, "embedding": []float64{1.0, 0.0, 0.0}},
+				{"object": "embedding", "index": 1, "embedding": []float64{0.0, 1.0, 0.0}},
+			},
+			"usage": map[string]int{"prompt_tokens": 5, "total_tokens": 5},
+		})
+	}))
+	defer srv.Close()
+
+	client := newTestEmbedClient(srv.URL)
+	embs, err := client.EmbedBatch(context.Background(), []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(embs) != 3 {
+		t.Fatalf("got %d embeddings, want 3", len(embs))
+	}
+	// Index 0 → [1,0,0], Index 1 → [0,1,0], Index 2 → [0,0,1]
+	if embs[0][0] != 1.0 || embs[0][1] != 0.0 || embs[0][2] != 0.0 {
+		t.Errorf("embs[0] = %v, want [1.0, 0.0, 0.0]", embs[0])
+	}
+	if embs[1][0] != 0.0 || embs[1][1] != 1.0 || embs[1][2] != 0.0 {
+		t.Errorf("embs[1] = %v, want [0.0, 1.0, 0.0]", embs[1])
+	}
+	if embs[2][0] != 0.0 || embs[2][1] != 0.0 || embs[2][2] != 1.0 {
+		t.Errorf("embs[2] = %v, want [0.0, 0.0, 1.0]", embs[2])
+	}
+}
+
 func TestEmbedBatch_RequestBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

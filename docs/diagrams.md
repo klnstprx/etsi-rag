@@ -170,10 +170,10 @@ flowchart TB
     Check -->|"No"| Final["Return text response"]
     Check -->|"Yes"| Execute["Execute tool(s)"]
 
-    Execute --> RAGSearch["rag_search<br/>(vector search + context)"]
+    Execute --> SemanticSearch["semantic_search<br/>(vector search + context)"]
     Execute --> ListDocs["list_documents<br/>(document listing)"]
 
-    RAGSearch --> Append["Append tool results<br/>to messages"]
+    SemanticSearch --> Append["Append tool results<br/>to messages"]
     ListDocs --> Append
 
     Append --> Counter{"Iterations<br/>< 5?"}
