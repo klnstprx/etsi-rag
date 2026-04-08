@@ -51,8 +51,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	}{
 		{"server.read_timeout", cfg.Server.ReadTimeout, 15},
 		{"server.write_timeout", cfg.Server.WriteTimeout, 120},
-		{"chat.max_tokens", cfg.Chat.MaxTokens, 1024},
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 1024},
+		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 512},
 		{"rag.top_k", cfg.RAG.TopK, 5},
 		{"rag.max_context_tokens", cfg.RAG.MaxContextTokens, 2048},
@@ -71,9 +71,6 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		}
 	}
 
-	if cfg.Chat.Temperature != 0.7 {
-		t.Errorf("chat.temperature = %f, want 0.7", cfg.Chat.Temperature)
-	}
 	if cfg.Agent.Temperature != 0.7 {
 		t.Errorf("agent.temperature = %f, want 0.7", cfg.Agent.Temperature)
 	}
@@ -83,12 +80,6 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if len(cfg.Chunking.Separators) != 5 {
 		t.Errorf("chunking.separators length = %d, want 5", len(cfg.Chunking.Separators))
 	}
-	if cfg.RAG.SystemPromptES == "" {
-		t.Error("rag.system_prompt_es should have a default")
-	}
-	if cfg.RAG.SystemPromptEN == "" {
-		t.Error("rag.system_prompt_en should have a default")
-	}
 }
 
 func TestLoadExplicitOverridesDefaults(t *testing.T) {
@@ -96,9 +87,10 @@ func TestLoadExplicitOverridesDefaults(t *testing.T) {
 [server]
 read_timeout = 30
 
-[chat]
+[agent]
 max_tokens = 4096
 temperature = 0.3
+max_iterations = 10
 
 [embedding]
 max_tokens = 2048
@@ -122,7 +114,8 @@ concurrency = 8
 		want int
 	}{
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30},
-		{"chat.max_tokens", cfg.Chat.MaxTokens, 4096},
+		{"agent.max_tokens", cfg.Agent.MaxTokens, 4096},
+		{"agent.max_iterations", cfg.Agent.MaxIterations, 10},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 2048},
 		{"chunking.max_chunk_size", cfg.Chunking.MaxChunkSize, 512},
 		{"chunking.chunk_overlap", cfg.Chunking.ChunkOverlap, 64},
@@ -135,8 +128,8 @@ concurrency = 8
 			t.Errorf("%s = %d, want %d", tt.name, tt.got, tt.want)
 		}
 	}
-	if cfg.Chat.Temperature != 0.3 {
-		t.Errorf("chat.temperature = %f, want 0.3", cfg.Chat.Temperature)
+	if cfg.Agent.Temperature != 0.3 {
+		t.Errorf("agent.temperature = %f, want 0.3", cfg.Agent.Temperature)
 	}
 }
 

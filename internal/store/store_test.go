@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"etsi-rag/internal/domain"
@@ -16,9 +17,9 @@ func setupTestStore(t *testing.T) *SQLiteStore {
 	if err != nil {
 		t.Fatalf("opening test database: %v", err)
 	}
+	t.Cleanup(func() { db.Close() })
 
 	if err := Migrate(db, testEmbeddingDimension); err != nil {
-		db.Close()
 		t.Fatalf("running migrations: %v", err)
 	}
 
@@ -27,11 +28,8 @@ func setupTestStore(t *testing.T) *SQLiteStore {
 
 func TestDocumentCRUD(t *testing.T) {
 	store := setupTestStore(t)
-	defer store.Close()
-
 	ctx := context.Background()
 
-	// Create
 	url := "https://example.com/doc1"
 	doc := &domain.Document{
 		ID:       "doc-1",
@@ -42,84 +40,88 @@ func TestDocumentCRUD(t *testing.T) {
 		Category: domain.CategoryDegree,
 	}
 
-	if err := store.CreateDocument(ctx, doc); err != nil {
-		t.Fatalf("creating document: %v", err)
-	}
+	t.Run("create", func(t *testing.T) {
+		if err := store.CreateDocument(ctx, doc); err != nil {
+			t.Fatalf("creating document: %v", err)
+		}
+	})
 
-	// Read
-	retrieved, err := store.GetDocument(ctx, "doc-1")
-	if err != nil {
-		t.Fatalf("getting document: %v", err)
-	}
-	if retrieved == nil {
-		t.Fatal("expected document, got nil")
-	}
-	if retrieved.Title != doc.Title {
-		t.Errorf("title mismatch: got %q, want %q", retrieved.Title, doc.Title)
-	}
-	if retrieved.Language != domain.LanguageES {
-		t.Errorf("language mismatch: got %q, want %q", retrieved.Language, domain.LanguageES)
-	}
+	t.Run("read", func(t *testing.T) {
+		retrieved, err := store.GetDocument(ctx, "doc-1")
+		if err != nil {
+			t.Fatalf("getting document: %v", err)
+		}
+		if retrieved == nil {
+			t.Fatal("expected document, got nil")
+		}
+		if retrieved.Title != doc.Title {
+			t.Errorf("title mismatch: got %q, want %q", retrieved.Title, doc.Title)
+		}
+		if retrieved.Language != domain.LanguageES {
+			t.Errorf("language mismatch: got %q, want %q", retrieved.Language, domain.LanguageES)
+		}
+	})
 
-	// List
-	docs, err := store.ListDocuments(ctx, nil)
-	if err != nil {
-		t.Fatalf("listing documents: %v", err)
-	}
-	if len(docs) != 1 {
-		t.Errorf("expected 1 document, got %d", len(docs))
-	}
+	t.Run("list", func(t *testing.T) {
+		docs, err := store.ListDocuments(ctx, nil)
+		if err != nil {
+			t.Fatalf("listing documents: %v", err)
+		}
+		if len(docs) != 1 {
+			t.Errorf("expected 1 document, got %d", len(docs))
+		}
+	})
 
-	// List with language filter
-	langES := domain.LanguageES
-	docsES, err := store.ListDocuments(ctx, &langES)
-	if err != nil {
-		t.Fatalf("listing Spanish documents: %v", err)
-	}
-	if len(docsES) != 1 {
-		t.Errorf("expected 1 Spanish document, got %d", len(docsES))
-	}
+	t.Run("list_with_language_filter", func(t *testing.T) {
+		langES := domain.LanguageES
+		docsES, err := store.ListDocuments(ctx, &langES)
+		if err != nil {
+			t.Fatalf("listing Spanish documents: %v", err)
+		}
+		if len(docsES) != 1 {
+			t.Errorf("expected 1 Spanish document, got %d", len(docsES))
+		}
 
-	langEN := domain.LanguageEN
-	docsEN, err := store.ListDocuments(ctx, &langEN)
-	if err != nil {
-		t.Fatalf("listing English documents: %v", err)
-	}
-	if len(docsEN) != 0 {
-		t.Errorf("expected 0 English documents, got %d", len(docsEN))
-	}
+		langEN := domain.LanguageEN
+		docsEN, err := store.ListDocuments(ctx, &langEN)
+		if err != nil {
+			t.Fatalf("listing English documents: %v", err)
+		}
+		if len(docsEN) != 0 {
+			t.Errorf("expected 0 English documents, got %d", len(docsEN))
+		}
+	})
 
-	// Delete
-	if err := store.DeleteDocument(ctx, "doc-1"); err != nil {
-		t.Fatalf("deleting document: %v", err)
-	}
+	t.Run("delete", func(t *testing.T) {
+		if err := store.DeleteDocument(ctx, "doc-1"); err != nil {
+			t.Fatalf("deleting document: %v", err)
+		}
 
-	retrieved, err = store.GetDocument(ctx, "doc-1")
-	if err != nil {
-		t.Fatalf("getting deleted document: %v", err)
-	}
-	if retrieved != nil {
-		t.Error("expected nil after deletion")
-	}
+		retrieved, err := store.GetDocument(ctx, "doc-1")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got: %v", err)
+		}
+		if retrieved != nil {
+			t.Error("expected nil after deletion")
+		}
+	})
 }
 
 func TestGetDocumentNotFound(t *testing.T) {
 	store := setupTestStore(t)
-	defer store.Close()
 
 	ctx := context.Background()
 	doc, err := store.GetDocument(ctx, "nonexistent")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
 	}
 	if doc != nil {
-		t.Error("expected nil for nonexistent document")
+		t.Error("expected nil document")
 	}
 }
 
 func TestChunksWithEmbeddings(t *testing.T) {
 	store := setupTestStore(t)
-	defer store.Close()
 
 	ctx := context.Background()
 
@@ -167,7 +169,6 @@ func TestChunksWithEmbeddings(t *testing.T) {
 
 func TestVectorSearch(t *testing.T) {
 	store := setupTestStore(t)
-	defer store.Close()
 
 	ctx := context.Background()
 
@@ -241,7 +242,6 @@ func TestVectorSearch(t *testing.T) {
 
 func TestEmbeddingDimensionValidation(t *testing.T) {
 	store := setupTestStore(t)
-	defer store.Close()
 
 	ctx := context.Background()
 
@@ -276,7 +276,6 @@ func TestEmbeddingDimensionValidation(t *testing.T) {
 
 func TestDeleteDocumentCascadesChunks(t *testing.T) {
 	store := setupTestStore(t)
-	defer store.Close()
 
 	ctx := context.Background()
 

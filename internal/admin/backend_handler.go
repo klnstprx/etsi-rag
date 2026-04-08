@@ -186,7 +186,13 @@ func (h *Handler) BackendModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func checkBackendHealth(baseURL string) bool {
-	resp, err := http.Get(baseURL + "/models")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false
 	}

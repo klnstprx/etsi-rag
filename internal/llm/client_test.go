@@ -13,13 +13,30 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
-// newTestClient creates a Client pointing at the given test server.
-func newTestClient(url string) *Client {
+// newTestEmbedClient creates an EmbedClient pointing at the given test server.
+// Retries are disabled so error tests don't wait for backoff.
+func newTestEmbedClient(url string) *EmbedClient {
 	c := openai.NewClient(
 		option.WithBaseURL(url),
 		option.WithAPIKey("test"),
+		option.WithMaxRetries(0),
 	)
-	return &Client{
+	return &EmbedClient{
+		client:    &c,
+		model:     "test-model",
+		batchSize: 32,
+	}
+}
+
+// newTestChatClient creates a ChatClient pointing at the given test server.
+// Retries are disabled so error tests don't wait for backoff.
+func newTestChatClient(url string) *ChatClient {
+	c := openai.NewClient(
+		option.WithBaseURL(url),
+		option.WithAPIKey("test"),
+		option.WithMaxRetries(0),
+	)
+	return &ChatClient{
 		client:      &c,
 		model:       "test-model",
 		maxTokens:   100,
@@ -81,19 +98,66 @@ func sseChunk(content string, finishReason *string) string {
 
 func ptr(s string) *string { return &s }
 
-// --- NewClient ---
+// --- NewEmbedClient ---
 
-func TestNewClient(t *testing.T) {
+func TestNewEmbedClient(t *testing.T) {
 	tests := []struct {
 		name      string
-		cfg       ClientConfig
+		cfg       EmbedClientConfig
+		wantModel string
+		wantBatch int
+	}{
+		{
+			name: "all fields",
+			cfg: EmbedClientConfig{
+				BaseURL:   "http://localhost:8081/v1",
+				APIKey:    "sk-test",
+				Model:     "embed-model",
+				BatchSize: 64,
+			},
+			wantModel: "embed-model",
+			wantBatch: 64,
+		},
+		{
+			name: "empty api key gets default",
+			cfg: EmbedClientConfig{
+				BaseURL: "http://localhost:8081/v1",
+				Model:   "embed",
+			},
+			wantModel: "embed",
+			wantBatch: 32,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewEmbedClient(tt.cfg)
+			if c.model != tt.wantModel {
+				t.Errorf("model = %q, want %q", c.model, tt.wantModel)
+			}
+			if c.batchSize != tt.wantBatch {
+				t.Errorf("batchSize = %d, want %d", c.batchSize, tt.wantBatch)
+			}
+			if c.client == nil {
+				t.Error("client is nil")
+			}
+		})
+	}
+}
+
+// --- NewChatClient ---
+
+func TestNewChatClient(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       ChatClientConfig
 		wantModel string
 		wantMax   int64
 		wantTemp  float64
 	}{
 		{
 			name: "all fields",
-			cfg: ClientConfig{
+			cfg: ChatClientConfig{
 				BaseURL:     "http://localhost:8081/v1",
 				APIKey:      "sk-test",
 				Model:       "llama3",
@@ -106,7 +170,7 @@ func TestNewClient(t *testing.T) {
 		},
 		{
 			name: "empty api key gets default",
-			cfg: ClientConfig{
+			cfg: ChatClientConfig{
 				BaseURL: "http://localhost:8081/v1",
 				Model:   "chat",
 			},
@@ -116,7 +180,7 @@ func TestNewClient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewClient(tt.cfg)
+			c := NewChatClient(tt.cfg)
 			if c.model != tt.wantModel {
 				t.Errorf("model = %q, want %q", c.model, tt.wantModel)
 			}
@@ -182,7 +246,7 @@ func TestEmbed(t *testing.T) {
 			srv := httptest.NewServer(tt.handler)
 			defer srv.Close()
 
-			client := newTestClient(srv.URL)
+			client := newTestEmbedClient(srv.URL)
 			emb, err := client.Embed(context.Background(), "hello")
 
 			if tt.wantErr {
@@ -225,7 +289,7 @@ func TestEmbed_RequestBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
+	client := newTestEmbedClient(srv.URL)
 	_, err := client.Embed(context.Background(), "test text")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -269,7 +333,7 @@ func TestEmbedBatch(t *testing.T) {
 			srv := httptest.NewServer(tt.handler)
 			defer srv.Close()
 
-			client := newTestClient(srv.URL)
+			client := newTestEmbedClient(srv.URL)
 			embs, err := client.EmbedBatch(context.Background(), tt.texts)
 
 			if tt.wantErr {
@@ -298,7 +362,7 @@ func TestEmbedBatch_Values(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
+	client := newTestEmbedClient(srv.URL)
 	embs, err := client.EmbedBatch(context.Background(), []string{"x", "y"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -333,7 +397,7 @@ func TestEmbedBatch_RequestBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
+	client := newTestEmbedClient(srv.URL)
 	_, err := client.EmbedBatch(context.Background(), []string{"a", "b", "c"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -363,8 +427,8 @@ func TestEmbedBatch_SubBatching(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
-	client.embedBatchSize = 2
+	client := newTestEmbedClient(srv.URL)
+	client.batchSize = 2
 
 	texts := []string{"a", "b", "c", "d", "e"}
 	embs, err := client.EmbedBatch(context.Background(), texts)
@@ -421,8 +485,8 @@ func TestEmbedBatch_SubBatchSingleBatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
-	client.embedBatchSize = 10
+	client := newTestEmbedClient(srv.URL)
+	client.batchSize = 10
 
 	// 3 texts with batch size 10 → single API call
 	embs, err := client.EmbedBatch(context.Background(), []string{"a", "b", "c"})
@@ -487,7 +551,7 @@ func TestChat(t *testing.T) {
 			srv := httptest.NewServer(tt.handler)
 			defer srv.Close()
 
-			client := newTestClient(srv.URL)
+			client := newTestChatClient(srv.URL)
 			msgs := []openai.ChatCompletionMessageParamUnion{
 				{OfUser: &openai.ChatCompletionUserMessageParam{
 					Content: openai.ChatCompletionUserMessageParamContentUnion{
@@ -526,7 +590,7 @@ func TestChat_RequestBody(t *testing.T) {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("path = %s, want /chat/completions", r.URL.Path)
 		}
-		// max_tokens should be 100 (from newTestClient)
+		// max_tokens should be 100 (from newTestChatClient)
 		if mt, ok := req["max_tokens"].(float64); !ok || int64(mt) != 100 {
 			t.Errorf("max_tokens = %v, want 100", req["max_tokens"])
 		}
@@ -540,7 +604,7 @@ func TestChat_RequestBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
+	client := newTestChatClient(srv.URL)
 	msgs := []openai.ChatCompletionMessageParamUnion{
 		{OfUser: &openai.ChatCompletionUserMessageParam{
 			Content: openai.ChatCompletionUserMessageParamContentUnion{
@@ -606,7 +670,7 @@ func TestChatStream(t *testing.T) {
 			srv := httptest.NewServer(tt.handler)
 			defer srv.Close()
 
-			client := newTestClient(srv.URL)
+			client := newTestChatClient(srv.URL)
 			msgs := []openai.ChatCompletionMessageParamUnion{
 				{OfUser: &openai.ChatCompletionUserMessageParam{
 					Content: openai.ChatCompletionUserMessageParamContentUnion{
@@ -653,7 +717,7 @@ func TestChatStream_ContextCancellation(t *testing.T) {
 	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	client := newTestClient(srv.URL)
+	client := newTestChatClient(srv.URL)
 	msgs := []openai.ChatCompletionMessageParamUnion{
 		{OfUser: &openai.ChatCompletionUserMessageParam{
 			Content: openai.ChatCompletionUserMessageParamContentUnion{
@@ -751,7 +815,7 @@ func TestChatWithTools(t *testing.T) {
 			srv := httptest.NewServer(tt.handler)
 			defer srv.Close()
 
-			client := newTestClient(srv.URL)
+			client := newTestChatClient(srv.URL)
 			msgs := []openai.ChatCompletionMessageParamUnion{
 				{OfUser: &openai.ChatCompletionUserMessageParam{
 					Content: openai.ChatCompletionUserMessageParamContentUnion{
@@ -817,7 +881,7 @@ func TestChatWithTools_RequestBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newTestClient(srv.URL)
+	client := newTestChatClient(srv.URL)
 	tools := []openai.ChatCompletionToolParam{
 		{
 			Function: openai.FunctionDefinitionParam{

@@ -49,6 +49,21 @@ func (f *Fetcher) SetJSPatterns(patterns []string) {
 	f.jsPatterns = patterns
 }
 
+// SetTimeout updates the HTTP client timeout.
+func (f *Fetcher) SetTimeout(d time.Duration) {
+	f.client.Timeout = d
+}
+
+// SetDelay updates the rate-limiting delay between requests.
+func (f *Fetcher) SetDelay(d time.Duration) {
+	f.delay = d
+}
+
+// SetMaxBody updates the maximum response body size (0 = unlimited).
+func (f *Fetcher) SetMaxBody(n int64) {
+	f.maxBodySize = n
+}
+
 // Fetch retrieves a URL's contents. Pages matching JS patterns use the
 // headless browser if available; otherwise falls back to static HTTP.
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, error) {

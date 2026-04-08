@@ -2,16 +2,10 @@
 // llama-server is OpenAI API compliant, so we use the SDK directly.
 package llm
 
-import (
-	"context"
+import "context"
 
-	"github.com/openai/openai-go"
-)
-
-// LLM defines the interface for embedding and chat operations.
-type LLM interface {
+// Embedder defines the interface for embedding operations.
+type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
-	Chat(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error)
-	ChatStream(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (<-chan string, <-chan error)
 }

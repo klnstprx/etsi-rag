@@ -102,3 +102,12 @@ type Chunk struct {
 	ChunkIndex   int
 	SectionTitle string
 }
+
+// SourceReference identifies a source document used in RAG context.
+type SourceReference struct {
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	URL        *string `json:"url,omitempty"`
+	ChunkIndex int     `json:"chunk_index"`
+	Score      float32 `json:"score"`
+}

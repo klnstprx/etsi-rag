@@ -9,28 +9,6 @@ import (
 	"etsi-rag/internal/domain"
 )
 
-// CrawlStore provides database operations for crawl-related entities.
-type CrawlStore interface {
-	// Sources
-	ListCrawlSources(ctx context.Context) ([]domain.CrawlSource, error)
-	CreateCrawlSource(ctx context.Context, src *domain.CrawlSource) error
-	UpdateCrawlSource(ctx context.Context, src *domain.CrawlSource) error
-	DeleteCrawlSource(ctx context.Context, id int64) error
-
-	// Pages
-	UpsertCrawlPage(ctx context.Context, page *domain.CrawlPage) error
-	GetCrawlPageByURL(ctx context.Context, url string) (*domain.CrawlPage, error)
-	ListCrawlPages(ctx context.Context, sourceID *int64, status *string) ([]domain.CrawlPage, error)
-	MarkStalePages(ctx context.Context, sourceID int64, runStartedAt time.Time) (int, error)
-	PurgeStaleDocuments(ctx context.Context) (int, error)
-
-	// Runs
-	CreateCrawlRun(ctx context.Context, sourceID *int64) (int64, error)
-	UpdateCrawlRun(ctx context.Context, run *domain.CrawlRun) error
-	GetCrawlRun(ctx context.Context, id int64) (*domain.CrawlRun, error)
-	ListCrawlRuns(ctx context.Context, limit int) ([]domain.CrawlRun, error)
-}
-
 // --- Sources ---
 
 // ListCrawlSources returns all crawl sources ordered by ID.
@@ -255,7 +233,7 @@ func (s *SQLiteStore) GetCrawlRun(ctx context.Context, id int64) (*domain.CrawlR
 			&run.PagesChanged, &run.PagesFailed, &run.ErrorMessage,
 			&run.StartedAt, &run.FinishedAt)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("crawl run not found: %d", id)
+		return nil, fmt.Errorf("crawl run %d: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting crawl run: %w", err)

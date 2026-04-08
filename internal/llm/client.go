@@ -8,30 +8,26 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
-// Compile-time check that Client implements LLM.
-var _ LLM = (*Client)(nil)
+// Compile-time check.
+var _ Embedder = (*EmbedClient)(nil)
 
-// ClientConfig holds everything needed to construct an LLM client.
-type ClientConfig struct {
-	BaseURL        string
-	APIKey         string
-	Model          string
-	MaxTokens      int64
-	Temperature    float64
-	EmbedBatchSize int
+// EmbedClientConfig holds everything needed to construct an embedding client.
+type EmbedClientConfig struct {
+	BaseURL   string
+	APIKey    string
+	Model     string
+	BatchSize int
 }
 
-// Client wraps the OpenAI client for embedding and chat operations.
-type Client struct {
-	client         *openai.Client
-	model          string
-	maxTokens      int64
-	temperature    float64
-	embedBatchSize int
+// EmbedClient wraps the OpenAI client for embedding operations.
+type EmbedClient struct {
+	client    *openai.Client
+	model     string
+	batchSize int
 }
 
-// NewClient creates a new LLM client from a ClientConfig.
-func NewClient(cfg ClientConfig) *Client {
+// NewEmbedClient creates a new embedding client from an EmbedClientConfig.
+func NewEmbedClient(cfg EmbedClientConfig) *EmbedClient {
 	apiKey := cfg.APIKey
 	if apiKey == "" {
 		apiKey = "not-needed"
@@ -42,22 +38,20 @@ func NewClient(cfg ClientConfig) *Client {
 		option.WithAPIKey(apiKey),
 	)
 
-	batchSize := cfg.EmbedBatchSize
+	batchSize := cfg.BatchSize
 	if batchSize <= 0 {
 		batchSize = 32
 	}
 
-	return &Client{
-		client:         &client,
-		model:          cfg.Model,
-		maxTokens:      cfg.MaxTokens,
-		temperature:    cfg.Temperature,
-		embedBatchSize: batchSize,
+	return &EmbedClient{
+		client:    &client,
+		model:     cfg.Model,
+		batchSize: batchSize,
 	}
 }
 
 // Embed generates an embedding for a single text.
-func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+func (c *EmbedClient) Embed(ctx context.Context, text string) ([]float32, error) {
 	resp, err := c.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
 		Input: openai.EmbeddingNewParamsInputUnion{
 			OfString: openai.String(text),
@@ -76,9 +70,9 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 // EmbedBatch generates embeddings for multiple texts, splitting into
-// sub-batches of embedBatchSize to limit memory pressure on the server.
-func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	batchSize := c.embedBatchSize
+// sub-batches of batchSize to limit memory pressure on the server.
+func (c *EmbedClient) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	batchSize := c.batchSize
 	if batchSize <= 0 {
 		batchSize = 32
 	}
@@ -110,8 +104,45 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	return result, nil
 }
 
+// ChatClientConfig holds everything needed to construct a chat client.
+type ChatClientConfig struct {
+	BaseURL     string
+	APIKey      string
+	Model       string
+	MaxTokens   int64
+	Temperature float64
+}
+
+// ChatClient wraps the OpenAI client for chat operations.
+type ChatClient struct {
+	client      *openai.Client
+	model       string
+	maxTokens   int64
+	temperature float64
+}
+
+// NewChatClient creates a new chat client from a ChatClientConfig.
+func NewChatClient(cfg ChatClientConfig) *ChatClient {
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		apiKey = "not-needed"
+	}
+
+	client := openai.NewClient(
+		option.WithBaseURL(cfg.BaseURL),
+		option.WithAPIKey(apiKey),
+	)
+
+	return &ChatClient{
+		client:      &client,
+		model:       cfg.Model,
+		maxTokens:   cfg.MaxTokens,
+		temperature: cfg.Temperature,
+	}
+}
+
 // Chat generates a response from a conversation.
-func (c *Client) Chat(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
+func (c *ChatClient) Chat(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
 	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Messages:    messages,
 		Model:       c.model,
@@ -130,7 +161,7 @@ func (c *Client) Chat(ctx context.Context, messages []openai.ChatCompletionMessa
 }
 
 // ChatStream generates a streaming response, sending tokens to a channel.
-func (c *Client) ChatStream(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (<-chan string, <-chan error) {
+func (c *ChatClient) ChatStream(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (<-chan string, <-chan error) {
 	tokens := make(chan string, 64)
 	errc := make(chan error, 1)
 
@@ -163,7 +194,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []openai.ChatCompletio
 }
 
 // ChatWithTools generates a response that may include tool calls.
-func (c *Client) ChatWithTools(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolParam) (*openai.ChatCompletion, error) {
+func (c *ChatClient) ChatWithTools(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolParam) (*openai.ChatCompletion, error) {
 	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Messages:    messages,
 		Model:       c.model,

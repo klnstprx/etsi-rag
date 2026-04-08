@@ -11,21 +11,24 @@ import (
 // LlamaCppCounter uses llama.cpp's /tokenize and /detokenize HTTP endpoints.
 type LlamaCppCounter struct {
 	baseURL string
+	model   string
 	client  *http.Client
 }
 
 // NewLlamaCppCounter creates a counter that calls llama.cpp tokenization endpoints.
 // baseURL should NOT include /v1 (e.g. "http://localhost:8080").
-func NewLlamaCppCounter(baseURL string, client *http.Client) *LlamaCppCounter {
+// model is sent in the request body so llama-server knows which model to tokenize with.
+func NewLlamaCppCounter(baseURL, model string, client *http.Client) *LlamaCppCounter {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &LlamaCppCounter{baseURL: baseURL, client: client}
+	return &LlamaCppCounter{baseURL: baseURL, model: model, client: client}
 }
 
 type tokenizeRequest struct {
 	Content    string `json:"content"`
 	AddSpecial bool   `json:"add_special"`
+	Model      string `json:"model,omitempty"`
 }
 
 type tokenizeResponse struct {
@@ -49,7 +52,7 @@ func (l *LlamaCppCounter) Count(ctx context.Context, text string) (int, error) {
 }
 
 func (l *LlamaCppCounter) Tokenize(ctx context.Context, text string) ([]int, error) {
-	body, err := json.Marshal(tokenizeRequest{Content: text, AddSpecial: false})
+	body, err := json.Marshal(tokenizeRequest{Content: text, AddSpecial: false, Model: l.model})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling tokenize request: %w", err)
 	}

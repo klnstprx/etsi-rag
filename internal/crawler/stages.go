@@ -3,14 +3,15 @@ package crawler
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/store"
 )
 
 // crawlStageAll runs BFS crawl for all enabled sources concurrently, sending items to parseCh.
@@ -28,6 +29,7 @@ func (c *Crawler) crawlStageAll(
 	sem := make(chan struct{}, c.config.Concurrency)
 	var globalPages atomic.Int64
 	var globalVisited sync.Map
+	var seenSubjects sync.Map // subject code → true (dedup across plans)
 	var wg sync.WaitGroup
 
 	for _, src := range sources {
@@ -42,7 +44,7 @@ func (c *Crawler) crawlStageAll(
 			}
 			defer func() { <-sem }()
 
-			if err := c.crawlSourceStage(ctx, src, parseCh, progress, &globalPages, &globalVisited); err != nil {
+			if err := c.crawlSourceStage(ctx, src, parseCh, progress, &globalPages, &globalVisited, &seenSubjects); err != nil {
 				c.logger.Error().Err(err).Str("source", src.Name).Msg("source crawl failed")
 			}
 
@@ -67,6 +69,7 @@ func (c *Crawler) crawlSourceStage(
 	progress *RunProgress,
 	globalPages *atomic.Int64,
 	globalVisited *sync.Map,
+	seenSubjects *sync.Map,
 ) error {
 	c.logger.Info().Str("source", src.Name).Str("seed", src.SeedURL).Msg("starting source crawl")
 
@@ -174,6 +177,12 @@ func (c *Crawler) crawlSourceStage(
 				if !shouldFollow(link, seedPath) {
 					continue
 				}
+				// Dedup subject pages: same subject code across different plans
+				if code := subjectCode(link); code != "" {
+					if _, seen := seenSubjects.LoadOrStore(code, true); seen {
+						continue
+					}
+				}
 				queue = append(queue, queueItem{url: link, depth: item.depth + 1})
 			}
 			// Links are only needed for BFS; nil out to free memory
@@ -224,19 +233,25 @@ func (c *Crawler) parseStage(
 				text = item.HTMLParsed.Description + "\n\n" + text
 			}
 		} else {
-			// PDF: extract text
-			var err error
-			text, err = ExtractPDFText(ctx, item.Body)
+			// PDF: extract text with heading detection
+			result, err := ExtractPDFText(ctx, item.Body, c.config.PDF)
 			if err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("pdf extraction failed")
 				progress.ParseFail.Add(1)
 				c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
 				continue
 			}
-			title = titleFromURL(item.URL)
+			text = result.Text
+			if result.Title != "" {
+				title = result.Title
+			} else {
+				title = titleFromURL(item.URL)
+			}
 		}
 
-		if text == "" {
+		if isLowQualityContent(text, c.config.MinContentLen) {
+			c.logger.Debug().Str("url", item.URL).Int("len", len(text)).Msg("skipped low-quality content")
+			progress.Skipped.Add(1)
 			continue
 		}
 
@@ -306,7 +321,7 @@ func (c *Crawler) embedStage(
 		// Delete old document if exists (re-ingest)
 		if err := c.store.DeleteDocument(ctx, docID); err != nil {
 			// "not found" is expected for new documents
-			if !strings.Contains(err.Error(), "not found") {
+			if !errors.Is(err, store.ErrNotFound) {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("delete old document failed")
 			}
 		}

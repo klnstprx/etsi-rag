@@ -13,6 +13,8 @@ import (
 
 // Session holds conversation state.
 type Session struct {
+	mu sync.Mutex
+
 	// Messages contains the conversation history (OpenAI-compatible).
 	Messages []openai.ChatCompletionMessageParamUnion
 
@@ -25,11 +27,30 @@ type Session struct {
 
 // AddMessage appends a message, truncating if over limit.
 func (s *Session) AddMessage(msg openai.ChatCompletionMessageParamUnion) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.Messages = append(s.Messages, msg)
 	if len(s.Messages) > s.MaxMessages {
 		s.Messages = s.Messages[1:]
 	}
 	s.LastAccessed = time.Now()
+}
+
+// GetMessages returns a snapshot copy of the message history.
+func (s *Session) GetMessages() []openai.ChatCompletionMessageParamUnion {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastAccessed = time.Now()
+	cp := make([]openai.ChatCompletionMessageParamUnion, len(s.Messages))
+	copy(cp, s.Messages)
+	return cp
+}
+
+// Touch updates the last-accessed timestamp.
+func (s *Session) Touch() {
+	s.mu.Lock()
+	s.LastAccessed = time.Now()
+	s.mu.Unlock()
 }
 
 // Store manages conversation sessions with TTL-based expiration.
@@ -117,7 +138,7 @@ func (s *Store) GetOrCreate(id *string) (string, *Session) {
 		return newID, s.Get(newID)
 	}
 
-	session.LastAccessed = time.Now()
+	session.Touch()
 	return *id, session
 }
 

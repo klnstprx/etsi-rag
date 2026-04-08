@@ -40,16 +40,13 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.RAG.TopK = formInt(r, "top_k", h.config.RAG.TopK)
 		h.config.RAG.SimilarityThreshold = formFloat(r, "similarity_threshold", h.config.RAG.SimilarityThreshold)
 		h.config.RAG.MaxContextTokens = formInt(r, "max_context_tokens", h.config.RAG.MaxContextTokens)
-		if v := r.FormValue("system_prompt_es"); v != "" {
-			h.config.RAG.SystemPromptES = v
-		}
-		if v := r.FormValue("system_prompt_en"); v != "" {
-			h.config.RAG.SystemPromptEN = v
-		}
 	case "chunking":
 		h.config.Chunking.MaxChunkSize = formInt(r, "max_chunk_size", h.config.Chunking.MaxChunkSize)
 		h.config.Chunking.ChunkOverlap = formInt(r, "chunk_overlap", h.config.Chunking.ChunkOverlap)
 		h.config.Chunking.MinChunkSize = formInt(r, "min_chunk_size", h.config.Chunking.MinChunkSize)
+		if v := r.FormValue("separators"); v != "" {
+			h.config.Chunking.Separators = strings.Split(v, ",")
+		}
 	case "session":
 		h.config.Session.MaxMessages = formInt(r, "max_messages", h.config.Session.MaxMessages)
 		h.config.Session.TTLSeconds = formInt(r, "ttl_seconds", h.config.Session.TTLSeconds)
@@ -58,16 +55,19 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Embedding.Model = r.FormValue("model")
 		h.config.Embedding.Dimension = formInt(r, "dimension", h.config.Embedding.Dimension)
 		h.config.Embedding.MaxTokens = formInt(r, "max_tokens", h.config.Embedding.MaxTokens)
-	case "chat":
-		h.config.Chat.Backend = r.FormValue("backend")
-		h.config.Chat.Model = r.FormValue("model")
-		h.config.Chat.MaxTokens = formInt(r, "max_tokens", h.config.Chat.MaxTokens)
-		h.config.Chat.Temperature = formFloat(r, "temperature", h.config.Chat.Temperature)
+		h.config.Embedding.BatchSize = formInt(r, "batch_size", h.config.Embedding.BatchSize)
 	case "agent":
 		h.config.Agent.Backend = r.FormValue("backend")
 		h.config.Agent.Model = r.FormValue("model")
 		h.config.Agent.MaxTokens = formInt(r, "max_tokens", h.config.Agent.MaxTokens)
 		h.config.Agent.Temperature = formFloat(r, "temperature", h.config.Agent.Temperature)
+		h.config.Agent.ContextWindow = formInt(r, "context_window", h.config.Agent.ContextWindow)
+		h.config.Agent.MaxIterations = formInt(r, "max_iterations", h.config.Agent.MaxIterations)
+		if v := r.FormValue("system_prompt"); v != "" {
+			h.config.Agent.SystemPrompt = v
+		}
+	case "api":
+		h.config.API.Passthrough = r.FormValue("passthrough") == "true"
 	case "database":
 		h.config.Database.Path = r.FormValue("path")
 	case "crawler":
@@ -76,15 +76,20 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Crawler.Concurrency = formInt(r, "concurrency", h.config.Crawler.Concurrency)
 		h.config.Crawler.MaxBodySize = int64(formInt(r, "max_body_size", int(h.config.Crawler.MaxBodySize)))
 		h.config.Crawler.EmbedWorkers = formInt(r, "embed_workers", h.config.Crawler.EmbedWorkers)
+		h.config.Crawler.ParseWorkers = formInt(r, "parse_workers", h.config.Crawler.ParseWorkers)
+		h.config.Crawler.MinContentLen = formInt(r, "min_content_len", h.config.Crawler.MinContentLen)
+		h.config.Crawler.MaxEmbedFails = formInt(r, "max_embed_fails", h.config.Crawler.MaxEmbedFails)
 		h.config.Crawler.RequestDelay = time.Duration(formInt(r, "request_delay_ms", int(h.config.Crawler.RequestDelay/time.Millisecond))) * time.Millisecond
 		h.config.Crawler.RequestTimeout = time.Duration(formInt(r, "request_timeout_s", int(h.config.Crawler.RequestTimeout/time.Second))) * time.Second
 		if v := r.FormValue("js_patterns"); v != "" {
-			h.config.Crawler.JSPatterns = strings.Split(v, ",")
-			for i := range h.config.Crawler.JSPatterns {
-				h.config.Crawler.JSPatterns[i] = strings.TrimSpace(h.config.Crawler.JSPatterns[i])
-			}
+			h.config.Crawler.JSPatterns = splitTrimCSV(v)
 		} else {
 			h.config.Crawler.JSPatterns = nil
+		}
+		if v := r.FormValue("pdf_heading_patterns"); v != "" {
+			h.config.Crawler.PDF.HeadingPatterns = splitTrimCSV(v)
+		} else {
+			h.config.Crawler.PDF.HeadingPatterns = nil
 		}
 	case "object_store":
 		h.config.ObjectStore.Endpoint = r.FormValue("endpoint")
@@ -138,15 +143,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "model", Label: "Model", Value: cfg.Embedding.Model, Type: "model", Options: backendNames},
 				{Key: "dimension", Label: "Dimension", Value: strconv.Itoa(cfg.Embedding.Dimension), Type: "number"},
 				{Key: "max_tokens", Label: "Max Tokens", Value: strconv.Itoa(cfg.Embedding.MaxTokens), Type: "number"},
-			},
-		},
-		{
-			Name: "chat",
-			Fields: []templates.ConfigField{
-				{Key: "backend", Label: "Backend", Value: cfg.Chat.Backend, Type: "select", Options: backendNames},
-				{Key: "model", Label: "Model", Value: cfg.Chat.Model, Type: "model", Options: backendNames},
-				{Key: "max_tokens", Label: "Max Tokens", Value: strconv.Itoa(cfg.Chat.MaxTokens), Type: "number"},
-				{Key: "temperature", Label: "Temperature", Value: fmt.Sprintf("%.2f", cfg.Chat.Temperature), Type: "text"},
+				{Key: "batch_size", Label: "Batch Size", Value: strconv.Itoa(cfg.Embedding.BatchSize), Type: "number"},
 			},
 		},
 		{
@@ -156,6 +153,9 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "model", Label: "Model", Value: cfg.Agent.Model, Type: "model", Options: backendNames},
 				{Key: "max_tokens", Label: "Max Tokens", Value: strconv.Itoa(cfg.Agent.MaxTokens), Type: "number"},
 				{Key: "temperature", Label: "Temperature", Value: fmt.Sprintf("%.2f", cfg.Agent.Temperature), Type: "text"},
+				{Key: "context_window", Label: "Context Window (auto-detected)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number"},
+				{Key: "max_iterations", Label: "Max Tool Iterations", Value: strconv.Itoa(cfg.Agent.MaxIterations), Type: "number"},
+				{Key: "system_prompt", Label: "System Prompt (empty = default)", Value: cfg.Agent.SystemPrompt, Type: "textarea"},
 			},
 		},
 		{
@@ -164,8 +164,12 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "top_k", Label: "Top K", Value: strconv.Itoa(cfg.RAG.TopK), Type: "number"},
 				{Key: "similarity_threshold", Label: "Similarity Threshold", Value: fmt.Sprintf("%.2f", cfg.RAG.SimilarityThreshold), Type: "text"},
 				{Key: "max_context_tokens", Label: "Max Context Tokens", Value: strconv.Itoa(cfg.RAG.MaxContextTokens), Type: "number"},
-				{Key: "system_prompt_es", Label: "System Prompt (ES)", Value: cfg.RAG.SystemPromptES, Type: "textarea"},
-				{Key: "system_prompt_en", Label: "System Prompt (EN)", Value: cfg.RAG.SystemPromptEN, Type: "textarea"},
+			},
+		},
+		{
+			Name: "api",
+			Fields: []templates.ConfigField{
+				{Key: "passthrough", Label: "Passthrough Mode", Value: fmt.Sprintf("%t", cfg.API.Passthrough), Type: "text"},
 			},
 		},
 		{
@@ -174,6 +178,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "max_chunk_size", Label: "Max Chunk Size (tokens)", Value: strconv.Itoa(cfg.Chunking.MaxChunkSize), Type: "number"},
 				{Key: "chunk_overlap", Label: "Chunk Overlap (tokens)", Value: strconv.Itoa(cfg.Chunking.ChunkOverlap), Type: "number"},
 				{Key: "min_chunk_size", Label: "Min Chunk Size (tokens)", Value: strconv.Itoa(cfg.Chunking.MinChunkSize), Type: "number"},
+				{Key: "separators", Label: "Separators (comma-separated)", Value: strings.Join(cfg.Chunking.Separators, ","), Type: "text"},
 			},
 		},
 		{
@@ -199,7 +204,11 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "concurrency", Label: "Concurrency", Value: strconv.Itoa(cfg.Crawler.Concurrency), Type: "number"},
 				{Key: "max_body_size", Label: "Max Body Size (bytes)", Value: strconv.FormatInt(cfg.Crawler.MaxBodySize, 10), Type: "number"},
 				{Key: "embed_workers", Label: "Embed Workers", Value: strconv.Itoa(cfg.Crawler.EmbedWorkers), Type: "number"},
+				{Key: "parse_workers", Label: "Parse Workers", Value: strconv.Itoa(cfg.Crawler.ParseWorkers), Type: "number"},
+				{Key: "min_content_len", Label: "Min Content Length (chars)", Value: strconv.Itoa(cfg.Crawler.MinContentLen), Type: "number"},
+				{Key: "max_embed_fails", Label: "Max Embed Failures", Value: strconv.Itoa(cfg.Crawler.MaxEmbedFails), Type: "number"},
 				{Key: "js_patterns", Label: "JS Patterns (comma-separated)", Value: strings.Join(cfg.Crawler.JSPatterns, ", "), Type: "text"},
+				{Key: "pdf_heading_patterns", Label: "PDF Heading Patterns (comma-separated)", Value: strings.Join(cfg.Crawler.PDF.HeadingPatterns, ", "), Type: "text"},
 			},
 		},
 		{
@@ -237,4 +246,12 @@ func formFloat(r *http.Request, key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+func splitTrimCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
 }

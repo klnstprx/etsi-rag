@@ -117,3 +117,11 @@ func ErrNotFound(msg string) *AppError {
 		Message: msg,
 	}
 }
+
+// ErrServiceUnavailable creates a 503 service unavailable error.
+func ErrServiceUnavailable(msg string) *AppError {
+	return &AppError{
+		Code:    http.StatusServiceUnavailable,
+		Message: msg,
+	}
+}

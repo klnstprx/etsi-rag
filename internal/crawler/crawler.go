@@ -69,6 +69,17 @@ func New(
 	return c
 }
 
+// SetConfig updates the crawler config (thread-safe, takes effect on next crawl).
+func (c *Crawler) SetConfig(cfg config.CrawlerConfig) {
+	c.mu.Lock()
+	c.config = cfg
+	c.fetcher.SetTimeout(cfg.RequestTimeout)
+	c.fetcher.SetDelay(cfg.RequestDelay)
+	c.fetcher.SetMaxBody(cfg.MaxBodySize)
+	c.fetcher.SetJSPatterns(cfg.JSPatterns)
+	c.mu.Unlock()
+}
+
 // Close releases browser resources.
 func (c *Crawler) Close() {
 	if c.browser != nil {

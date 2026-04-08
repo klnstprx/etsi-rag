@@ -34,7 +34,7 @@ func TestLlamaCppCounter(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	c := NewLlamaCppCounter(srv.URL, nil)
+	c := NewLlamaCppCounter(srv.URL, "test-model", nil)
 
 	// Test Count
 	count, err := c.Count(ctx, "hello world test")
@@ -71,7 +71,7 @@ func TestLlamaCppCounterError(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	c := NewLlamaCppCounter(srv.URL, nil)
+	c := NewLlamaCppCounter(srv.URL, "test-model", nil)
 
 	_, err := c.Count(ctx, "test")
 	if err == nil {

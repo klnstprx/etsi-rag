@@ -6,72 +6,36 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/openai/openai-go"
+	"github.com/rs/zerolog"
 
+	"etsi-rag/internal/agent"
 	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/llm"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
+	"etsi-rag/internal/testutil"
 )
 
-// mockCounter counts words as tokens for testing.
-type mockCounter struct{}
+// mockEmbedder implements llm.Embedder for handler tests.
+type mockEmbedder struct{}
 
-func (m *mockCounter) Count(_ context.Context, text string) (int, error) {
-	if text == "" {
-		return 0, nil
-	}
-	return len(strings.Fields(text)), nil
-}
-
-func (m *mockCounter) Tokenize(_ context.Context, text string) ([]int, error) {
-	words := strings.Fields(text)
-	tokens := make([]int, len(words))
-	for i := range tokens {
-		tokens[i] = i
-	}
-	return tokens, nil
-}
-
-func (m *mockCounter) Detokenize(_ context.Context, tokens []int) (string, error) {
-	parts := make([]string, len(tokens))
-	for i := range parts {
-		parts[i] = "word"
-	}
-	return strings.Join(parts, " "), nil
-}
-
-// mockLLM implements llm.LLM for handler tests.
-type mockLLM struct{}
-
-func (m *mockLLM) Embed(_ context.Context, _ string) ([]float32, error) {
+func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return []float32{0.5, 0.5, 0.0, 0.0}, nil
 }
 
-func (m *mockLLM) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+func (m *mockEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
 	result := make([][]float32, len(texts))
 	for i := range texts {
 		result[i] = []float32{0.5, 0.5, 0.0, 0.0}
 	}
 	return result, nil
-}
-
-func (m *mockLLM) Chat(_ context.Context, _ []openai.ChatCompletionMessageParamUnion) (string, error) {
-	return "Mock response", nil
-}
-
-func (m *mockLLM) ChatStream(_ context.Context, _ []openai.ChatCompletionMessageParamUnion) (<-chan string, <-chan error) {
-	tokens := make(chan string)
-	errc := make(chan error)
-	close(tokens)
-	close(errc)
-	return tokens, errc
 }
 
 func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
@@ -81,28 +45,26 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { db.Close() })
+
 	if err := store.Migrate(db, 4); err != nil {
-		db.Close()
 		t.Fatal(err)
 	}
 
 	s := store.NewSQLiteStore(db, 4)
-	mock := &mockLLM{}
-	counter := &mockCounter{}
+	mock := &mockEmbedder{}
+	counter := &testutil.MockCounter{}
 	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100})
-	pipeline := rag.NewPipeline(s, mock, mock, chunker, counter, config.RAGConfig{
+	pipeline := rag.NewPipeline(s, mock, chunker, counter, config.RAGConfig{
 		TopK:                5,
 		SimilarityThreshold: 0.0,
 		MaxContextTokens:    1024,
-		SystemPromptES:      "Test system prompt",
-		SystemPromptEN:      "Test system prompt EN",
 	})
 	sessionStore := session.NewStore(config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600})
 	t.Cleanup(sessionStore.Close)
 
 	h := NewHandler(HandlerConfig{
 		EmbeddingClient: mock,
-		ChatClient:      mock,
 		Counter:         counter,
 		Pipeline:        pipeline,
 		Store:           s,
@@ -125,7 +87,9 @@ func TestHealthCheck(t *testing.T) {
 	}
 
 	var resp HealthResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
 	if resp.Status != "ok" {
 		t.Errorf("expected status 'ok', got %q", resp.Status)
 	}
@@ -158,7 +122,9 @@ func TestIngestAndListDocuments(t *testing.T) {
 	}
 
 	var ingestResp IngestResponse
-	json.NewDecoder(w.Body).Decode(&ingestResp)
+	if err := json.NewDecoder(w.Body).Decode(&ingestResp); err != nil {
+		t.Fatalf("decoding ingest response: %v", err)
+	}
 	if ingestResp.IngestedCount != 1 {
 		t.Errorf("expected 1 ingested, got %d", ingestResp.IngestedCount)
 	}
@@ -174,7 +140,9 @@ func TestIngestAndListDocuments(t *testing.T) {
 	}
 
 	var docs []domain.Document
-	json.NewDecoder(w.Body).Decode(&docs)
+	if err := json.NewDecoder(w.Body).Decode(&docs); err != nil {
+		t.Fatalf("decoding documents: %v", err)
+	}
 	if len(docs) != 1 {
 		t.Errorf("expected 1 document, got %d", len(docs))
 	}
@@ -250,52 +218,188 @@ func TestIngestInvalidLanguage(t *testing.T) {
 	}
 }
 
-func TestRAGChat(t *testing.T) {
-	h, s := setupTestHandler(t)
-	ctx := context.Background()
+func TestChatCompletions_NoAgent(t *testing.T) {
+	h, _ := setupTestHandler(t)
 
-	// Insert test data
-	doc := &domain.Document{
-		ID:       "doc-1",
-		Title:    "Test Doc",
-		Content:  "Relevant info",
-		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
-	}
-	s.CreateDocument(ctx, doc)
-	s.CreateChunks(ctx, "doc-1",
-		[]domain.Chunk{{Content: "Relevant info", ChunkIndex: 0}},
-		[][]float32{{0.5, 0.5, 0.0, 0.0}},
-	)
-
-	body, _ := json.Marshal(RAGChatRequest{
+	body, _ := json.Marshal(openai.ChatCompletionNewParams{
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			{
 				OfUser: &openai.ChatCompletionUserMessageParam{
 					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("Tell me about this"),
+						OfString: openai.String("hello"),
 					},
 				},
 			},
 		},
-		Model:          "test-model",
-		IncludeSources: true,
+		Model: "test",
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/rag/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-	h.RAGChat(w, req)
+	h.ChatCompletions(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when agent is nil, got %d", w.Code)
+	}
+}
+
+func TestChatCompletions_SessionMode_RejectsMultipleMessages(t *testing.T) {
+	// This test validates the validation logic in extractSingleUserMessage directly.
+
+	tests := []struct {
+		name     string
+		messages []openai.ChatCompletionMessageParamUnion
+		wantErr  bool
+	}{
+		{
+			name:     "empty messages",
+			messages: nil,
+			wantErr:  true,
+		},
+		{
+			name: "system message rejected",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{OfSystem: &openai.ChatCompletionSystemMessageParam{
+					Content: openai.ChatCompletionSystemMessageParamContentUnion{
+						OfString: openai.String("system"),
+					},
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "single user message accepted",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("hello"),
+					},
+				}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "two user messages rejected",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("hello"),
+					},
+				}},
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("world"),
+					},
+				}},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := extractSingleUserMessage(tt.messages)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("extractSingleUserMessage() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// fakeChatCompletionServer returns an httptest.Server that responds with
+// a canned chat completion (no tool calls).
+func fakeChatCompletionServer(t *testing.T, responseContent string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": 1234567890,
+			"model":   "test-model",
+			"choices": []map[string]any{
+				{
+					"index":         0,
+					"finish_reason": "stop",
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": responseContent,
+					},
+				},
+			},
+			"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	// Stand up a fake LLM server
+	srv := fakeChatCompletionServer(t, "Hello from agent")
+	defer srv.Close()
+
+	// Build a real agent sharing the handler's session store
+	chatClient := llm.NewChatClient(llm.ChatClientConfig{
+		BaseURL:     srv.URL,
+		Model:       "test-model",
+		MaxTokens:   100,
+		Temperature: 0,
+	})
+
+	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, h.sessionStore, zerolog.Nop())
+	h.SetAgent(ag)
+
+	// Create a session in the shared store
+	sessionID := h.sessionStore.Create()
+
+	// Send a chat completion request
+	body, _ := json.Marshal(ChatCompletionRequest{
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			{OfUser: &openai.ChatCompletionUserMessageParam{
+				Content: openai.ChatCompletionUserMessageParamContentUnion{
+					OfString: openai.String("Hi there"),
+				},
+			}},
+		},
+		Model: "test-model",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("X-Session-ID", sessionID)
+	w := httptest.NewRecorder()
+
+	h.ChatCompletions(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp RAGChatResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if len(resp.Choices) == 0 {
-		t.Fatal("expected choices in response")
+	// Verify response content
+	var resp ChatCompletionWithSources
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
 	}
-	if resp.Choices[0].Message.Content == "" {
-		t.Error("expected non-empty content")
+	if len(resp.Choices) == 0 {
+		t.Fatal("expected at least one choice")
+	}
+	if resp.Choices[0].Message.Content != "Hello from agent" {
+		t.Errorf("got content %q, want %q", resp.Choices[0].Message.Content, "Hello from agent")
+	}
+
+	// Verify session ID header
+	if got := w.Header().Get("X-Session-ID"); got != sessionID {
+		t.Errorf("X-Session-ID header = %q, want %q", got, sessionID)
+	}
+
+	// Verify messages were persisted to session (user + assistant = 2)
+	sess := h.sessionStore.Get(sessionID)
+	if sess == nil {
+		t.Fatal("session should exist after chat")
+	}
+	msgs := sess.GetMessages()
+	if len(msgs) != 2 {
+		t.Errorf("session has %d messages, want 2 (user + assistant)", len(msgs))
 	}
 }

@@ -79,7 +79,13 @@ func TestBrowser_Timeout(t *testing.T) {
 	skipIfShort(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second)
+		// Sleep longer than the test's 1s timeout, but exit early on shutdown
+		// so srv.Close() doesn't block for the full duration.
+		select {
+		case <-time.After(10 * time.Second):
+		case <-r.Context().Done():
+			return
+		}
 		fmt.Fprint(w, "slow")
 	}))
 	defer srv.Close()

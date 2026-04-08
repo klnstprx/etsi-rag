@@ -34,10 +34,9 @@ func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
 		r.Post("/chat/completions", handler.ChatCompletions)
 		r.Post("/embeddings", handler.Embeddings)
 
-		// RAG-enhanced endpoints
+		// RAG endpoints
 		r.Route("/rag", func(r chi.Router) {
-			r.Post("/chat", handler.RAGChat)  // RAG-augmented chat
-			r.Post("/ingest", handler.Ingest) // Document ingestion
+			r.Post("/ingest", handler.Ingest)
 			r.Get("/documents", handler.ListDocuments)
 			r.Delete("/documents/{id}", handler.DeleteDocument)
 		})

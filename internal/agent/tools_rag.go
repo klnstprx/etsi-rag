@@ -21,6 +21,7 @@ type RAGSearchArgs struct {
 }
 
 // NewRAGSearchTool creates a tool that searches the RAG knowledge base.
+// It uses BuildContext to format results and collects source references.
 func NewRAGSearchTool(pipeline *rag.Pipeline) Tool {
 	return Tool{
 		Name:        "rag_search",
@@ -44,7 +45,7 @@ func NewRAGSearchTool(pipeline *rag.Pipeline) Tool {
 			},
 			"required": []string{"query"},
 		},
-		Execute: func(ctx context.Context, argsJSON string) (string, error) {
+		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
 			var args RAGSearchArgs
 			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 				return "", fmt.Errorf("parsing args: %w", err)
@@ -59,7 +60,23 @@ func NewRAGSearchTool(pipeline *rag.Pipeline) Tool {
 				return "No relevant documents found.", nil
 			}
 
-			return formatRAGResults(results), nil
+			// Collect sources
+			if sources != nil {
+				*sources = append(*sources, rag.SourcesFromRetrieval(results)...)
+			}
+
+			// Build context using pipeline's token-aware builder
+			ragContext, err := pipeline.BuildContext(ctx, results)
+			if err != nil {
+				// Fall back to simple formatting if BuildContext fails
+				return formatRAGResults(results), nil
+			}
+
+			if ragContext == "" {
+				return formatRAGResults(results), nil
+			}
+
+			return ragContext, nil
 		},
 	}
 }
@@ -84,7 +101,7 @@ func NewListDocumentsTool(s *store.SQLiteStore) Tool {
 				},
 			},
 		},
-		Execute: func(ctx context.Context, argsJSON string) (string, error) {
+		Execute: func(ctx context.Context, argsJSON string, _ *[]domain.SourceReference) (string, error) {
 			var args ListDocumentsArgs
 			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 				return "", fmt.Errorf("parsing args: %w", err)

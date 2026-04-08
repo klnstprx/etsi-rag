@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"sync"
 
 	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
@@ -33,6 +34,8 @@ type Handler struct {
 	objStore     *objectstore.Client
 	logger       zerolog.Logger
 	onConfigSave func()
+	chatMu      sync.RWMutex
+	chatStreams map[string]*chatStream
 }
 
 // HandlerConfig holds dependencies for the admin handler.
@@ -60,6 +63,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		objStore:     cfg.ObjStore,
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,
+		chatStreams: make(map[string]*chatStream),
 	}
 }
 

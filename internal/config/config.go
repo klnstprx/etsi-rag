@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"etsi-rag/internal/prompts"
-
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -42,10 +40,10 @@ type Config struct {
 	Server      ServerConfig      `koanf:"server"`
 	Backends    []BackendConfig   `koanf:"backends"`
 	Embedding   EmbeddingConfig   `koanf:"embedding"`
-	Chat        ChatConfig        `koanf:"chat"`
 	Agent       AgentConfig       `koanf:"agent"`
 	Database    DatabaseConfig    `koanf:"database"`
 	RAG         RAGConfig         `koanf:"rag"`
+	API         APIConfig         `koanf:"api"`
 	Chunking    ChunkingConfig    `koanf:"chunking"`
 	Session     SessionConfig     `koanf:"session"`
 	Crawler     CrawlerConfig     `koanf:"crawler"`
@@ -87,22 +85,23 @@ type EmbeddingConfig struct {
 	Model     string `koanf:"model"`
 	Dimension int    `koanf:"dimension"`
 	MaxTokens int    `koanf:"max_tokens"`
+	BatchSize int    `koanf:"batch_size"`
 }
 
-// ChatConfig holds chat stage settings.
-type ChatConfig struct {
-	Backend     string  `koanf:"backend"`
-	Model       string  `koanf:"model"`
-	MaxTokens   int     `koanf:"max_tokens"`
-	Temperature float64 `koanf:"temperature"`
-}
-
-// AgentConfig holds agent stage settings.
+// AgentConfig holds agent/chat stage settings.
 type AgentConfig struct {
-	Backend     string  `koanf:"backend"`
-	Model       string  `koanf:"model"`
-	MaxTokens   int     `koanf:"max_tokens"`
-	Temperature float64 `koanf:"temperature"`
+	Backend       string  `koanf:"backend"`
+	Model         string  `koanf:"model"`
+	MaxTokens     int     `koanf:"max_tokens"`
+	Temperature   float64 `koanf:"temperature"`
+	ContextWindow int     `koanf:"context_window"` // total context window (auto-detected for llama.cpp)
+	MaxIterations int     `koanf:"max_iterations"` // max tool-calling iterations
+	SystemPrompt  string  `koanf:"system_prompt"`  // empty = use prompts/agent.md
+}
+
+// APIConfig holds API endpoint settings.
+type APIConfig struct {
+	Passthrough bool `koanf:"passthrough"` // true = accept client messages, no sessions
 }
 
 // DatabaseConfig holds SQLite database settings.
@@ -115,8 +114,6 @@ type RAGConfig struct {
 	TopK                int     `koanf:"top_k"`
 	SimilarityThreshold float64 `koanf:"similarity_threshold"`
 	MaxContextTokens    int     `koanf:"max_context_tokens"`
-	SystemPromptES      string  `koanf:"system_prompt_es"`
-	SystemPromptEN      string  `koanf:"system_prompt_en"`
 }
 
 // ChunkingConfig holds document chunking settings.
@@ -140,11 +137,18 @@ type CrawlerConfig struct {
 	MaxDepth       int           `koanf:"max_depth"`
 	MaxPages       int           `koanf:"max_pages"`
 	Concurrency    int           `koanf:"concurrency"`
-	MaxBodySize    int64         `koanf:"max_body_size"`   // max response body in bytes, 0 = unlimited
-	EmbedWorkers   int           `koanf:"embed_workers"`   // concurrent embed stage workers
-	ParseWorkers   int           `koanf:"parse_workers"`   // concurrent parse stage workers
-	MaxEmbedFails  int           `koanf:"max_embed_fails"` // consecutive embed failures before aborting crawl
-	JSPatterns     []string      `koanf:"js_patterns"`     // URL path prefixes requiring JS rendering
+	MaxBodySize    int64         `koanf:"max_body_size"`      // max response body in bytes, 0 = unlimited
+	MinContentLen  int           `koanf:"min_content_length"` // skip pages with less content (chars), 0 = disabled
+	EmbedWorkers   int           `koanf:"embed_workers"`      // concurrent embed stage workers
+	ParseWorkers   int           `koanf:"parse_workers"`      // concurrent parse stage workers
+	MaxEmbedFails  int           `koanf:"max_embed_fails"`    // consecutive embed failures before aborting crawl
+	JSPatterns     []string      `koanf:"js_patterns"`        // URL path prefixes requiring JS rendering
+	PDF            PDFConfig     `koanf:"pdf"`
+}
+
+// PDFConfig holds PDF text extraction settings.
+type PDFConfig struct {
+	HeadingPatterns []string `koanf:"heading_patterns"` // substring patterns for known section headers
 }
 
 // ObjectStoreConfig holds S3-compatible object storage settings (RustFS).
@@ -251,17 +255,14 @@ func (c *Config) applyDefaults() {
 		c.Server.WriteTimeout = 120
 	}
 
-	if c.Chat.MaxTokens == 0 {
-		c.Chat.MaxTokens = 1024
-	}
-	if c.Chat.Temperature == 0 {
-		c.Chat.Temperature = 0.7
-	}
 	if c.Agent.MaxTokens == 0 {
 		c.Agent.MaxTokens = 1024
 	}
 	if c.Agent.Temperature == 0 {
 		c.Agent.Temperature = 0.7
+	}
+	if c.Agent.MaxIterations == 0 {
+		c.Agent.MaxIterations = 5
 	}
 
 	if c.RAG.TopK == 0 {
@@ -280,6 +281,9 @@ func (c *Config) applyDefaults() {
 
 	if c.Embedding.MaxTokens == 0 {
 		c.Embedding.MaxTokens = 512
+	}
+	if c.Embedding.BatchSize == 0 {
+		c.Embedding.BatchSize = 2
 	}
 
 	if c.Chunking.MaxChunkSize == 0 {
@@ -319,19 +323,24 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.ParseWorkers == 0 {
 		c.Crawler.ParseWorkers = 4
 	}
+	if c.Crawler.MinContentLen == 0 {
+		c.Crawler.MinContentLen = 200
+	}
 	if c.Crawler.MaxEmbedFails == 0 {
 		c.Crawler.MaxEmbedFails = 3
+	}
+	if len(c.Crawler.PDF.HeadingPatterns) == 0 {
+		c.Crawler.PDF.HeadingPatterns = []string{
+			"DESCRIPCION", "OBJETIVOS", "CONTENIDOS", "METODOLOGIA",
+			"EVALUACION", "COMPETENCIAS", "TEMARIO", "BIBLIOGRAFIA",
+			"ACTIVIDADES FORMATIVAS", "SISTEMA DE EVALUACION",
+			"RESULTADOS DE APRENDIZAJE", "EQUIPO DOCENTE",
+			"RECOMENDACIONES", "DISTRIBUCION DEL TRABAJO",
+		}
 	}
 
 	if c.ObjectStore.Region == "" {
 		c.ObjectStore.Region = "us-east-1"
-	}
-
-	if c.RAG.SystemPromptES == "" {
-		c.RAG.SystemPromptES = prompts.RAGEs
-	}
-	if c.RAG.SystemPromptEN == "" {
-		c.RAG.SystemPromptEN = prompts.RAGEn
 	}
 }
 

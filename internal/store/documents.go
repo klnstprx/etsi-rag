@@ -35,7 +35,7 @@ func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Docum
 		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language, &doc.Category,
 	)
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, fmt.Errorf("document %s: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("querying document: %w", err)
@@ -185,7 +185,7 @@ func (s *SQLiteStore) DeleteDocument(ctx context.Context, id string) error {
 		return fmt.Errorf("checking rows affected: %w", err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("document not found: %s", id)
+		return fmt.Errorf("document %s: %w", id, ErrNotFound)
 	}
 
 	return nil

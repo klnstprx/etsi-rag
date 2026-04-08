@@ -5,66 +5,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openai/openai-go"
-
 	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/store"
+	"etsi-rag/internal/testutil"
 )
 
-// mockCounter counts words as tokens for testing.
-type mockCounter struct{}
-
-func (m *mockCounter) Count(_ context.Context, text string) (int, error) {
-	if text == "" {
-		return 0, nil
-	}
-	return len(strings.Fields(text)), nil
-}
-
-func (m *mockCounter) Tokenize(_ context.Context, text string) ([]int, error) {
-	words := strings.Fields(text)
-	tokens := make([]int, len(words))
-	for i := range tokens {
-		tokens[i] = i
-	}
-	return tokens, nil
-}
-
-func (m *mockCounter) Detokenize(_ context.Context, tokens []int) (string, error) {
-	parts := make([]string, len(tokens))
-	for i := range parts {
-		parts[i] = "word"
-	}
-	return strings.Join(parts, " "), nil
-}
-
-// mockLLM implements llm.LLM for testing.
-type mockLLM struct {
+// mockEmbedder implements llm.Embedder for testing.
+type mockEmbedder struct {
 	embedFn      func(ctx context.Context, text string) ([]float32, error)
 	embedBatchFn func(ctx context.Context, texts []string) ([][]float32, error)
-	chatFn       func(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error)
 }
 
-func (m *mockLLM) Embed(ctx context.Context, text string) ([]float32, error) {
+func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	return m.embedFn(ctx, text)
 }
 
-func (m *mockLLM) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+func (m *mockEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	return m.embedBatchFn(ctx, texts)
-}
-
-func (m *mockLLM) Chat(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
-	return m.chatFn(ctx, messages)
-}
-
-func (m *mockLLM) ChatStream(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (<-chan string, <-chan error) {
-	tokens := make(chan string)
-	errc := make(chan error)
-	close(tokens)
-	close(errc)
-	return tokens, errc
 }
 
 func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
@@ -74,8 +33,9 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 	if err != nil {
 		t.Fatalf("opening test db: %v", err)
 	}
+	t.Cleanup(func() { db.Close() })
+
 	if err := store.Migrate(db, 4); err != nil {
-		db.Close()
 		t.Fatalf("migrating: %v", err)
 	}
 
@@ -85,7 +45,7 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 		ChunkOverlap: 0,
 	})
 
-	mock := &mockLLM{
+	mock := &mockEmbedder{
 		embedFn: func(ctx context.Context, text string) ([]float32, error) {
 			return []float32{0.5, 0.5, 0.0, 0.0}, nil
 		},
@@ -96,17 +56,12 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 			}
 			return result, nil
 		},
-		chatFn: func(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
-			return "Test response from LLM", nil
-		},
 	}
 
-	p := NewPipeline(s, mock, mock, chunker, &mockCounter{}, config.RAGConfig{
+	p := NewPipeline(s, mock, chunker, &testutil.MockCounter{}, config.RAGConfig{
 		TopK:                5,
 		SimilarityThreshold: 0.0, // accept all
 		MaxContextTokens:    1024,
-		SystemPromptES:      "Eres un asistente.",
-		SystemPromptEN:      "You are an assistant.",
 	})
 
 	return p, s
@@ -192,142 +147,29 @@ func TestBuildContext(t *testing.T) {
 	if ragCtx == "" {
 		t.Fatal("expected non-empty context")
 	}
-	if !contains(ragCtx, "Test Document") {
+	if !strings.Contains(ragCtx, "Test Document") {
 		t.Error("context should contain document title")
 	}
-	if !contains(ragCtx, "chunk text") {
+	if !strings.Contains(ragCtx, "chunk text") {
 		t.Error("context should contain chunk content")
 	}
 }
 
-func TestBuildMessages(t *testing.T) {
-	p, _ := setupTestPipeline(t)
-
-	messages := []openai.ChatCompletionMessageParamUnion{
-		{
-			OfUser: &openai.ChatCompletionUserMessageParam{
-				Content: openai.ChatCompletionUserMessageParamContentUnion{
-					OfString: openai.String("What programs are available?"),
-				},
-			},
+func TestSourcesFromRetrieval(t *testing.T) {
+	result := &RetrievalResult{
+		Chunks: []ScoredChunk{
+			{Chunk: domain.Chunk{DocID: "doc-1", Content: "text", ChunkIndex: 0}, Score: 0.9},
+		},
+		Documents: []domain.Document{
+			{ID: "doc-1", Title: "Test Doc"},
 		},
 	}
 
-	result := p.BuildMessages(messages, "context text", "es")
-
-	// Should have system message + original message
-	if len(result) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(result))
+	sources := SourcesFromRetrieval(result)
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 source, got %d", len(sources))
 	}
-
-	// First should be system
-	if result[0].OfSystem == nil {
-		t.Fatal("first message should be system")
+	if sources[0].Title != "Test Doc" {
+		t.Errorf("expected title 'Test Doc', got %q", sources[0].Title)
 	}
-}
-
-func TestChat(t *testing.T) {
-	p, s := setupTestPipeline(t)
-	ctx := context.Background()
-
-	// Insert test data
-	doc := &domain.Document{
-		ID:       "doc-1",
-		Title:    "Test Doc",
-		Content:  "Relevant info",
-		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
-	}
-	if err := s.CreateDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateChunks(ctx, "doc-1",
-		[]domain.Chunk{{Content: "Relevant info", ChunkIndex: 0}},
-		[][]float32{{0.5, 0.5, 0.0, 0.0}},
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	messages := []openai.ChatCompletionMessageParamUnion{
-		{
-			OfUser: &openai.ChatCompletionUserMessageParam{
-				Content: openai.ChatCompletionUserMessageParamContentUnion{
-					OfString: openai.String("Tell me about this"),
-				},
-			},
-		},
-	}
-
-	result, err := p.Chat(ctx, messages, "es", nil)
-	if err != nil {
-		t.Fatalf("Chat failed: %v", err)
-	}
-
-	if result.Response == "" {
-		t.Error("expected non-empty response")
-	}
-	if len(result.Sources) == 0 {
-		t.Error("expected sources")
-	}
-}
-
-func TestExtractLastUserMessage(t *testing.T) {
-	messages := []openai.ChatCompletionMessageParamUnion{
-		{
-			OfSystem: &openai.ChatCompletionSystemMessageParam{
-				Content: openai.ChatCompletionSystemMessageParamContentUnion{
-					OfString: openai.String("System prompt"),
-				},
-			},
-		},
-		{
-			OfUser: &openai.ChatCompletionUserMessageParam{
-				Content: openai.ChatCompletionUserMessageParamContentUnion{
-					OfString: openai.String("First question"),
-				},
-			},
-		},
-		{
-			OfUser: &openai.ChatCompletionUserMessageParam{
-				Content: openai.ChatCompletionUserMessageParamContentUnion{
-					OfString: openai.String("Second question"),
-				},
-			},
-		},
-	}
-
-	got := extractLastUserMessage(messages)
-	if got != "Second question" {
-		t.Errorf("expected 'Second question', got %q", got)
-	}
-}
-
-func TestExtractLastUserMessageEmpty(t *testing.T) {
-	messages := []openai.ChatCompletionMessageParamUnion{
-		{
-			OfSystem: &openai.ChatCompletionSystemMessageParam{
-				Content: openai.ChatCompletionSystemMessageParamContentUnion{
-					OfString: openai.String("System only"),
-				},
-			},
-		},
-	}
-
-	got := extractLastUserMessage(messages)
-	if got != "" {
-		t.Errorf("expected empty string, got %q", got)
-	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

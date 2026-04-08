@@ -1,12 +1,14 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
 	"etsi-rag/internal/admin/templates"
+	"etsi-rag/internal/store"
 )
 
 const docsPageSize = 50
@@ -50,12 +52,12 @@ func (h *Handler) DocumentDetail(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.store.GetDocument(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "document not found", http.StatusNotFound)
+			return
+		}
 		h.logger.Error().Err(err).Str("id", id).Msg("getting document")
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if doc == nil {
-		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
 

@@ -4,6 +4,8 @@ package api
 
 import (
 	"github.com/openai/openai-go"
+
+	"etsi-rag/internal/domain"
 )
 
 // ChatCompletionRequest is the OpenAI-compatible chat completion request.
@@ -13,67 +15,20 @@ type ChatCompletionRequest = openai.ChatCompletionNewParams
 // ChatCompletionResponse is the OpenAI-compatible chat completion response.
 type ChatCompletionResponse = openai.ChatCompletion
 
+// ChatCompletionWithSources extends the chat response with source references.
+// Used in session mode to return sources collected by the agent's rag_search tool.
+type ChatCompletionWithSources struct {
+	openai.ChatCompletion
+
+	// Sources contains the documents used for context.
+	Sources []domain.SourceReference `json:"sources,omitempty"`
+}
+
 // EmbeddingRequest is the OpenAI-compatible embedding request.
 type EmbeddingRequest = openai.EmbeddingNewParams
 
 // EmbeddingResponse is the OpenAI-compatible embedding response.
 type EmbeddingResponse = openai.CreateEmbeddingResponse
-
-// RAGChatRequest extends the chat request with RAG-specific fields.
-// This is used for our /v1/rag/chat endpoint which adds RAG capabilities.
-type RAGChatRequest struct {
-	// Messages is the conversation history (OpenAI-compatible).
-	Messages []openai.ChatCompletionMessageParamUnion `json:"messages"`
-
-	// Model is the model to use for generation.
-	Model string `json:"model"`
-
-	// MaxTokens limits the response length.
-	MaxTokens int64 `json:"max_tokens,omitempty"`
-
-	// Temperature controls randomness (0.0-2.0).
-	Temperature float64 `json:"temperature,omitempty"`
-
-	// Stream enables streaming responses.
-	Stream bool `json:"stream,omitempty"`
-
-	// RAG-specific fields below
-
-	// Language filters RAG context to this language ("es" or "en").
-	Language *string `json:"language,omitempty"`
-
-	// TopK limits the number of retrieved chunks.
-	TopK *int `json:"top_k,omitempty"`
-
-	// IncludeSources adds source references to the response.
-	IncludeSources bool `json:"include_sources,omitempty"`
-}
-
-// RAGChatResponse extends the chat response with RAG-specific fields.
-type RAGChatResponse struct {
-	openai.ChatCompletion
-
-	// Sources contains the documents used for context (if include_sources=true).
-	Sources []SourceReference `json:"sources,omitempty"`
-}
-
-// SourceReference identifies a source document used in RAG context.
-type SourceReference struct {
-	// ID is the document identifier.
-	ID string `json:"id"`
-
-	// Title is the document title.
-	Title string `json:"title"`
-
-	// URL is the optional document URL.
-	URL *string `json:"url,omitempty"`
-
-	// ChunkIndex identifies which chunk was used.
-	ChunkIndex int `json:"chunk_index"`
-
-	// Score is the similarity score (0.0-1.0).
-	Score float32 `json:"score"`
-}
 
 // IngestRequest is used to add documents to the RAG index.
 type IngestRequest struct {

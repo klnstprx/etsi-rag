@@ -2,42 +2,40 @@ package api
 
 import (
 	"encoding/json"
-	"etsi-rag/internal/domain"
-	"etsi-rag/internal/llm"
-	"etsi-rag/internal/rag"
-	"etsi-rag/internal/session"
-	"etsi-rag/internal/store"
-	"etsi-rag/internal/tokencount"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/openai/openai-go"
+
+	"etsi-rag/internal/agent"
+	"etsi-rag/internal/domain"
+	"etsi-rag/internal/llm"
+	"etsi-rag/internal/rag"
+	"etsi-rag/internal/session"
+	"etsi-rag/internal/store"
+	"etsi-rag/internal/tokencount"
 )
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
 	mu              sync.RWMutex
-	embeddingClient llm.LLM
-	chatClient      llm.LLM
+	embeddingClient llm.Embedder
 	counter         tokencount.Counter
+	agent           *agent.Agent
 	pipeline        *rag.Pipeline
-	store           store.Store
+	store           *store.SQLiteStore
 	sessionStore    *session.Store
+	passthrough     bool
 }
 
 // SetEmbeddingClient swaps the embedding client (thread-safe).
-func (h *Handler) SetEmbeddingClient(c llm.LLM) {
+func (h *Handler) SetEmbeddingClient(c llm.Embedder) {
 	h.mu.Lock()
 	h.embeddingClient = c
-	h.mu.Unlock()
-}
-
-// SetChatClient swaps the chat client (thread-safe).
-func (h *Handler) SetChatClient(c llm.LLM) {
-	h.mu.Lock()
-	h.chatClient = c
 	h.mu.Unlock()
 }
 
@@ -48,16 +46,24 @@ func (h *Handler) SetCounter(c tokencount.Counter) {
 	h.mu.Unlock()
 }
 
-func (h *Handler) getEmbeddingClient() llm.LLM {
+// SetAgent swaps the agent (thread-safe).
+func (h *Handler) SetAgent(a *agent.Agent) {
+	h.mu.Lock()
+	h.agent = a
+	h.mu.Unlock()
+}
+
+// SetPassthrough toggles passthrough mode (thread-safe).
+func (h *Handler) SetPassthrough(p bool) {
+	h.mu.Lock()
+	h.passthrough = p
+	h.mu.Unlock()
+}
+
+func (h *Handler) getEmbeddingClient() llm.Embedder {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.embeddingClient
-}
-
-func (h *Handler) getChatClient() llm.LLM {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.chatClient
 }
 
 func (h *Handler) getCounter() tokencount.Counter {
@@ -66,25 +72,39 @@ func (h *Handler) getCounter() tokencount.Counter {
 	return h.counter
 }
 
+func (h *Handler) getAgent() *agent.Agent {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.agent
+}
+
+func (h *Handler) getPassthrough() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.passthrough
+}
+
 // HandlerConfig holds configuration for creating a Handler.
 type HandlerConfig struct {
-	EmbeddingClient llm.LLM
-	ChatClient      llm.LLM
+	EmbeddingClient llm.Embedder
 	Counter         tokencount.Counter
+	Agent           *agent.Agent
 	Pipeline        *rag.Pipeline
-	Store           store.Store
+	Store           *store.SQLiteStore
 	SessionStore    *session.Store
+	Passthrough     bool
 }
 
 // NewHandler creates a new Handler with the given dependencies.
 func NewHandler(cfg HandlerConfig) *Handler {
 	return &Handler{
 		embeddingClient: cfg.EmbeddingClient,
-		chatClient:      cfg.ChatClient,
 		counter:         cfg.Counter,
+		agent:           cfg.Agent,
 		pipeline:        cfg.Pipeline,
 		store:           cfg.Store,
 		sessionStore:    cfg.SessionStore,
+		passthrough:     cfg.Passthrough,
 	}
 }
 
@@ -95,16 +115,93 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // ChatCompletions handles POST /v1/chat/completions.
+// Two modes based on passthrough config:
+// - Session mode (default): single user message, session managed via X-Session-ID header
+// - Passthrough mode: accepts full message array, no session management
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
+	ag := h.getAgent()
+	if ag == nil {
+		ErrServiceUnavailable("agent not configured").WriteJSON(w)
+		return
+	}
+
+	if h.getPassthrough() {
+		h.chatPassthrough(w, r, ag)
+	} else {
+		h.chatSession(w, r, ag)
+	}
+}
+
+// chatSession handles session-managed chat.
+func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.Agent) {
 	var req ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ErrBadRequest("invalid request body").WriteJSON(w)
 		return
 	}
 
-	resp, err := h.getChatClient().Chat(r.Context(), req.Messages)
+	// Validate: exactly 1 user message, no system/assistant
+	userMsg, err := extractSingleUserMessage(req.Messages)
 	if err != nil {
-		ErrBadGateway(err).WriteJSON(w)
+		ErrBadRequest(err.Error()).WriteJSON(w)
+		return
+	}
+
+	// Get or create session
+	sessionIDHeader := r.Header.Get("X-Session-ID")
+	var sessionIDPtr *string
+	if sessionIDHeader != "" {
+		sessionIDPtr = &sessionIDHeader
+	}
+	sessionID, _ := h.sessionStore.GetOrCreate(sessionIDPtr)
+
+	// Run agent
+	result, err := ag.Chat(r.Context(), sessionID, userMsg)
+	if err != nil {
+		ErrInternal(err).WriteJSON(w)
+		return
+	}
+
+	// Build response
+	resp := ChatCompletionWithSources{
+		ChatCompletion: openai.ChatCompletion{
+			ID:      "chatcmpl-local",
+			Model:   string(req.Model),
+			Created: time.Now().Unix(),
+			Choices: []openai.ChatCompletionChoice{
+				{
+					Index:        0,
+					FinishReason: "stop",
+					Message: openai.ChatCompletionMessage{
+						Content: result.Response,
+					},
+				},
+			},
+		},
+		Sources: result.Sources,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Session-ID", sessionID)
+	json.NewEncoder(w).Encode(resp)
+}
+
+// chatPassthrough handles stateless passthrough chat.
+func (h *Handler) chatPassthrough(w http.ResponseWriter, r *http.Request, ag *agent.Agent) {
+	var req ChatCompletionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		ErrBadRequest("invalid request body").WriteJSON(w)
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		ErrBadRequest("messages cannot be empty").WriteJSON(w)
+		return
+	}
+
+	result, err := ag.ChatPassthrough(r.Context(), req.Messages)
+	if err != nil {
+		ErrInternal(err).WriteJSON(w)
 		return
 	}
 
@@ -118,7 +215,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 				Index:        0,
 				FinishReason: "stop",
 				Message: openai.ChatCompletionMessage{
-					Content: resp,
+					Content: result.Response,
 				},
 			},
 		},
@@ -182,69 +279,6 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 			TotalTokens:  totalTokens,
 		},
 	})
-}
-
-// RAGChat handles POST /v1/rag/chat.
-func (h *Handler) RAGChat(w http.ResponseWriter, r *http.Request) {
-	var req RAGChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w)
-		return
-	}
-
-	if len(req.Messages) == 0 {
-		ErrBadRequest("messages cannot be empty").WriteJSON(w)
-		return
-	}
-
-	// Validate language if provided
-	lang := "es" // default
-	if req.Language != nil {
-		l := domain.Language(*req.Language)
-		if !l.Valid() {
-			ErrInvalidLanguage(*req.Language).WriteJSON(w)
-			return
-		}
-		lang = *req.Language
-	}
-
-	result, err := h.pipeline.Chat(r.Context(), req.Messages, lang, req.TopK)
-	if err != nil {
-		ErrInternal(err).WriteJSON(w)
-		return
-	}
-
-	resp := RAGChatResponse{
-		ChatCompletion: openai.ChatCompletion{
-			ID:      "ragchat-local",
-			Model:   req.Model,
-			Created: time.Now().Unix(),
-			Choices: []openai.ChatCompletionChoice{
-				{
-					Index:        0,
-					FinishReason: "stop",
-					Message: openai.ChatCompletionMessage{
-						Content: result.Response,
-					},
-				},
-			},
-		},
-	}
-
-	if req.IncludeSources {
-		for _, src := range result.Sources {
-			resp.Sources = append(resp.Sources, SourceReference{
-				ID:         src.ID,
-				Title:      src.Title,
-				URL:        src.URL,
-				ChunkIndex: src.ChunkIndex,
-				Score:      src.Score,
-			})
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
 }
 
 // Ingest handles POST /v1/rag/ingest.
@@ -329,8 +363,7 @@ func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 
 	err := h.store.DeleteDocument(r.Context(), id)
 	if err != nil {
-		// Check if not found
-		if err.Error() == "document not found: "+id {
+		if errors.Is(err, store.ErrNotFound) {
 			ErrNotFound("document not found").WriteJSON(w)
 			return
 		}
@@ -339,4 +372,42 @@ func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// extractSingleUserMessage validates that messages contain exactly 1 user message
+// with no system/assistant messages (for session mode).
+func extractSingleUserMessage(messages []openai.ChatCompletionMessageParamUnion) (string, error) {
+	if len(messages) == 0 {
+		return "", fmt.Errorf("messages cannot be empty")
+	}
+
+	var userContent string
+	userCount := 0
+
+	for _, msg := range messages {
+		if msg.OfSystem != nil {
+			return "", fmt.Errorf("system messages not allowed in session mode")
+		}
+		if msg.OfAssistant != nil {
+			return "", fmt.Errorf("assistant messages not allowed in session mode")
+		}
+		if msg.OfTool != nil {
+			return "", fmt.Errorf("tool messages not allowed in session mode")
+		}
+		if msg.OfUser != nil {
+			userCount++
+			if msg.OfUser.Content.OfString.Valid() {
+				userContent = msg.OfUser.Content.OfString.Value
+			}
+		}
+	}
+
+	if userCount != 1 {
+		return "", fmt.Errorf("session mode requires exactly 1 user message, got %d", userCount)
+	}
+	if userContent == "" {
+		return "", fmt.Errorf("user message content cannot be empty")
+	}
+
+	return userContent, nil
 }

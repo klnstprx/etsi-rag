@@ -75,21 +75,13 @@ func run(logger zerolog.Logger) error {
 
 	sqliteStore := store.NewSQLiteStore(db, cfg.Embedding.Dimension)
 
-	// Resolve backends and create LLM clients per stage (graceful: nil on failure)
-	embeddingClient, err := clientForStage(cfg, "embedding", cfg.Embedding.Backend, llm.ClientConfig{
-		Model: cfg.Embedding.Model,
+	// Resolve embedding backend and create client (graceful: nil on failure)
+	embeddingClient, err := embedClientForStage(cfg, cfg.Embedding.Backend, llm.EmbedClientConfig{
+		Model:     cfg.Embedding.Model,
+		BatchSize: cfg.Embedding.BatchSize,
 	}, logger)
 	if err != nil {
 		logger.Warn().Err(err).Msg("embedding backend not available")
-	}
-
-	chatClient, err := clientForStage(cfg, "chat", cfg.Chat.Backend, llm.ClientConfig{
-		Model:       cfg.Chat.Model,
-		MaxTokens:   int64(cfg.Chat.MaxTokens),
-		Temperature: cfg.Chat.Temperature,
-	}, logger)
-	if err != nil {
-		logger.Warn().Err(err).Msg("chat backend not available")
 	}
 
 	// Initialize token counter, probe llama.cpp for auto-detection, then create chunker
@@ -97,11 +89,11 @@ func run(logger zerolog.Logger) error {
 	if err != nil {
 		logger.Warn().Err(err).Msg("token counter not available (fix via admin UI)")
 	}
-	probeLlamaCpp(cfg, logger)
+	probeLlamaCppBackends(cfg, logger)
 	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
 
-	// Initialize RAG pipeline (may have nil embedder/chatter — guarded in pipeline methods)
-	pipeline := rag.NewPipeline(sqliteStore, embeddingClient, chatClient, chunker, embeddingCounter, cfg.RAG)
+	// Initialize RAG pipeline (may have nil embedder — guarded in pipeline methods)
+	pipeline := rag.NewPipeline(sqliteStore, embeddingClient, chunker, embeddingCounter, cfg.RAG)
 
 	// Initialize object store (graceful: nil on failure)
 	objStore, err := objectstore.New(cfg.ObjectStore)
@@ -128,21 +120,10 @@ func run(logger zerolog.Logger) error {
 	// Initialize session store
 	sessionStore := session.NewStore(cfg.Session)
 
-	// Create API handler and router
-	handler := api.NewHandler(api.HandlerConfig{
-		EmbeddingClient: embeddingClient,
-		ChatClient:      chatClient,
-		Counter:         embeddingCounter,
-		Pipeline:        pipeline,
-		Store:           sqliteStore,
-		SessionStore:    sessionStore,
-	})
-	router := api.NewRouter(handler, logger)
-
 	// Create agent (only if [agent] backend is configured)
 	var agentInstance *agent.Agent
 	if cfg.Agent.Backend != "" {
-		agentClient, err := clientForStage(cfg, "agent", cfg.Agent.Backend, llm.ClientConfig{
+		agentClient, err := chatClientForStage(cfg, "agent", cfg.Agent.Backend, llm.ChatClientConfig{
 			Model:       cfg.Agent.Model,
 			MaxTokens:   int64(cfg.Agent.MaxTokens),
 			Temperature: cfg.Agent.Temperature,
@@ -154,12 +135,25 @@ func run(logger zerolog.Logger) error {
 				agent.NewRAGSearchTool(pipeline),
 				agent.NewListDocumentsTool(sqliteStore),
 			}
-			agentInstance = agent.NewAgent(agentClient, tools, prompts.Agent, logger)
+			systemPrompt := agentSystemPrompt(cfg)
+			agentInstance = agent.NewAgent(agentClient, tools, systemPrompt, cfg.Agent.MaxIterations, sessionStore, logger)
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent initialized")
 		}
 	} else {
 		logger.Warn().Msg("no [agent] backend configured, agent disabled")
 	}
+
+	// Create API handler and router
+	handler := api.NewHandler(api.HandlerConfig{
+		EmbeddingClient: embeddingClient,
+		Counter:         embeddingCounter,
+		Agent:           agentInstance,
+		Pipeline:        pipeline,
+		Store:           sqliteStore,
+		SessionStore:    sessionStore,
+		Passthrough:     cfg.API.Passthrough,
+	})
+	router := api.NewRouter(handler, logger)
 
 	// Create admin handler
 	adminHandler := admin.NewHandler(admin.HandlerConfig{
@@ -174,7 +168,7 @@ func run(logger zerolog.Logger) error {
 	})
 	adminHandler.SetAgent(agentInstance)
 	adminHandler.SetOnConfigSave(func() {
-		rebuildClients(cfg, pipeline, handler, adminHandler, sqliteStore, logger)
+		rebuildClients(cfg, pipeline, handler, adminHandler, crawlerInstance, sqliteStore, sessionStore, logger)
 	})
 
 	// Mount admin routes
@@ -185,8 +179,8 @@ func run(logger zerolog.Logger) error {
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 120 * time.Second, // Long timeout for LLM responses
+		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -231,10 +225,30 @@ func run(logger zerolog.Logger) error {
 	return nil
 }
 
-// clientForStage resolves a backend by name from the config and builds an LLM client.
-// The caller provides stage-specific fields (model, max_tokens, temperature) in partialCfg;
-// BaseURL and APIKey are filled from the backend.
-func clientForStage(cfg *config.Config, stage, backendName string, partialCfg llm.ClientConfig, logger zerolog.Logger) (*llm.Client, error) {
+// agentSystemPrompt returns the system prompt for the agent.
+// Uses the config value if set, otherwise falls back to the embedded default.
+func agentSystemPrompt(cfg *config.Config) string {
+	if cfg.Agent.SystemPrompt != "" {
+		return cfg.Agent.SystemPrompt
+	}
+	return prompts.Agent
+}
+
+// embedClientForStage resolves a backend by name and builds an embedding client.
+func embedClientForStage(cfg *config.Config, backendName string, partialCfg llm.EmbedClientConfig, logger zerolog.Logger) (*llm.EmbedClient, error) {
+	b := cfg.GetBackend(backendName)
+	if b == nil {
+		return nil, fmt.Errorf("no enabled backend named %q for embedding", backendName)
+	}
+
+	partialCfg.BaseURL = b.BaseURL
+	partialCfg.APIKey = b.APIKey
+	logger.Info().Str("stage", "embedding").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
+	return llm.NewEmbedClient(partialCfg), nil
+}
+
+// chatClientForStage resolves a backend by name and builds a chat client.
+func chatClientForStage(cfg *config.Config, stage, backendName string, partialCfg llm.ChatClientConfig, logger zerolog.Logger) (*llm.ChatClient, error) {
 	b := cfg.GetBackend(backendName)
 	if b == nil {
 		return nil, fmt.Errorf("no enabled backend named %q for stage %s", backendName, stage)
@@ -243,24 +257,34 @@ func clientForStage(cfg *config.Config, stage, backendName string, partialCfg ll
 	partialCfg.BaseURL = b.BaseURL
 	partialCfg.APIKey = b.APIKey
 	logger.Info().Str("stage", stage).Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
-	return llm.NewClient(partialCfg), nil
+	return llm.NewChatClient(partialCfg), nil
 }
 
 // rebuildClients rebuilds all LLM clients from the live config and swaps them
-// into pipeline, API handler, and admin handler. Called after every config save.
+// into pipeline, API handler, admin handler, and crawler. Called after every config save.
 func rebuildClients(
 	cfg *config.Config,
 	pipeline *rag.Pipeline,
 	apiHandler *api.Handler,
 	adminHandler *admin.Handler,
+	crawlerInstance *crawler.Crawler,
 	st *store.SQLiteStore,
+	sessionStore *session.Store,
 	logger zerolog.Logger,
 ) {
-	logger.Info().Msg("rebuilding LLM clients after config change")
+	logger.Info().Msg("rebuilding clients after config change")
+
+	// Propagate non-LLM config changes
+	pipeline.SetConfig(cfg.RAG)
+	apiHandler.SetPassthrough(cfg.API.Passthrough)
+	if crawlerInstance != nil {
+		crawlerInstance.SetConfig(cfg.Crawler)
+	}
 
 	// Embedding
-	if ec, err := clientForStage(cfg, "embedding", cfg.Embedding.Backend, llm.ClientConfig{
-		Model: cfg.Embedding.Model,
+	if ec, err := embedClientForStage(cfg, cfg.Embedding.Backend, llm.EmbedClientConfig{
+		Model:     cfg.Embedding.Model,
+		BatchSize: cfg.Embedding.BatchSize,
 	}, logger); err != nil {
 		logger.Warn().Err(err).Msg("embedding client rebuild failed")
 		pipeline.SetEmbedder(nil)
@@ -275,71 +299,93 @@ func rebuildClients(
 	if err != nil {
 		logger.Warn().Err(err).Msg("token counter rebuild failed (fix via admin UI)")
 	}
-	probeLlamaCpp(cfg, logger)
+	probeLlamaCppBackends(cfg, logger)
 	pipeline.SetCounter(counter)
 	apiHandler.SetCounter(counter)
 	pipeline.SetChunker(chunking.NewStructureAwareChunker(cfg.Chunking, counter, cfg.Embedding.MaxTokens))
 
-	// Chat
-	if cc, err := clientForStage(cfg, "chat", cfg.Chat.Backend, llm.ClientConfig{
-		Model:       cfg.Chat.Model,
-		MaxTokens:   int64(cfg.Chat.MaxTokens),
-		Temperature: cfg.Chat.Temperature,
-	}, logger); err != nil {
-		logger.Warn().Err(err).Msg("chat client rebuild failed")
-		pipeline.SetChatter(nil)
-		apiHandler.SetChatClient(nil)
-	} else {
-		pipeline.SetChatter(cc)
-		apiHandler.SetChatClient(cc)
-	}
-
-	// Agent
+	// Agent (single chat client for agent)
 	if cfg.Agent.Backend != "" {
-		if ac, err := clientForStage(cfg, "agent", cfg.Agent.Backend, llm.ClientConfig{
+		if ac, err := chatClientForStage(cfg, "agent", cfg.Agent.Backend, llm.ChatClientConfig{
 			Model:       cfg.Agent.Model,
 			MaxTokens:   int64(cfg.Agent.MaxTokens),
 			Temperature: cfg.Agent.Temperature,
 		}, logger); err != nil {
 			logger.Warn().Err(err).Msg("agent client rebuild failed")
 			adminHandler.SetAgent(nil)
+			apiHandler.SetAgent(nil)
 		} else {
 			tools := []agent.Tool{
 				agent.NewRAGSearchTool(pipeline),
 				agent.NewListDocumentsTool(st),
 			}
-			adminHandler.SetAgent(agent.NewAgent(ac, tools, prompts.Agent, logger))
+			systemPrompt := agentSystemPrompt(cfg)
+			a := agent.NewAgent(ac, tools, systemPrompt, cfg.Agent.MaxIterations, sessionStore, logger)
+			adminHandler.SetAgent(a)
+			apiHandler.SetAgent(a)
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent rebuilt")
 		}
 	} else {
 		adminHandler.SetAgent(nil)
+		apiHandler.SetAgent(nil)
 	}
 }
 
-// probeLlamaCpp queries a llama.cpp backend's /props and /v1/models endpoints
-// to auto-detect embedding context window and dimension, updating cfg in-place.
-func probeLlamaCpp(cfg *config.Config, logger zerolog.Logger) {
-	b := cfg.GetBackend(cfg.Embedding.Backend)
-	if b == nil || !b.IsLlamaCpp {
-		return
+// probeLlamaCppBackends probes each unique llama.cpp backend once and applies
+// the results to the relevant stage configs.
+func probeLlamaCppBackends(cfg *config.Config, logger zerolog.Logger) {
+	type stageRef struct {
+		name    string
+		backend string
+	}
+	stages := []stageRef{
+		{"embedding", cfg.Embedding.Backend},
+		{"agent", cfg.Agent.Backend},
 	}
 
-	props, err := backend.FetchLlamaCppProps(context.Background(), b.BaseURL, nil)
-	if err != nil {
-		logger.Warn().Err(err).Str("baseURL", b.BaseURL).Msg("could not probe llama.cpp, using config values")
-		return
+	probed := make(map[string]*backend.LlamaCppProps)
+	for _, s := range stages {
+		if s.backend == "" {
+			continue
+		}
+		if _, done := probed[s.backend]; done {
+			continue
+		}
+		b := cfg.GetBackend(s.backend)
+		if b == nil || !b.IsLlamaCpp {
+			continue
+		}
+		props, err := backend.FetchLlamaCppProps(context.Background(), b.BaseURL, nil)
+		if err != nil {
+			logger.Warn().Err(err).Str("backend", b.Name).
+				Msg("could not probe llama.cpp backend, using config values")
+			continue
+		}
+		probed[s.backend] = props
+		logger.Info().Str("backend", b.Name).
+			Int("n_ctx", props.ContextSize).
+			Int("n_embd", props.EmbeddingDim).
+			Str("model_path", props.ModelPath).
+			Msg("probed llama.cpp backend")
 	}
 
-	if props.ContextSize > 0 {
-		logger.Info().Int("n_ctx", props.ContextSize).Msg("auto-detected embedding context window")
-		cfg.Embedding.MaxTokens = props.ContextSize
+	// Apply embedding-specific results
+	if props, ok := probed[cfg.Embedding.Backend]; ok {
+		if props.ContextSize > 0 {
+			cfg.Embedding.MaxTokens = props.ContextSize
+		}
+		if props.EmbeddingDim > 0 {
+			cfg.Embedding.Dimension = props.EmbeddingDim
+		}
 	}
-	if props.EmbeddingDim > 0 {
-		logger.Info().Int("n_embd", props.EmbeddingDim).Msg("auto-detected embedding dimension")
-		cfg.Embedding.Dimension = props.EmbeddingDim
-	}
-	if props.ModelPath != "" {
-		logger.Info().Str("model_path", props.ModelPath).Msg("llama.cpp model")
+
+	// Apply agent context window
+	if props, ok := probed[cfg.Agent.Backend]; ok && props.ContextSize > 0 {
+		cfg.Agent.ContextWindow = props.ContextSize
+		if cfg.Agent.MaxTokens > props.ContextSize {
+			logger.Warn().Int("max_tokens", cfg.Agent.MaxTokens).Int("context_window", props.ContextSize).
+				Msg("agent max_tokens exceeds context window")
+		}
 	}
 }
 
@@ -352,7 +398,7 @@ func counterForBackend(cfg *config.Config, backendName, model string, logger zer
 	if b.IsLlamaCpp {
 		base := strings.TrimSuffix(b.BaseURL, "/v1")
 		logger.Info().Str("backend", b.Name).Msg("using llama.cpp token counter")
-		return tokencount.NewLlamaCppCounter(base, nil), nil
+		return tokencount.NewLlamaCppCounter(base, model, nil), nil
 	}
 	tc, err := tokencount.NewTiktokenCounter(model)
 	if err != nil {
