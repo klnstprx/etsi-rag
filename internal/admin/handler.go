@@ -34,8 +34,8 @@ type Handler struct {
 	objStore     *objectstore.Client
 	logger       zerolog.Logger
 	onConfigSave func()
-	chatMu      sync.RWMutex
-	chatStreams map[string]*chatStream
+	chatMu       sync.RWMutex
+	chatStreams  map[string]*chatStream
 }
 
 // HandlerConfig holds dependencies for the admin handler.
@@ -63,7 +63,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		objStore:     cfg.ObjStore,
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,
-		chatStreams: make(map[string]*chatStream),
+		chatStreams:  make(map[string]*chatStream),
 	}
 }
 

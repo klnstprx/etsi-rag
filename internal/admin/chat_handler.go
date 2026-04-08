@@ -60,17 +60,12 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 	h.chatStreams[sessionID] = stream
 	h.chatMu.Unlock()
 
-	// Run agent in background if available
+	// Run agent in background if available.
+	// The goroutine only closes the channel when done — ChatStream handles
+	// map cleanup, so the stream entry survives until the SSE client connects.
 	if h.agent != nil {
 		go func() {
-			defer func() {
-				cancel()
-				close(tokenChan)
-				h.chatMu.Lock()
-				delete(h.chatStreams, sessionID)
-				h.chatMu.Unlock()
-			}()
-
+			defer close(tokenChan)
 			result, err := h.agent.Chat(ctx, sessionID, message)
 			if err != nil {
 				tokenChan <- fmt.Sprintf("[Error: %s]", err.Error())
@@ -79,15 +74,8 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 			tokenChan <- result.Response
 		}()
 	} else {
-		// No agent configured, send placeholder
 		go func() {
-			defer func() {
-				cancel()
-				close(tokenChan)
-				h.chatMu.Lock()
-				delete(h.chatStreams, sessionID)
-				h.chatMu.Unlock()
-			}()
+			defer close(tokenChan)
 			tokenChan <- "Agent not configured. Please configure the [agent] section in config."
 		}()
 	}
@@ -111,8 +99,13 @@ func (h *Handler) ChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cancel agent context when SSE exits (client disconnect or natural completion).
-	defer stream.cancel()
+	// Clean up when SSE exits (client disconnect or natural completion).
+	defer func() {
+		stream.cancel()
+		h.chatMu.Lock()
+		delete(h.chatStreams, sessionID)
+		h.chatMu.Unlock()
+	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

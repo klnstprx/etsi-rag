@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
@@ -532,6 +533,51 @@ func TestChatStream_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+// TestChatStream_AfterFastSend verifies that the SSE stream survives in the map
+// after ChatSend's goroutine finishes quickly (no agent configured). This was a
+// race: the goroutine deleted the stream entry before HTMX could connect.
+func TestChatStream_AfterFastSend(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	// h.agent is nil — the goroutine finishes immediately.
+
+	sessionID := h.sessionStore.Create()
+
+	// 1. ChatSend — registers the stream and spawns a goroutine that finishes fast.
+	form := url.Values{"message": {"hi"}, "session_id": {sessionID}}
+	sendReq := postForm("/admin/chat/send", form)
+	sendW := httptest.NewRecorder()
+	h.ChatSend(sendW, sendReq)
+
+	if sendW.Code != http.StatusOK {
+		t.Fatalf("ChatSend status = %d, want 200", sendW.Code)
+	}
+
+	// Small sleep to let the goroutine finish — simulates the delay before
+	// HTMX opens the SSE connection.
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. ChatStream — must still find the stream despite the goroutine having finished.
+	streamReq := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/"+sessionID, nil)
+	streamReq = withChiParam(streamReq, "sessionID", sessionID)
+	streamW := httptest.NewRecorder()
+	h.ChatStream(streamW, streamReq)
+
+	if streamW.Code != http.StatusOK {
+		t.Fatalf("ChatStream status = %d, want 200 (stream should still exist)", streamW.Code)
+	}
+
+	body := streamW.Body.String()
+	if !strings.Contains(body, "event: token") {
+		t.Errorf("expected SSE token event, got %q", body)
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Errorf("expected SSE done event, got %q", body)
+	}
+	if !strings.Contains(body, "Agent not configured") {
+		t.Errorf("expected placeholder message, got %q", body)
 	}
 }
 
