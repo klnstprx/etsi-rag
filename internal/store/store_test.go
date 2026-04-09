@@ -19,11 +19,11 @@ func setupTestStore(t *testing.T) *SQLiteStore {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if err := Migrate(db, testEmbeddingDimension); err != nil {
+	if err := Migrate(db); err != nil {
 		t.Fatalf("running migrations: %v", err)
 	}
 
-	return NewSQLiteStore(db, testEmbeddingDimension)
+	return NewSQLiteStore(db, func() int { return testEmbeddingDimension })
 }
 
 func TestDocumentCRUD(t *testing.T) {

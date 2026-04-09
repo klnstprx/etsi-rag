@@ -47,11 +47,11 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if err := store.Migrate(db, 4); err != nil {
+	if err := store.Migrate(db); err != nil {
 		t.Fatal(err)
 	}
 
-	s := store.NewSQLiteStore(db, 4)
+	s := store.NewSQLiteStore(db, func() int { return 4 })
 	mock := &mockEmbedder{}
 	counter := &testutil.MockCounter{}
 	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100})

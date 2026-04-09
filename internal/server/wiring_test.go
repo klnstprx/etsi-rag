@@ -26,15 +26,14 @@ func testServer(t *testing.T, cfg *config.Config) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dim := cfg.Embedding.Dimension
-	if dim == 0 {
-		dim = 4
+	if cfg.Embedding.Dimension == 0 {
+		cfg.Embedding.Dimension = 4
 	}
-	if err := store.Migrate(db, dim); err != nil {
+	if err := store.Migrate(db); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
-	st := store.NewSQLiteStore(db, dim)
+	st := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
 	t.Cleanup(func() { st.Close() })
 
 	return &Server{
@@ -235,6 +234,84 @@ func TestProbeLlamaCppBackends_NonLlamaCpp(t *testing.T) {
 
 	if cfg.Embedding.MaxTokens != original {
 		t.Errorf("MaxTokens changed for non-llama.cpp backend: got %d, want %d", cfg.Embedding.MaxTokens, original)
+	}
+}
+
+// --- dimension via config closure ---
+
+func TestProbeSyncsStoreDimension(t *testing.T) {
+	// Mock llama.cpp returning n_embd=768 via /v1/models
+	mux := http.NewServeMux()
+	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"default_generation_settings": map[string]any{"n_ctx": 2048},
+		})
+	})
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "emb", "meta": map[string]any{"n_embd": 768}},
+			},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: ts.URL + "/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	cfg.Embedding.Backend = "llama"
+	cfg.Embedding.Model = "emb"
+	cfg.Embedding.Dimension = 4 // will be overridden by probe
+
+	s := testServer(t, cfg)
+	s.probeLlamaCppBackends()
+
+	// Probe updates cfg.Embedding.Dimension; store reads it via closure
+	ctx := context.Background()
+	doc := &domain.Document{
+		ID: "d1", Title: "T", Content: "C",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	s.store.CreateDocument(ctx, doc)
+
+	if err := s.store.CreateChunks(ctx, "d1",
+		[]domain.Chunk{{Content: "c", ChunkIndex: 0}},
+		[][]float32{make([]float32, 768)},
+	); err != nil {
+		t.Errorf("768-dim embedding rejected after probe: %v", err)
+	}
+}
+
+func TestConfigDimensionChange_SeenByStore(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Embedding.Dimension = 4
+	s := testServer(t, cfg)
+
+	ctx := context.Background()
+	doc := &domain.Document{
+		ID: "d1", Title: "T", Content: "C",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	s.store.CreateDocument(ctx, doc)
+
+	// Admin UI changes dimension — store sees it immediately via closure
+	cfg.Embedding.Dimension = 128
+
+	err := s.store.CreateChunks(ctx, "d1",
+		[]domain.Chunk{{Content: "c", ChunkIndex: 0}},
+		[][]float32{{1, 0, 0, 0}},
+	)
+	if err == nil {
+		t.Error("expected 4-dim embedding to be rejected after dimension changed to 128")
+	}
+
+	if err := s.store.CreateChunks(ctx, "d1",
+		[]domain.Chunk{{Content: "c", ChunkIndex: 0}},
+		[][]float32{make([]float32, 128)},
+	); err != nil {
+		t.Errorf("128-dim embedding rejected after config change: %v", err)
 	}
 }
 

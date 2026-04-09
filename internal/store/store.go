@@ -15,15 +15,16 @@ type SearchResult struct {
 
 // SQLiteStore implements document/chunk storage using SQLite with pure Go cosine similarity search.
 type SQLiteStore struct {
-	db                 *sql.DB
-	embeddingDimension int
+	db           *sql.DB
+	embeddingDim func() int
 }
 
 // NewSQLiteStore creates a new SQLite store.
-func NewSQLiteStore(db *sql.DB, embeddingDimension int) *SQLiteStore {
+// embeddingDim is called on each validation to get the current expected dimension.
+func NewSQLiteStore(db *sql.DB, embeddingDim func() int) *SQLiteStore {
 	return &SQLiteStore{
-		db:                 db,
-		embeddingDimension: embeddingDimension,
+		db:           db,
+		embeddingDim: embeddingDim,
 	}
 }
 

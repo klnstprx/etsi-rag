@@ -31,6 +31,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var dimensionChanged bool
 	switch section {
 	case "server":
 		h.config.Server.Host = r.FormValue("host")
@@ -51,11 +52,13 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Session.MaxMessages = formInt(r, "max_messages", h.config.Session.MaxMessages)
 		h.config.Session.TTLSeconds = formInt(r, "ttl_seconds", h.config.Session.TTLSeconds)
 	case "embedding":
+		oldDim := h.config.Embedding.Dimension
 		h.config.Embedding.Backend = r.FormValue("backend")
 		h.config.Embedding.Model = r.FormValue("model")
 		h.config.Embedding.Dimension = formInt(r, "dimension", h.config.Embedding.Dimension)
 		h.config.Embedding.MaxTokens = formInt(r, "max_tokens", h.config.Embedding.MaxTokens)
 		h.config.Embedding.BatchSize = formInt(r, "batch_size", h.config.Embedding.BatchSize)
+		dimensionChanged = oldDim != 0 && h.config.Embedding.Dimension != oldDim
 	case "agent":
 		h.config.Agent.Backend = r.FormValue("backend")
 		h.config.Agent.Model = r.FormValue("model")
@@ -121,6 +124,9 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 	sections := configToSections(h.config)
 	templates.ConfigContent(sections).Render(r.Context(), w)
 	templates.Toast(fmt.Sprintf("Section '%s' saved", section), "success").Render(r.Context(), w)
+	if dimensionChanged {
+		templates.Toast("Embedding dimension changed — existing documents should be reprocessed", "warning").Render(r.Context(), w)
+	}
 }
 
 func configToSections(cfg *config.Config) []templates.ConfigSection {

@@ -65,12 +65,12 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	if err := store.Migrate(db, cfg.Embedding.Dimension); err != nil {
+	if err := store.Migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
-	sqliteStore := store.NewSQLiteStore(db, cfg.Embedding.Dimension)
+	sqliteStore := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
 
 	s := &Server{
 		cfg:        cfg,

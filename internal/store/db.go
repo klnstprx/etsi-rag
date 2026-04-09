@@ -20,7 +20,7 @@ func OpenDB(path string) (*sql.DB, error) {
 }
 
 // Migrate runs database migrations.
-func Migrate(db *sql.DB, embeddingDimension int) error {
+func Migrate(db *sql.DB) error {
 	schema := `
 		CREATE TABLE IF NOT EXISTS documents (
 			id TEXT PRIMARY KEY,

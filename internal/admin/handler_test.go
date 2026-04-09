@@ -29,12 +29,12 @@ func setupTestAdminHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Migrate(db, 4); err != nil {
+	if err := store.Migrate(db); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 
-	s := store.NewSQLiteStore(db, 4)
+	s := store.NewSQLiteStore(db, func() int { return 4 })
 	t.Cleanup(func() { s.Close() })
 
 	cfg := &config.Config{}
@@ -332,6 +332,72 @@ func TestConfigSave_Agent_DefaultTextNormalized(t *testing.T) {
 
 	if h.config.Agent.SystemPrompt != "" {
 		t.Errorf("SystemPrompt = %q, want empty (default text should normalize)", h.config.Agent.SystemPrompt)
+	}
+}
+
+func TestConfigSave_EmbeddingDimensionChange_WarnsReprocess(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Embedding.Dimension = 512 // initial
+
+	form := url.Values{
+		"backend":    {""},
+		"model":      {""},
+		"dimension":  {"1024"}, // changed
+		"max_tokens": {"512"},
+		"batch_size": {"32"},
+	}
+	req := postForm("/admin/config/embedding", form)
+	req = withChiParam(req, "section", "embedding")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "existing documents should be reprocessed") {
+		t.Error("expected reprocess warning toast when embedding dimension changes")
+	}
+}
+
+func TestConfigSave_EmbeddingDimensionSame_NoWarning(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Embedding.Dimension = 1024
+
+	form := url.Values{
+		"backend":    {""},
+		"model":      {""},
+		"dimension":  {"1024"}, // unchanged
+		"max_tokens": {"512"},
+		"batch_size": {"32"},
+	}
+	req := postForm("/admin/config/embedding", form)
+	req = withChiParam(req, "section", "embedding")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, "existing documents should be reprocessed") {
+		t.Error("should not warn when embedding dimension is unchanged")
+	}
+}
+
+func TestConfigSave_NonEmbeddingSection_NoWarning(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Embedding.Dimension = 512
+
+	form := url.Values{
+		"top_k":              {"10"},
+		"max_context_tokens": {"4096"},
+	}
+	req := postForm("/admin/config/rag", form)
+	req = withChiParam(req, "section", "rag")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, "existing documents should be reprocessed") {
+		t.Error("should not warn about dimension when saving non-embedding section")
 	}
 }
 

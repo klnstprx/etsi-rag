@@ -76,9 +76,9 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 	defer embStmt.Close()
 
 	for i, chunk := range chunks {
-		if len(embeddings[i]) != s.embeddingDimension {
+		if dim := s.embeddingDim(); len(embeddings[i]) != dim {
 			return fmt.Errorf("embedding dimension mismatch at index %d: expected %d, got %d",
-				i, s.embeddingDimension, len(embeddings[i]))
+				i, dim, len(embeddings[i]))
 		}
 
 		result, err := chunkStmt.ExecContext(ctx, docID, chunk.Content, chunk.ChunkIndex, chunk.SectionTitle)
@@ -136,9 +136,9 @@ func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]
 
 // SearchSimilar performs brute-force cosine similarity search in Go.
 func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, topK int, lang *domain.Language) ([]SearchResult, error) {
-	if len(embedding) != s.embeddingDimension {
+	if dim := s.embeddingDim(); len(embedding) != dim {
 		return nil, fmt.Errorf("embedding dimension mismatch: expected %d, got %d",
-			s.embeddingDimension, len(embedding))
+			dim, len(embedding))
 	}
 
 	// Load all embeddings (with optional language filter via join)
@@ -178,9 +178,9 @@ func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, to
 			return nil, fmt.Errorf("scanning embedding: %w", err)
 		}
 		vec := deserializeFloat32(blob)
-		if len(vec) != s.embeddingDimension {
+		if dim := s.embeddingDim(); len(vec) != dim {
 			return nil, fmt.Errorf("stored embedding dimension mismatch for chunk %d: expected %d, got %d",
-				chunkID, s.embeddingDimension, len(vec))
+				chunkID, dim, len(vec))
 		}
 		sim := cosineSimilarity(embedding, vec)
 		scores = append(scores, scored{chunkID: chunkID, score: sim})
