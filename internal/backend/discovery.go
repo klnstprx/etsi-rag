@@ -2,6 +2,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -57,6 +58,13 @@ func FetchLlamaCppProps(ctx context.Context, baseURL, model string, client *http
 	modelsResult := <-modelsCh
 	if modelsResult.err == nil && len(modelsResult.model.Data) > 0 && modelsResult.model.Data[0].Meta != nil {
 		props.EmbeddingDim = modelsResult.model.Data[0].Meta.NEmbd
+	}
+
+	// Fallback: if n_embd is still unknown (e.g. router mode), try a test embedding.
+	if props.EmbeddingDim == 0 && model != "" {
+		if dim, err := probeEmbeddingDim(ctx, client, baseURL, model); err == nil {
+			props.EmbeddingDim = dim
+		}
 	}
 
 	return props, nil
@@ -134,6 +142,39 @@ func fetchProps(ctx context.Context, client *http.Client, baseURL, model string)
 		return nil, err
 	}
 	return &result, nil
+}
+
+// probeEmbeddingDim sends a short test embedding request and returns the vector dimension.
+// Returns 0 and an error if the model doesn't support embeddings or the request fails.
+func probeEmbeddingDim(ctx context.Context, client *http.Client, baseURL, model string) (int, error) {
+	body, _ := json.Marshal(map[string]string{"input": "dim", "model": model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("embeddings probe: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	if len(result.Data) == 0 {
+		return 0, fmt.Errorf("embeddings probe: empty data")
+	}
+	return len(result.Data[0].Embedding), nil
 }
 
 func fetchModelsRaw(ctx context.Context, client *http.Client, baseURL string) (*modelsResponse, error) {

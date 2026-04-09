@@ -9,14 +9,16 @@ import (
 
 func TestFetchLlamaCppProps(t *testing.T) {
 	tests := []struct {
-		name        string
-		propsStatus int
-		propsBody   string
-		modelsBody  string
-		wantCtx     int
-		wantDim     int
-		wantPath    string
-		wantErr     bool
+		name           string
+		model          string // model param passed to FetchLlamaCppProps
+		propsStatus    int
+		propsBody      string
+		modelsBody     string
+		embeddingsBody string // response for /v1/embeddings probe fallback
+		wantCtx        int
+		wantDim        int
+		wantPath       string
+		wantErr        bool
 	}{
 		{
 			name:        "both endpoints succeed",
@@ -33,7 +35,7 @@ func TestFetchLlamaCppProps(t *testing.T) {
 			wantErr:     true,
 		},
 		{
-			name:        "models returns null meta",
+			name:        "models returns null meta no model param",
 			propsStatus: 200,
 			propsBody:   `{"default_generation_settings":{"n_ctx":4096},"model_path":"/models/loading.gguf"}`,
 			modelsBody:  `{"data":[{"meta":null}]}`,
@@ -49,6 +51,27 @@ func TestFetchLlamaCppProps(t *testing.T) {
 			wantCtx:     512,
 			wantDim:     0,
 			wantPath:    "test.gguf",
+		},
+		{
+			name:           "router mode falls back to embedding probe",
+			model:          "qwen-embeddings",
+			propsStatus:    200,
+			propsBody:      `{"default_generation_settings":{"n_ctx":8192},"model_path":"/models/embed.gguf"}`,
+			modelsBody:     `{"data":[{"id":"qwen-embeddings"}]}`,
+			embeddingsBody: `{"data":[{"embedding":[0.1,0.2,0.3,0.4,0.5]}]}`,
+			wantCtx:        8192,
+			wantDim:        5,
+			wantPath:       "/models/embed.gguf",
+		},
+		{
+			name:        "router mode embedding probe fails gracefully",
+			model:       "chat-model",
+			propsStatus: 200,
+			propsBody:   `{"default_generation_settings":{"n_ctx":4096},"model_path":"/models/chat.gguf"}`,
+			modelsBody:  `{"data":[{"id":"chat-model"}]}`,
+			wantCtx:     4096,
+			wantDim:     0,
+			wantPath:    "/models/chat.gguf",
 		},
 	}
 
@@ -68,11 +91,18 @@ func TestFetchLlamaCppProps(t *testing.T) {
 					w.WriteHeader(http.StatusInternalServerError)
 				}
 			})
+			mux.HandleFunc("POST /v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+				if tt.embeddingsBody != "" {
+					w.Write([]byte(tt.embeddingsBody))
+				} else {
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			})
 
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 
-			props, err := FetchLlamaCppProps(context.Background(), srv.URL, "", nil)
+			props, err := FetchLlamaCppProps(context.Background(), srv.URL, tt.model, nil)
 
 			if tt.wantErr {
 				if err == nil {
