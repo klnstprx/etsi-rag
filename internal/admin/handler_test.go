@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -13,11 +14,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"bytes"
-
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/prompts"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
 )
@@ -259,6 +259,79 @@ func TestConfigSave_FiresCallback(t *testing.T) {
 
 	if !fired {
 		t.Error("onConfigSave callback was not fired")
+	}
+}
+
+func TestConfigSave_Agent_CustomPrompt(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	custom := "You are a custom bot for testing."
+	form := url.Values{
+		"backend":        {""},
+		"model":          {""},
+		"max_tokens":     {"1024"},
+		"temperature":    {"0.5"},
+		"context_window": {"8192"},
+		"max_iterations": {"10"},
+		"system_prompt":  {custom},
+	}
+	req := postForm("/admin/config/agent", form)
+	req = withChiParam(req, "section", "agent")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Agent.SystemPrompt != custom {
+		t.Errorf("SystemPrompt = %q, want %q", h.config.Agent.SystemPrompt, custom)
+	}
+}
+
+func TestConfigSave_Agent_ClearPrompt(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Agent.SystemPrompt = "some custom prompt"
+
+	form := url.Values{
+		"backend":        {""},
+		"model":          {""},
+		"max_tokens":     {"1024"},
+		"temperature":    {"0.5"},
+		"context_window": {"8192"},
+		"max_iterations": {"10"},
+		"system_prompt":  {""},
+	}
+	req := postForm("/admin/config/agent", form)
+	req = withChiParam(req, "section", "agent")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Agent.SystemPrompt != "" {
+		t.Errorf("SystemPrompt = %q, want empty (default)", h.config.Agent.SystemPrompt)
+	}
+}
+
+func TestConfigSave_Agent_DefaultTextNormalized(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	// Submitting the default template text should normalize to empty string
+	// so config stays clean and auto-updates with future default changes.
+	form := url.Values{
+		"backend":        {""},
+		"model":          {""},
+		"max_tokens":     {"1024"},
+		"temperature":    {"0.5"},
+		"context_window": {"8192"},
+		"max_iterations": {"10"},
+		"system_prompt":  {prompts.Agent},
+	}
+	req := postForm("/admin/config/agent", form)
+	req = withChiParam(req, "section", "agent")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Agent.SystemPrompt != "" {
+		t.Errorf("SystemPrompt = %q, want empty (default text should normalize)", h.config.Agent.SystemPrompt)
 	}
 }
 

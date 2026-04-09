@@ -11,6 +11,7 @@ import (
 
 	"etsi-rag/internal/admin/templates"
 	"etsi-rag/internal/config"
+	"etsi-rag/internal/prompts"
 )
 
 // ConfigPage handles GET /admin/config.
@@ -62,8 +63,11 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Agent.Temperature = formFloat(r, "temperature", h.config.Agent.Temperature)
 		h.config.Agent.ContextWindow = formInt(r, "context_window", h.config.Agent.ContextWindow)
 		h.config.Agent.MaxIterations = formInt(r, "max_iterations", h.config.Agent.MaxIterations)
-		if v := r.FormValue("system_prompt"); v != "" {
-			h.config.Agent.SystemPrompt = v
+		submitted := strings.TrimSpace(r.FormValue("system_prompt"))
+		if submitted == "" || submitted == strings.TrimSpace(prompts.Agent) {
+			h.config.Agent.SystemPrompt = ""
+		} else {
+			h.config.Agent.SystemPrompt = submitted
 		}
 	case "api":
 		h.config.API.Passthrough = r.FormValue("passthrough") == "true"
@@ -154,7 +158,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "temperature", Label: "Temperature", Value: fmt.Sprintf("%.2f", cfg.Agent.Temperature), Type: "text"},
 				{Key: "context_window", Label: "Context Window (auto-detected)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number"},
 				{Key: "max_iterations", Label: "Max Tool Iterations", Value: strconv.Itoa(cfg.Agent.MaxIterations), Type: "number"},
-				{Key: "system_prompt", Label: "System Prompt (empty = default)", Value: cfg.Agent.SystemPrompt, Type: "textarea"},
+				{Key: "system_prompt", Label: "System Prompt (clear to restore default)", Value: effectivePrompt(cfg), Type: "textarea", Hint: "Template variables: {{.DocumentCount}}, {{.ChunkCount}}"},
 			},
 		},
 		{
@@ -244,6 +248,13 @@ func formFloat(r *http.Request, key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+func effectivePrompt(cfg *config.Config) string {
+	if cfg.Agent.SystemPrompt != "" {
+		return cfg.Agent.SystemPrompt
+	}
+	return prompts.Agent
 }
 
 func splitTrimCSV(s string) []string {

@@ -1,12 +1,11 @@
 package templates
 
 import (
-	"fmt"
 	"etsi-rag/internal/domain"
+	"fmt"
 )
 
 // --- Buttons ---
-
 templ BtnPrimary(label string, attrs templ.Attributes) {
 	<button
 		class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
@@ -65,7 +64,6 @@ templ BtnLink(label string, color string, attrs templ.Attributes) {
 }
 
 // --- Form Fields ---
-
 templ FormField(name, label, fieldType, value, placeholder string, required bool) {
 	<div>
 		<label class="block text-sm font-medium text-gray-700">{ label }</label>
@@ -80,15 +78,18 @@ templ FormField(name, label, fieldType, value, placeholder string, required bool
 	</div>
 }
 
-templ FormTextarea(name, label, value, placeholder string, rows int) {
+templ FormTextarea(name, label, value, placeholder, hint string, rows int) {
 	<div class="sm:col-span-2">
 		<label class="block text-sm font-medium text-gray-700">{ label }</label>
 		<textarea
 			name={ name }
 			placeholder={ placeholder }
 			rows={ fmt.Sprintf("%d", rows) }
-			class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
+			class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2 font-mono text-xs"
 		>{ value }</textarea>
+		if hint != "" {
+			<p class="mt-1 text-xs text-gray-500">{ hint }</p>
+		}
 	</div>
 }
 
@@ -173,7 +174,6 @@ templ FormCheckbox(name, label string, checked bool) {
 }
 
 // --- Badges ---
-
 templ Badge(label string, color string) {
 	switch color {
 		case "green":
@@ -231,7 +231,6 @@ templ RunStatusBadge(status domain.CrawlRunStatus) {
 }
 
 // --- Cards ---
-
 templ Card() {
 	<div class="bg-white rounded-lg shadow">
 		{ children... }
@@ -248,7 +247,6 @@ templ CardWithHeader(title string) {
 }
 
 // --- Tables ---
-
 templ TableWrap() {
 	<div class="bg-white rounded-lg shadow overflow-x-auto">
 		{ children... }
@@ -268,13 +266,14 @@ templ EmptyRow(colspan int, message string) {
 }
 
 // --- Toast ---
-
 templ Toast(message string, kind string) {
 	<div id="toast-container" hx-swap-oob="afterbegin">
 		<div
 			if kind == "success" {
 				class="px-4 py-3 rounded-lg shadow-lg text-sm bg-green-600 text-white"
-			} else if kind == "error" {
+			}
+			else
+			if kind == "error" {
 				class="px-4 py-3 rounded-lg shadow-lg text-sm bg-red-600 text-white"
 			} else {
 				class="px-4 py-3 rounded-lg shadow-lg text-sm bg-blue-600 text-white"
@@ -288,7 +287,6 @@ templ Toast(message string, kind string) {
 }
 
 // --- Page Header ---
-
 templ PageHeader(title string) {
 	<div class="mb-8">
 		<h2 class="text-2xl font-bold text-gray-900">{ title }</h2>
@@ -296,7 +294,6 @@ templ PageHeader(title string) {
 }
 
 // --- Stats ---
-
 templ StatCard(label string, value string) {
 	<div class="bg-white rounded-lg shadow p-6">
 		<dt class="text-sm font-medium text-gray-500 truncate">{ label }</dt>

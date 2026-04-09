@@ -13,6 +13,7 @@ type ConfigField struct {
 	Value       string
 	Type        string // "text", "number", "select", "textarea", "model"
 	Placeholder string
+	Hint        string   // optional help text below the field
 	Options     []string // for Type == "select" or "model" (backend names)
 }
 
@@ -46,7 +47,7 @@ templ ConfigSectionForm(section ConfigSection) {
 					} else if field.Type == "model" {
 						@FormModelSelect(field.Key, field.Label, field.Value, section.Name, field.Options)
 					} else if field.Type == "textarea" {
-						@FormTextarea(field.Key, field.Label, field.Value, field.Placeholder, 4)
+						@FormTextarea(field.Key, field.Label, field.Value, field.Placeholder, field.Hint, 4)
 					} else {
 						@FormField(field.Key, field.Label, field.Type, field.Value, field.Placeholder, false)
 					}

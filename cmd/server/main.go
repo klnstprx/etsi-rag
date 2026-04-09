@@ -2,6 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
 	"etsi-rag/internal/admin"
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/api"
@@ -16,14 +25,6 @@ import (
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/tokencount"
-	"fmt"
-	"net/http"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"strings"
-	"syscall"
-	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -135,7 +136,7 @@ func run(logger zerolog.Logger) error {
 				agent.NewSemanticSearchTool(pipeline),
 				agent.NewListDocumentsTool(sqliteStore),
 			}
-			systemPrompt := agentSystemPrompt(cfg)
+			systemPrompt := agentSystemPrompt(cfg, sqliteStore, logger)
 			agentCounter, err := counterForBackend(cfg, cfg.Agent.Backend, cfg.Agent.Model, logger)
 			if err != nil {
 				logger.Warn().Err(err).Msg("agent token counter not available, tool output guards disabled")
@@ -229,13 +230,25 @@ func run(logger zerolog.Logger) error {
 	return nil
 }
 
-// agentSystemPrompt returns the system prompt for the agent.
+// agentSystemPrompt renders the system prompt template with current data.
 // Uses the config value if set, otherwise falls back to the embedded default.
-func agentSystemPrompt(cfg *config.Config) string {
-	if cfg.Agent.SystemPrompt != "" {
-		return cfg.Agent.SystemPrompt
+func agentSystemPrompt(cfg *config.Config, st *store.SQLiteStore, logger zerolog.Logger) string {
+	ctx := context.Background()
+	docCount, _ := st.CountDocuments(ctx)
+	chunkCount, _ := st.CountChunks(ctx)
+
+	rendered, err := prompts.RenderAgent(cfg.Agent.SystemPrompt, prompts.PromptData{
+		DocumentCount: docCount,
+		ChunkCount:    chunkCount,
+	})
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to render system prompt template, using raw text")
+		if cfg.Agent.SystemPrompt != "" {
+			return cfg.Agent.SystemPrompt
+		}
+		return prompts.Agent
 	}
-	return prompts.Agent
+	return rendered
 }
 
 // embedClientForStage resolves a backend by name and builds an embedding client.
@@ -323,7 +336,7 @@ func rebuildClients(
 				agent.NewSemanticSearchTool(pipeline),
 				agent.NewListDocumentsTool(st),
 			}
-			systemPrompt := agentSystemPrompt(cfg)
+			systemPrompt := agentSystemPrompt(cfg, st, logger)
 			agentCounter, counterErr := counterForBackend(cfg, cfg.Agent.Backend, cfg.Agent.Model, logger)
 			if counterErr != nil {
 				logger.Warn().Err(counterErr).Msg("agent token counter rebuild failed, tool output guards disabled")
