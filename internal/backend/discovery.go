@@ -73,18 +73,22 @@ func FetchLlamaCppProps(ctx context.Context, baseURL, model string, client *http
 // FetchModelIDs calls the OpenAI-compatible /models endpoint and returns model IDs.
 // Works with both llama.cpp and OpenAI-compatible backends.
 // baseURL should include /v1 (e.g. "http://localhost:8080/v1").
-func FetchModelIDs(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+// client may be nil, in which case http.DefaultClient is used.
+func FetchModelIDs(ctx context.Context, baseURL, apiKey string, client *http.Client) ([]string, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building models request: %w", err)
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching models from %s: %w", baseURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -94,7 +98,7 @@ func FetchModelIDs(ctx context.Context, baseURL, apiKey string) ([]string, error
 
 	var result modelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding models response: %w", err)
 	}
 
 	ids := make([]string, len(result.Data))
@@ -127,11 +131,11 @@ func fetchProps(ctx context.Context, client *http.Client, baseURL, model string)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building props request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching /props: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -139,7 +143,7 @@ func fetchProps(ctx context.Context, client *http.Client, baseURL, model string)
 	}
 	var result propsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding /props response: %w", err)
 	}
 	return &result, nil
 }
@@ -150,13 +154,13 @@ func probeEmbeddingDim(ctx context.Context, client *http.Client, baseURL, model 
 	body, _ := json.Marshal(map[string]string{"input": "dim", "model": model})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("building embeddings probe request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("sending embeddings probe: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -169,7 +173,7 @@ func probeEmbeddingDim(ctx context.Context, client *http.Client, baseURL, model 
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("decoding embeddings probe response: %w", err)
 	}
 	if len(result.Data) == 0 {
 		return 0, fmt.Errorf("embeddings probe: empty data")
@@ -180,11 +184,11 @@ func probeEmbeddingDim(ctx context.Context, client *http.Client, baseURL, model 
 func fetchModelsRaw(ctx context.Context, client *http.Client, baseURL string) (*modelsResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building models request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching /models: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -192,7 +196,7 @@ func fetchModelsRaw(ctx context.Context, client *http.Client, baseURL string) (*
 	}
 	var result modelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding /models response: %w", err)
 	}
 	return &result, nil
 }

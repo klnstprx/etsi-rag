@@ -142,7 +142,7 @@ func TestFetchModelIDs(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	ids, err := FetchModelIDs(context.Background(), srv.URL+"/v1", "")
+	ids, err := FetchModelIDs(context.Background(), srv.URL+"/v1", "", nil)
 	if err != nil {
 		t.Fatalf("FetchModelIDs: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestFetchModelIDsWithAuth(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	ids, err := FetchModelIDs(context.Background(), srv.URL+"/v1", "sk-test")
+	ids, err := FetchModelIDs(context.Background(), srv.URL+"/v1", "sk-test", nil)
 	if err != nil {
 		t.Fatalf("FetchModelIDs: %v", err)
 	}
