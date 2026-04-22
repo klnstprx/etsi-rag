@@ -41,24 +41,26 @@ func TestCategorize(t *testing.T) {
 }
 
 func TestStableDocID(t *testing.T) {
-	t.Run("deterministic", func(t *testing.T) {
-		id1 := StableDocID("https://www.uma.es/page")
-		id2 := StableDocID("https://www.uma.es/page")
+	// Arbitrary but valid-shaped SHA-256 hex strings.
+	hashA := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	hashB := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	t.Run("same content hash produces same ID", func(t *testing.T) {
+		id1 := StableDocID(hashA)
+		id2 := StableDocID(hashA)
 		if id1 != id2 {
 			t.Errorf("StableDocID not deterministic: %q != %q", id1, id2)
 		}
 	})
 
-	t.Run("different URLs produce different IDs", func(t *testing.T) {
-		id1 := StableDocID("https://www.uma.es/page1")
-		id2 := StableDocID("https://www.uma.es/page2")
-		if id1 == id2 {
-			t.Errorf("different URLs produced same ID: %q", id1)
+	t.Run("different content hashes produce different IDs", func(t *testing.T) {
+		if StableDocID(hashA) == StableDocID(hashB) {
+			t.Error("different content hashes produced same ID")
 		}
 	})
 
 	t.Run("format is crawl- prefix plus 24 hex chars", func(t *testing.T) {
-		id := StableDocID("https://www.uma.es/test")
+		id := StableDocID(hashA)
 		if len(id) != len("crawl-")+24 {
 			t.Errorf("unexpected ID length: got %d (%q)", len(id), id)
 		}

@@ -3,7 +3,6 @@ package crawler
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"etsi-rag/internal/domain"
-	"etsi-rag/internal/store"
 )
 
 // crawlStageAll runs BFS crawl for all enabled sources concurrently, sending items to parseCh.
@@ -312,18 +310,38 @@ func (c *Crawler) embedStage(
 			continue
 		}
 
-		// New or changed — ingest
-		docID := StableDocID(item.URL)
+		docID := StableDocID(item.ContentHash)
 		category := Categorize(item.URL, item.Source.Category)
 		language := domain.Language(item.Source.Language)
 		urlStr := item.URL
 
-		// Delete old document if exists (re-ingest)
-		if err := c.store.DeleteDocument(ctx, docID); err != nil {
-			// "not found" is expected for new documents
-			if !errors.Is(err, store.ErrNotFound) {
-				c.logger.Warn().Err(err).Str("url", item.URL).Msg("delete old document failed")
+		page := &domain.CrawlPage{
+			SourceID:       item.Source.ID,
+			URL:            item.URL,
+			ContentType:    item.ContentType,
+			Title:          item.Title,
+			ContentHash:    item.ContentHash,
+			ObjectStoreKey: item.ObjKey,
+			DocID:          &docID,
+			Status:         domain.CrawlPageFetched,
+			LastCrawledAt:  &now,
+			LastChangedAt:  &now,
+		}
+
+		// Content-addressed dedup: if a document with this ID already exists
+		// (same content reached via another URL, or an earlier crawl of this
+		// URL), skip the embed and just record the URL.
+		docExists, err := c.store.DocumentExists(ctx, docID)
+		if err != nil {
+			c.logger.Warn().Err(err).Str("url", item.URL).Msg("document existence check failed")
+		}
+		if docExists {
+			if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
+				c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
 			}
+			progress.Skipped.Add(1)
+			embedSkipped++
+			continue
 		}
 
 		doc := domain.Document{
@@ -359,18 +377,6 @@ func (c *Crawler) embedStage(
 				Msg("embed progress")
 		}
 
-		page := &domain.CrawlPage{
-			SourceID:       item.Source.ID,
-			URL:            item.URL,
-			ContentType:    item.ContentType,
-			Title:          item.Title,
-			ContentHash:    item.ContentHash,
-			ObjectStoreKey: item.ObjKey,
-			DocID:          &docID,
-			Status:         domain.CrawlPageFetched,
-			LastCrawledAt:  &now,
-			LastChangedAt:  &now,
-		}
 		if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
 			c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
 		}

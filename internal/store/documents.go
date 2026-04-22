@@ -23,6 +23,20 @@ func (s *SQLiteStore) CreateDocument(ctx context.Context, doc *domain.Document) 
 	return nil
 }
 
+// DocumentExists reports whether a document with the given ID exists.
+// Cheaper than GetDocument because it does not fetch the content column.
+func (s *SQLiteStore) DocumentExists(ctx context.Context, id string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM documents WHERE id = ? LIMIT 1`, id).Scan(&n)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking document existence: %w", err)
+	}
+	return true, nil
+}
+
 // GetDocument retrieves a document by ID.
 func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Document, error) {
 	query := `

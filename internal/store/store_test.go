@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"etsi-rag/internal/domain"
 )
@@ -584,6 +585,112 @@ func TestDeleteDocumentCascadesChunks(t *testing.T) {
 	}
 	if len(retrieved) != 0 {
 		t.Errorf("expected 0 chunks after document deletion, got %d", len(retrieved))
+	}
+}
+
+func TestDocumentExists(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	doc := &domain.Document{
+		ID:       "doc-1",
+		Title:    "Test",
+		Content:  "x",
+		Language: domain.LanguageES,
+		Category: domain.CategoryGeneral,
+	}
+	if err := store.CreateDocument(ctx, doc); err != nil {
+		t.Fatalf("creating document: %v", err)
+	}
+
+	t.Run("existing id returns true", func(t *testing.T) {
+		ok, err := store.DocumentExists(ctx, "doc-1")
+		if err != nil {
+			t.Fatalf("DocumentExists: %v", err)
+		}
+		if !ok {
+			t.Error("expected true for existing doc-1")
+		}
+	})
+
+	t.Run("missing id returns false without error", func(t *testing.T) {
+		ok, err := store.DocumentExists(ctx, "nonexistent")
+		if err != nil {
+			t.Fatalf("DocumentExists: %v", err)
+		}
+		if ok {
+			t.Error("expected false for nonexistent id")
+		}
+	})
+}
+
+func TestPurgeOrphanDocuments(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	src := &domain.CrawlSource{Name: "test", SeedURL: "https://example.com/", Category: "general", Language: "es", Enabled: true}
+	if err := store.CreateCrawlSource(ctx, src); err != nil {
+		t.Fatalf("creating source: %v", err)
+	}
+
+	// Three docs: referenced, orphan, shared-by-two.
+	docs := []*domain.Document{
+		{ID: "doc-ref", Title: "referenced", Content: "x", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+		{ID: "doc-orphan", Title: "orphan", Content: "x", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+		{ID: "doc-shared", Title: "shared", Content: "x", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+	}
+	for _, d := range docs {
+		if err := store.CreateDocument(ctx, d); err != nil {
+			t.Fatalf("creating document %s: %v", d.ID, err)
+		}
+	}
+
+	// Chunks on the orphan so we can verify cascade deletion.
+	chunks := []domain.Chunk{{Content: "chunk", ChunkIndex: 0}}
+	embeddings := [][]float32{{1, 0, 0, 0}}
+	if err := store.CreateChunks(ctx, "doc-orphan", chunks, embeddings); err != nil {
+		t.Fatalf("creating chunks: %v", err)
+	}
+
+	// Two crawl_pages: one pointing at doc-ref, two (different URLs) pointing at doc-shared.
+	refID, sharedID := "doc-ref", "doc-shared"
+	now := time.Now()
+	pages := []*domain.CrawlPage{
+		{SourceID: src.ID, URL: "https://example.com/a", DocID: &refID, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceID: src.ID, URL: "https://example.com/b", DocID: &sharedID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceID: src.ID, URL: "https://example.com/c", DocID: &sharedID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+	}
+	for _, p := range pages {
+		if err := store.UpsertCrawlPage(ctx, p); err != nil {
+			t.Fatalf("upserting page: %v", err)
+		}
+	}
+
+	count, err := store.PurgeOrphanDocuments(ctx)
+	if err != nil {
+		t.Fatalf("PurgeOrphanDocuments: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 orphan purged, got %d", count)
+	}
+
+	if ok, _ := store.DocumentExists(ctx, "doc-orphan"); ok {
+		t.Error("doc-orphan should have been purged")
+	}
+	if ok, _ := store.DocumentExists(ctx, "doc-ref"); !ok {
+		t.Error("doc-ref should remain")
+	}
+	if ok, _ := store.DocumentExists(ctx, "doc-shared"); !ok {
+		t.Error("doc-shared should remain (referenced by two crawl_pages)")
+	}
+
+	// Chunks + embeddings for the orphan should be gone.
+	remaining, err := store.GetChunksByDocument(ctx, "doc-orphan")
+	if err != nil {
+		t.Fatalf("GetChunksByDocument: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected orphan chunks to cascade, got %d", len(remaining))
 	}
 }
 

@@ -178,6 +178,22 @@ func (s *SQLiteStore) MarkStalePages(ctx context.Context, sourceID int64, runSta
 	return int(n), nil
 }
 
+// PurgeOrphanDocuments deletes documents that are not referenced by any
+// crawl_page. Orphans arise when the URL that pointed at a document moves to
+// new content (content-hash-derived doc IDs mean the old doc stays behind
+// until another URL also points away from it). Chunks + embeddings cascade.
+func (s *SQLiteStore) PurgeOrphanDocuments(ctx context.Context) (int, error) {
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM documents WHERE id NOT IN (
+			SELECT doc_id FROM crawl_pages WHERE doc_id IS NOT NULL
+		)`)
+	if err != nil {
+		return 0, fmt.Errorf("purging orphan documents: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
 // PurgeStaleDocuments deletes documents linked to stale crawl pages.
 func (s *SQLiteStore) PurgeStaleDocuments(ctx context.Context) (int, error) {
 	result, err := s.db.ExecContext(ctx, `

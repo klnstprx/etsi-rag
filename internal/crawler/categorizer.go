@@ -1,8 +1,6 @@
 package crawler
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"strings"
 
 	"etsi-rag/internal/domain"
@@ -30,8 +28,9 @@ func Categorize(url, sourceCategory string) domain.Category {
 	return domain.CategoryGeneral
 }
 
-// StableDocID generates a deterministic document ID from a URL.
-func StableDocID(url string) string {
-	h := sha256.Sum256([]byte(url))
-	return fmt.Sprintf("crawl-%x", h[:12]) // 24 hex chars
+// StableDocID generates a content-addressed document ID from the SHA-256
+// content hash hex string. Two URLs with identical extracted text map to the
+// same ID, so duplicate content is stored once and shared across crawl_pages.
+func StableDocID(contentHash string) string {
+	return "crawl-" + contentHash[:24]
 }

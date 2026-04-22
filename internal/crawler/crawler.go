@@ -327,6 +327,8 @@ func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
 	drainWorkers()
 	stopTicker()
 
+	c.purgeOrphans(ctx, runID)
+
 	status := domain.CrawlRunCompleted
 	if ctx.Err() != nil {
 		status = domain.CrawlRunCancelled
@@ -412,6 +414,8 @@ func (c *Crawler) runCrawl(ctx context.Context, sourceID *int64) (int64, error) 
 	drainWorkers()
 	stopTicker()
 
+	c.purgeOrphans(ctx, runID)
+
 	// Determine final status from progress counters
 	status := domain.CrawlRunCompleted
 	if ctx.Err() != nil {
@@ -437,6 +441,24 @@ func (c *Crawler) runCrawl(ctx context.Context, sourceID *int64) (int64, error) 
 
 	c.finishRun(ctx, runID, status, nil, discovered, fetched, changed, failed)
 	return runID, nil
+}
+
+// purgeOrphans removes documents no longer referenced by any crawl_page.
+// Called at the end of runCrawl / runReprocess. Uses a background context so
+// cleanup still runs if the crawl context was cancelled.
+func (c *Crawler) purgeOrphans(ctx context.Context, runID int64) {
+	purgeCtx := ctx
+	if ctx.Err() != nil {
+		purgeCtx = context.Background()
+	}
+	n, err := c.store.PurgeOrphanDocuments(purgeCtx)
+	if err != nil {
+		c.logger.Warn().Err(err).Int64("run_id", runID).Msg("purging orphan documents failed")
+		return
+	}
+	if n > 0 {
+		c.logger.Info().Int64("run_id", runID).Int("orphans", n).Msg("purged orphan documents")
+	}
 }
 
 // blockedExtensions contains file extensions that should never be crawled.
