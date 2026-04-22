@@ -24,11 +24,11 @@ func RenderAgent(customTemplate string, data PromptData) (string, error) {
 	if tmpl == "" {
 		tmpl = Agent
 	}
-	return Render(tmpl, data)
+	return render(tmpl, data)
 }
 
-// Render parses tmplStr as a text/template and executes it with the given data.
-func Render(tmplStr string, data PromptData) (string, error) {
+// render parses tmplStr as a text/template and executes it with the given data.
+func render(tmplStr string, data PromptData) (string, error) {
 	t, err := template.New("prompt").Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parsing prompt template: %w", err)
