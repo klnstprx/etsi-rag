@@ -38,6 +38,7 @@ type BackendConfig struct {
 // Config holds all application configuration.
 type Config struct {
 	Server      ServerConfig      `koanf:"server"`
+	Admin       AdminConfig       `koanf:"admin"`
 	Backends    []BackendConfig   `koanf:"backends"`
 	Embedding   EmbeddingConfig   `koanf:"embedding"`
 	Agent       AgentConfig       `koanf:"agent"`
@@ -73,10 +74,19 @@ func MaskAPIKey(key string) string {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Host         string `koanf:"host"`
-	Port         int    `koanf:"port"`
-	ReadTimeout  int    `koanf:"read_timeout"`
-	WriteTimeout int    `koanf:"write_timeout"`
+	Host            string        `koanf:"host"`
+	Port            int           `koanf:"port"`
+	ReadTimeout     int           `koanf:"read_timeout"`     // seconds
+	WriteTimeout    int           `koanf:"write_timeout"`    // seconds
+	IdleTimeout     time.Duration `koanf:"idle_timeout"`     // keep-alive idle
+	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"` // graceful shutdown grace
+}
+
+// AdminConfig holds admin-UI behaviour settings.
+type AdminConfig struct {
+	BackendProbeTimeout  time.Duration `koanf:"backend_probe_timeout"`  // per-request timeout for backend health checks
+	BackendModelsTimeout time.Duration `koanf:"backend_models_timeout"` // per-request timeout for /models listing
+	ChatStreamTimeout    time.Duration `koanf:"chat_stream_timeout"`    // max lifetime of an admin chat turn goroutine
 }
 
 // EmbeddingConfig holds embedding stage settings.
@@ -90,13 +100,14 @@ type EmbeddingConfig struct {
 
 // AgentConfig holds agent/chat stage settings.
 type AgentConfig struct {
-	Backend       string  `koanf:"backend"`
-	Model         string  `koanf:"model"`
-	MaxTokens     int     `koanf:"max_tokens"`
-	Temperature   float64 `koanf:"temperature"`
-	ContextWindow int     `koanf:"context_window"` // total context window (auto-detected for llama.cpp)
-	MaxIterations int     `koanf:"max_iterations"` // max tool-calling iterations
-	SystemPrompt  string  `koanf:"system_prompt"`  // empty = use prompts/agent.md
+	Backend             string  `koanf:"backend"`
+	Model               string  `koanf:"model"`
+	MaxTokens           int     `koanf:"max_tokens"`
+	Temperature         float64 `koanf:"temperature"`
+	ContextWindow       int     `koanf:"context_window"`         // total context window (auto-detected for llama.cpp)
+	MaxIterations       int     `koanf:"max_iterations"`         // max tool-calling iterations
+	SystemPrompt        string  `koanf:"system_prompt"`          // empty = use prompts/agent.md
+	ToolOutputMaxTokens int     `koanf:"tool_output_max_tokens"` // max tokens allowed per tool result; 0 = auto (context_window/4)
 }
 
 // APIConfig holds API endpoint settings.
@@ -131,20 +142,21 @@ type SessionConfig struct {
 
 // CrawlerConfig holds web crawler settings.
 type CrawlerConfig struct {
-	RequestDelay      time.Duration `koanf:"request_delay"`
-	RequestTimeout    time.Duration `koanf:"request_timeout"`
-	MaxDepth          int           `koanf:"max_depth"`
-	MaxPages          int           `koanf:"max_pages"`
-	Concurrency       int           `koanf:"concurrency"`
-	MaxBodySize       int64         `koanf:"max_body_size"`      // max response body in bytes, 0 = unlimited
-	MinContentLen     int           `koanf:"min_content_length"` // skip pages with less content (chars), 0 = disabled
-	EmbedWorkers      int           `koanf:"embed_workers"`      // concurrent embed stage workers
-	ParseWorkers      int           `koanf:"parse_workers"`      // concurrent parse stage workers
-	MaxEmbedFails     int           `koanf:"max_embed_fails"`    // consecutive embed failures before aborting crawl
-	JSPatterns        []string      `koanf:"js_patterns"`        // URL path prefixes requiring JS rendering
-	RejectionPatterns []string      `koanf:"rejection_patterns"` // case-insensitive substrings that mark a page as garbage (soft 404s, stubs, CMS placeholders)
-	StripQueryParams  []string      `koanf:"strip_query_params"` // case-insensitive query-param names to strip during URL normalization (tracking, session tokens)
-	PDF               PDFConfig     `koanf:"pdf"`
+	RequestDelay        time.Duration `koanf:"request_delay"`
+	RequestTimeout      time.Duration `koanf:"request_timeout"`
+	ProgressLogInterval time.Duration `koanf:"progress_log_interval"` // how often to log crawl progress
+	MaxDepth            int           `koanf:"max_depth"`
+	MaxPages            int           `koanf:"max_pages"`
+	Concurrency         int           `koanf:"concurrency"`
+	MaxBodySize         int64         `koanf:"max_body_size"`      // max response body in bytes, 0 = unlimited
+	MinContentLen       int           `koanf:"min_content_length"` // skip pages with less content (chars), 0 = disabled
+	EmbedWorkers        int           `koanf:"embed_workers"`      // concurrent embed stage workers
+	ParseWorkers        int           `koanf:"parse_workers"`      // concurrent parse stage workers
+	MaxEmbedFails       int           `koanf:"max_embed_fails"`    // consecutive embed failures before aborting crawl
+	JSPatterns          []string      `koanf:"js_patterns"`        // URL path prefixes requiring JS rendering
+	RejectionPatterns   []string      `koanf:"rejection_patterns"` // case-insensitive substrings that mark a page as garbage (soft 404s, stubs, CMS placeholders)
+	StripQueryParams    []string      `koanf:"strip_query_params"` // case-insensitive query-param names to strip during URL normalization (tracking, session tokens)
+	PDF                 PDFConfig     `koanf:"pdf"`
 }
 
 // PDFConfig holds PDF text extraction settings.
@@ -244,7 +256,23 @@ func Load(configDir string) (*Config, error) {
 	// Apply defaults for optional fields
 	cfg.applyDefaults()
 
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
+}
+
+// validate enforces cross-section invariants that applyDefaults can't express.
+func (c *Config) validate() error {
+	if c.Chunking.MaxChunkSize > c.RAG.MaxContextTokens {
+		return fmt.Errorf(
+			"chunking.max_chunk_size (%d) must not exceed rag.max_context_tokens (%d): "+
+				"a single chunk that doesn't fit the retrieval budget would starve the agent",
+			c.Chunking.MaxChunkSize, c.RAG.MaxContextTokens,
+		)
+	}
+	return nil
 }
 
 // applyDefaults sets default values for fields not specified in config.
@@ -254,6 +282,22 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Server.WriteTimeout == 0 {
 		c.Server.WriteTimeout = 120
+	}
+	if c.Server.IdleTimeout == 0 {
+		c.Server.IdleTimeout = 60 * time.Second
+	}
+	if c.Server.ShutdownTimeout == 0 {
+		c.Server.ShutdownTimeout = 30 * time.Second
+	}
+
+	if c.Admin.BackendProbeTimeout == 0 {
+		c.Admin.BackendProbeTimeout = 3 * time.Second
+	}
+	if c.Admin.BackendModelsTimeout == 0 {
+		c.Admin.BackendModelsTimeout = 5 * time.Second
+	}
+	if c.Admin.ChatStreamTimeout == 0 {
+		c.Admin.ChatStreamTimeout = 5 * time.Minute
 	}
 
 	if c.Agent.MaxTokens == 0 {
@@ -267,7 +311,7 @@ func (c *Config) applyDefaults() {
 	}
 
 	if c.RAG.TopK == 0 {
-		c.RAG.TopK = 5
+		c.RAG.TopK = 10
 	}
 	if c.RAG.MaxContextTokens == 0 {
 		c.RAG.MaxContextTokens = 2048
@@ -305,6 +349,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Crawler.RequestTimeout == 0 {
 		c.Crawler.RequestTimeout = 30 * time.Second
+	}
+	if c.Crawler.ProgressLogInterval == 0 {
+		c.Crawler.ProgressLogInterval = 30 * time.Second
 	}
 	if c.Crawler.MaxDepth == 0 {
 		c.Crawler.MaxDepth = 10

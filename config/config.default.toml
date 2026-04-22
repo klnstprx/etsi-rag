@@ -3,6 +3,13 @@ host = '127.0.0.1'
 port = 3000
 read_timeout = 15
 write_timeout = 120
+idle_timeout = 60000000000       # 60s keep-alive idle
+shutdown_timeout = 30000000000   # 30s graceful shutdown grace
+
+[admin]
+backend_probe_timeout = 3000000000    # 3s
+backend_models_timeout = 5000000000   # 5s
+chat_stream_timeout = 300000000000    # 5min — orphaned-goroutine safety net
 
 [[backends]]
 name = 'local-llama'
@@ -26,12 +33,13 @@ temperature = 0.7
 context_window = 0
 max_iterations = 5
 system_prompt = ''
+tool_output_max_tokens = 0  # 0 = auto (context_window / 4, floor 256)
 
 [database]
 path = 'data/etsi-rag.db'
 
 [rag]
-top_k = 5
+top_k = 10
 max_context_tokens = 2048
 
 [api]
@@ -49,6 +57,7 @@ ttl_seconds = 3600
 [crawler]
 request_delay = 500000000
 request_timeout = 30000000000
+progress_log_interval = 30000000000  # 30s — how often to log crawl progress
 max_depth = 10
 max_pages = 5000
 concurrency = 4

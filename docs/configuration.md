@@ -20,6 +20,13 @@ host = '127.0.0.1'
 port = 3000
 read_timeout = 15             # seconds
 write_timeout = 120           # seconds
+idle_timeout = '60s'          # keep-alive idle timeout
+shutdown_timeout = '30s'      # graceful shutdown grace period
+
+[admin]
+backend_probe_timeout = '3s'     # per-request timeout for backend health check
+backend_models_timeout = '5s'    # per-request timeout for backend /models listing
+chat_stream_timeout = '5m'       # max lifetime of an admin chat turn goroutine (orphaned-goroutine safety net)
 
 [[backends]]
 name = 'local-llama'
@@ -44,13 +51,17 @@ context_window = 0            # total context window (auto-detected for llama.cp
 max_iterations = 5            # max tool-calling iterations per turn
 system_prompt = ''            # custom system prompt text/template (empty = use embedded prompts/agent.tmpl)
                               # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
+tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto (context_window/4, min 256)
 
 [database]
 path = 'data/etsi-rag.db'
 
 [rag]
-top_k = 5                    # number of chunks to retrieve
+top_k = 10                   # number of chunks to retrieve
 max_context_tokens = 2048    # token budget for retrieved context
+                             # invariant: chunking.max_chunk_size must be <= max_context_tokens
+                             # (validated at load time; otherwise a single chunk can starve
+                             # the retrieval budget)
 
 [api]
 passthrough = false           # true = accept client messages directly, no session management
@@ -68,6 +79,7 @@ ttl_seconds = 3600            # session expiry (1 hour)
 [crawler]
 request_delay = '500ms'
 request_timeout = '30s'
+progress_log_interval = '30s' # how often the running crawl logs a progress line
 max_depth = 10
 max_pages = 5000
 concurrency = 4

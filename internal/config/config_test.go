@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // writeTempConfig creates a temporary config directory with the given TOML as
@@ -38,6 +39,22 @@ port = 8080
 	}
 }
 
+func TestLoad_RejectsChunkSizeLargerThanContextBudget(t *testing.T) {
+	// Invariant: no single chunk should be able to starve the retrieval budget.
+	// If max_chunk_size > rag.max_context_tokens, BuildContext would either drop
+	// the chunk entirely or need lossy truncation — both bad. Fail loudly at load.
+	_, err := Load(writeTempConfig(t, `
+[chunking]
+max_chunk_size = 4096
+
+[rag]
+max_context_tokens = 2048
+`))
+	if err == nil {
+		t.Fatal("expected Load to reject max_chunk_size > max_context_tokens")
+	}
+}
+
 func TestLoadAppliesDefaults(t *testing.T) {
 	cfg, err := Load(writeTempConfig(t, ``))
 	if err != nil {
@@ -54,7 +71,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 1024},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 512},
-		{"rag.top_k", cfg.RAG.TopK, 5},
+		{"rag.top_k", cfg.RAG.TopK, 10},
 		{"rag.max_context_tokens", cfg.RAG.MaxContextTokens, 2048},
 		{"chunking.max_chunk_size", cfg.Chunking.MaxChunkSize, 256},
 		{"chunking.chunk_overlap", cfg.Chunking.ChunkOverlap, 32},
@@ -79,6 +96,24 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	}
 	if len(cfg.Chunking.Separators) != 5 {
 		t.Errorf("chunking.separators length = %d, want 5", len(cfg.Chunking.Separators))
+	}
+
+	durationTests := []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"server.idle_timeout", cfg.Server.IdleTimeout, 60 * time.Second},
+		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 30 * time.Second},
+		{"admin.backend_probe_timeout", cfg.Admin.BackendProbeTimeout, 3 * time.Second},
+		{"admin.backend_models_timeout", cfg.Admin.BackendModelsTimeout, 5 * time.Second},
+		{"admin.chat_stream_timeout", cfg.Admin.ChatStreamTimeout, 5 * time.Minute},
+		{"crawler.progress_log_interval", cfg.Crawler.ProgressLogInterval, 30 * time.Second},
+	}
+	for _, tt := range durationTests {
+		if tt.got != tt.want {
+			t.Errorf("%s = %s, want %s", tt.name, tt.got, tt.want)
+		}
 	}
 }
 
