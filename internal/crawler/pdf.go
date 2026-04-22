@@ -72,12 +72,11 @@ func extractPDFTitle(ctx context.Context, pdfPath string) string {
 		return ""
 	}
 
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		if strings.HasPrefix(line, "Title:") {
-			title := strings.TrimSpace(strings.TrimPrefix(line, "Title:"))
-			if title != "" {
-				return title
-			}
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
+		title, _ := strings.CutPrefix(line, "Title:")
+		title = strings.TrimSpace(title)
+		if title != "" {
+			return title
 		}
 	}
 	return ""
@@ -150,7 +149,7 @@ func stripPageHeaders(text string) string {
 	var result []string
 	for _, page := range pages {
 		var pageLines []string
-		for _, line := range strings.Split(page, "\n") {
+		for line := range strings.SplitSeq(page, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if repeating[trimmed] {
 				continue

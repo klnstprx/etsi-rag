@@ -81,10 +81,7 @@ func (c *EmbedClient) EmbedBatch(ctx context.Context, texts []string) ([][]float
 	result := make([][]float32, 0, len(texts))
 
 	for i := 0; i < len(texts); i += batchSize {
-		end := i + batchSize
-		if end > len(texts) {
-			end = len(texts)
-		}
+		end := min(i+batchSize, len(texts))
 		batch := texts[i:end]
 
 		resp, err := c.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
