@@ -47,7 +47,7 @@ Raw pdftotext output goes through three stages before ingestion:
 
 ## BFS Algorithm (per source)
 
-1. Start from `src.SeedURL`, maintain visited set
+1. Start from `src.SeedURL` (normalized), maintain visited set
 2. For each URL (bounded by `max_depth`):
    a. Rate-limited fetch -> raw bytes
    b. Store raw bytes in RustFS
@@ -55,10 +55,20 @@ Raw pdftotext output goes through three stages before ingestion:
    d. SHA-256 hash of extracted text
    e. Compare with existing `crawl_pages` record
    f. **Unchanged**: update `last_crawled_at`, skip ingestion
-   g. **New/changed**: delete old doc -> `pipeline.Ingest()` -> upsert `crawl_pages`
-3. Enqueue discovered links passing `shouldFollow()`
-4. After source complete: mark unvisited pages as `status='stale'`
+   g. **Content already seen** (same hash via another URL): upsert a `crawl_pages` row pointing at the existing document, skip re-embedding
+   h. **New content**: `pipeline.Ingest()` -> upsert `crawl_pages`
+3. Normalize each discovered link (strip tracking params + sort query keys), then enqueue if it passes `shouldFollow()`
+4. After source complete: mark unvisited pages as `status='stale'`; after the run: `PurgeOrphanDocuments()` drops documents no longer referenced by any `crawl_pages`
 5. Global `max_pages` counter shared via `atomic.Int64`
+
+## URL Normalization
+
+Every link (seed + discovered) passes through `normalizeURL()` before joining `globalVisited` and the BFS queue. It:
+- Strips query-string parameters whose names appear in `[crawler].strip_query_params` (case-insensitive). Defaults cover common tracking params (`utm_*`, `fbclid`, `gclid`, `_ga`, `ref`) and the UMA CMS language switcher (`lang`).
+- Canonicalises the remaining query by sorting keys alphabetically, so `?b=2&a=1` and `?a=1&b=2` collapse to one visited entry.
+- Leaves malformed URLs untouched (returned as-is) to avoid disrupting caller flow.
+
+Fragment stripping happens earlier in `resolveLink()` (fragments never round-trip to the server). Trailing-slash variants are *not* normalized — the content-addressed doc ID (see below) already prevents duplicate documents from slash variants; we only pay the cost of a wasted fetch.
 
 ## Link Following Rules
 
@@ -72,9 +82,9 @@ Raw pdftotext output goes through three stages before ingestion:
 
 The parse stage runs `isLowQualityContent()` before ingestion. Pages are rejected if:
 
-- **Content too short**: below `min_content_length` config (default 200 chars). Catches empty stubs, untitled pages, and "Sin descripción disponible" placeholders.
-- **Auth error pages**: iDUMA SSO session-expired pages that return 200 with "Se ha detectado un cierre de sesión" text. These come from `repositorio.uma.es` links behind the SSO wall.
-- **Empty filter pages**: CMS pages containing only "Filtrar por curso/semestre/carácter" UI with no actual data.
+- **Content too short**: below `min_content_length` config (default 200 chars). Catches empty stubs and untitled pages.
+- **Matches a rejection pattern**: case-insensitive substring match against `[crawler].rejection_patterns`. Ships with defaults for iDUMA SSO session-expired pages ("Se ha detectado un cierre de sesión"), soft 404s ("Página no encontrada", "Error 404"), under-construction stubs ("Página en construcción", "Sitio en construcción"), and CMS placeholders ("Sin descripción disponible"). Extendable via TOML or the admin UI config editor.
+- **Empty filter pages**: CMS pages (<200 chars) starting with "Filtrar por curso:" and containing no actual data.
 
 Rejected pages increment the `Skipped` progress counter and are logged at debug level.
 
@@ -83,6 +93,26 @@ Rejected pages increment the `Skipped` progress counter and are logged at debug 
 1. **On crawl**: content hash comparison skips unchanged pages
 2. **After crawl**: unvisited pages marked `status='stale'`
 3. **Admin purge**: remove stale docs from RAG index via admin UI
+
+## Per-Page Language Detection
+
+Document language is determined per page, not per source:
+1. `ParseHTML` reads the `lang` attribute from the first `<html>` element.
+2. The value is normalised — trim whitespace, lowercase, drop the region subtag (`en-US` → `en`, `es-ES` → `es`).
+3. If the normalised value names a language supported by `domain.Language.Valid()` (currently `es` or `en`), it propagates to the document; otherwise it's discarded.
+4. On discard — or on PDFs, where no `<html lang>` exists — the embed stage falls back to the source's configured language (`CrawlSource.Language`).
+
+So an `/en/` translation served under a Spanish-language source is correctly tagged `en` if its `<html lang="en">` is present, instead of inheriting the source's `es`. The tag shows up in `documents.language` and downstream in the RAG language filter.
+
+## Content-Addressed Document IDs
+
+Document IDs are derived from the SHA-256 content hash, not the URL: `doc_id = "crawl-" + sha256(extracted_text)[:24]`. Two URLs that yield identical extracted text map to the same `doc_id` — so the same content is stored, chunked, and embedded only once, and both URLs become rows in `crawl_pages` pointing at the shared document.
+
+Consequences:
+- **`crawl_pages.doc_id` is many-to-one with `documents.id`** (multiple URLs can share a doc).
+- **When a URL's content changes**, its `crawl_pages.doc_id` points at a new document; the old one may remain if another URL still references it, or become an orphan.
+- **Orphan cleanup**: `PurgeOrphanDocuments` runs automatically at the end of every `runCrawl` / `runReprocess`. It deletes documents whose `id` is not in `SELECT doc_id FROM crawl_pages`; chunks and embeddings cascade via `ON DELETE CASCADE`.
+- **`documents.url`** stores a representative URL (first seen for this content). The full list of URLs surfacing a given document lives in `crawl_pages`.
 
 ## Files
 
@@ -95,7 +125,7 @@ Rejected pages increment the `Skipped` progress counter and are logged at debug 
 | `parser.go` | HTML -> markdown + links (readability + html walker) |
 | `pdf.go` | PDF -> markdown via pdftotext + pdfinfo + heading detection |
 | `filter.go` | Content quality filtering (`isLowQualityContent`) + subject URL dedup (`subjectCode`) |
-| `categorizer.go` | URL-based document categorization + stable doc ID |
+| `categorizer.go` | URL-based document categorization + content-hash-based `StableDocID` |
 
 ## System Dependencies
 

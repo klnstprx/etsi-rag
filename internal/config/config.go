@@ -131,18 +131,20 @@ type SessionConfig struct {
 
 // CrawlerConfig holds web crawler settings.
 type CrawlerConfig struct {
-	RequestDelay   time.Duration `koanf:"request_delay"`
-	RequestTimeout time.Duration `koanf:"request_timeout"`
-	MaxDepth       int           `koanf:"max_depth"`
-	MaxPages       int           `koanf:"max_pages"`
-	Concurrency    int           `koanf:"concurrency"`
-	MaxBodySize    int64         `koanf:"max_body_size"`      // max response body in bytes, 0 = unlimited
-	MinContentLen  int           `koanf:"min_content_length"` // skip pages with less content (chars), 0 = disabled
-	EmbedWorkers   int           `koanf:"embed_workers"`      // concurrent embed stage workers
-	ParseWorkers   int           `koanf:"parse_workers"`      // concurrent parse stage workers
-	MaxEmbedFails  int           `koanf:"max_embed_fails"`    // consecutive embed failures before aborting crawl
-	JSPatterns     []string      `koanf:"js_patterns"`        // URL path prefixes requiring JS rendering
-	PDF            PDFConfig     `koanf:"pdf"`
+	RequestDelay      time.Duration `koanf:"request_delay"`
+	RequestTimeout    time.Duration `koanf:"request_timeout"`
+	MaxDepth          int           `koanf:"max_depth"`
+	MaxPages          int           `koanf:"max_pages"`
+	Concurrency       int           `koanf:"concurrency"`
+	MaxBodySize       int64         `koanf:"max_body_size"`      // max response body in bytes, 0 = unlimited
+	MinContentLen     int           `koanf:"min_content_length"` // skip pages with less content (chars), 0 = disabled
+	EmbedWorkers      int           `koanf:"embed_workers"`      // concurrent embed stage workers
+	ParseWorkers      int           `koanf:"parse_workers"`      // concurrent parse stage workers
+	MaxEmbedFails     int           `koanf:"max_embed_fails"`    // consecutive embed failures before aborting crawl
+	JSPatterns        []string      `koanf:"js_patterns"`        // URL path prefixes requiring JS rendering
+	RejectionPatterns []string      `koanf:"rejection_patterns"` // case-insensitive substrings that mark a page as garbage (soft 404s, stubs, CMS placeholders)
+	StripQueryParams  []string      `koanf:"strip_query_params"` // case-insensitive query-param names to strip during URL normalization (tracking, session tokens)
+	PDF               PDFConfig     `koanf:"pdf"`
 }
 
 // PDFConfig holds PDF text extraction settings.
@@ -327,6 +329,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Crawler.MaxEmbedFails == 0 {
 		c.Crawler.MaxEmbedFails = 3
+	}
+	if len(c.Crawler.RejectionPatterns) == 0 {
+		c.Crawler.RejectionPatterns = []string{
+			"página no encontrada",       // soft 404
+			"error 404",                  // soft 404
+			"página en construcción",     // stub
+			"sitio en construcción",      // stub
+			"sin descripción disponible", // CMS placeholder
+		}
+	}
+	if len(c.Crawler.StripQueryParams) == 0 {
+		c.Crawler.StripQueryParams = []string{
+			"utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+			"fbclid", "gclid", "_ga", "ref", "lang",
+		}
 	}
 	if len(c.Crawler.PDF.HeadingPatterns) == 0 {
 		c.Crawler.PDF.HeadingPatterns = []string{

@@ -77,6 +77,17 @@ embed_workers = 1             # concurrent embed stage workers
 parse_workers = 4             # concurrent parse stage workers
 max_embed_fails = 3           # consecutive embed failures before aborting crawl
 js_patterns = ['/centers/subject/']
+rejection_patterns = [        # case-insensitive substrings that mark a page as low-quality
+    'página no encontrada',                 # soft 404
+    'error 404',
+    'página en construcción',
+    'sitio en construcción',
+    'sin descripción disponible',           # CMS placeholder
+]
+strip_query_params = [        # case-insensitive query-param names stripped during URL normalization
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+    'fbclid', 'gclid', '_ga', 'ref', 'lang',
+]
 
 [crawler.pdf]
 heading_patterns = [          # substring patterns for known PDF section headers

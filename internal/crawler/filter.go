@@ -5,33 +5,26 @@ import (
 	"strings"
 )
 
-// rejectionPatterns contains substrings that identify garbage pages.
-// If any pattern matches (case-insensitive), the page is rejected regardless of length.
-var rejectionPatterns = []string{
-	// iDUMA SSO session-expired error page
-	"se ha detectado un cierre de sesión",
-}
-
 // isLowQualityContent returns true if the extracted text should be discarded.
-// It checks two things:
+// It checks three things:
 //   - Content length below minContentLen (0 disables the length check)
-//   - Known garbage patterns (auth errors, empty filter stubs)
-func isLowQualityContent(text string, minContentLen int) bool {
-	// Length check
+//   - Configurable garbage patterns (auth errors, soft 404s, stubs)
+//   - Empty filter pages (short pages starting with "Filtrar por curso:")
+//
+// Patterns are matched case-insensitively as substrings and always reject
+// regardless of length. A nil/empty patterns slice disables the pattern check.
+func isLowQualityContent(text string, minContentLen int, patterns []string) bool {
 	if minContentLen > 0 && len(text) < minContentLen {
 		return true
 	}
 
 	lower := strings.ToLower(text)
-
-	// Rejection patterns (always rejected regardless of length)
-	for _, pat := range rejectionPatterns {
-		if strings.Contains(lower, pat) {
+	for _, pat := range patterns {
+		if strings.Contains(lower, strings.ToLower(pat)) {
 			return true
 		}
 	}
 
-	// Empty filter pages: start with "Filtrar por curso:" and are short
 	if strings.HasPrefix(text, "Filtrar por curso:") && len(text) < 200 {
 		return true
 	}

@@ -26,6 +26,7 @@ type ParseItem struct {
 	Text        string
 	ContentHash string
 	ContentType string
+	Language    string // normalised primary subtag from <html lang>, "" falls back to Source.Language
 	ObjKey      string
 	Source      CrawlSourceRef
 }

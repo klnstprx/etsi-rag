@@ -97,6 +97,16 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.config.Crawler.PDF.HeadingPatterns = nil
 		}
+		if v := r.FormValue("rejection_patterns"); v != "" {
+			h.config.Crawler.RejectionPatterns = splitTrimCSV(v)
+		} else {
+			h.config.Crawler.RejectionPatterns = nil
+		}
+		if v := r.FormValue("strip_query_params"); v != "" {
+			h.config.Crawler.StripQueryParams = splitTrimCSV(v)
+		} else {
+			h.config.Crawler.StripQueryParams = nil
+		}
 	case "object_store":
 		h.config.ObjectStore.Endpoint = r.FormValue("endpoint")
 		h.config.ObjectStore.Bucket = r.FormValue("bucket")
@@ -216,6 +226,8 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "min_content_len", Label: "Min Content Length (chars)", Value: strconv.Itoa(cfg.Crawler.MinContentLen), Type: "number"},
 				{Key: "max_embed_fails", Label: "Max Embed Failures", Value: strconv.Itoa(cfg.Crawler.MaxEmbedFails), Type: "number"},
 				{Key: "js_patterns", Label: "JS Patterns (comma-separated)", Value: strings.Join(cfg.Crawler.JSPatterns, ", "), Type: "text"},
+				{Key: "rejection_patterns", Label: "Rejection Patterns (comma-separated, case-insensitive)", Value: strings.Join(cfg.Crawler.RejectionPatterns, ", "), Type: "text"},
+				{Key: "strip_query_params", Label: "Strip Query Params (comma-separated, case-insensitive)", Value: strings.Join(cfg.Crawler.StripQueryParams, ", "), Type: "text"},
 				{Key: "pdf_heading_patterns", Label: "PDF Heading Patterns (comma-separated)", Value: strings.Join(cfg.Crawler.PDF.HeadingPatterns, ", "), Type: "text"},
 			},
 		},

@@ -76,14 +76,15 @@ func (c *Crawler) crawlSourceStage(
 		depth int
 	}
 
-	queue := []queueItem{{url: src.SeedURL, depth: 0}}
-	globalVisited.Store(src.SeedURL, true)
+	seedURL := normalizeURL(src.SeedURL, c.config.StripQueryParams)
+	queue := []queueItem{{url: seedURL, depth: 0}}
+	globalVisited.Store(seedURL, true)
 
 	// Per-source counters for completion summary
 	var srcDiscovered, srcFetched, srcFailed int
 	var maxDepthReached int
 
-	seedParsed, err := url.Parse(src.SeedURL)
+	seedParsed, err := url.Parse(seedURL)
 	if err != nil {
 		return fmt.Errorf("parsing seed URL: %w", err)
 	}
@@ -167,8 +168,10 @@ func (c *Crawler) crawlSourceStage(
 			// Don't keep raw body for HTML — parse result has everything
 			ci.Body = nil
 
-			// Enqueue discovered links
-			for _, link := range parsed.Links {
+			// Enqueue discovered links. Normalize first so tracking-param variants
+			// collapse into a single globalVisited entry and one fetch.
+			for _, rawLink := range parsed.Links {
+				link := normalizeURL(rawLink, c.config.StripQueryParams)
 				if _, alreadySeen := globalVisited.LoadOrStore(link, true); alreadySeen {
 					continue
 				}
@@ -221,15 +224,13 @@ func (c *Crawler) parseStage(
 			return
 		}
 
-		var title, text string
+		var title, text, pageLang string
 
 		if item.HTMLParsed != nil {
 			// HTML: already parsed in crawl stage
 			title = item.HTMLParsed.Title
 			text = item.HTMLParsed.Text
-			if item.HTMLParsed.Description != "" {
-				text = item.HTMLParsed.Description + "\n\n" + text
-			}
+			pageLang = item.HTMLParsed.Language
 		} else {
 			// PDF: extract text with heading detection
 			result, err := ExtractPDFText(ctx, item.Body, c.config.PDF)
@@ -247,7 +248,7 @@ func (c *Crawler) parseStage(
 			}
 		}
 
-		if isLowQualityContent(text, c.config.MinContentLen) {
+		if isLowQualityContent(text, c.config.MinContentLen, c.config.RejectionPatterns) {
 			c.logger.Debug().Str("url", item.URL).Int("len", len(text)).Msg("skipped low-quality content")
 			progress.Skipped.Add(1)
 			continue
@@ -262,6 +263,7 @@ func (c *Crawler) parseStage(
 			Text:        text,
 			ContentHash: contentHash,
 			ContentType: item.ContentType,
+			Language:    pageLang,
 			ObjKey:      item.ObjKey,
 			Source:      item.Source,
 		}
@@ -299,7 +301,7 @@ func (c *Crawler) embedStage(
 		existing, _ := c.store.GetCrawlPageByURL(ctx, item.URL)
 
 		if !force && existing != nil && existing.ContentHash == item.ContentHash {
-			// Unchanged — update timestamp only
+			// URL + content unchanged — bump timestamp only.
 			existing.LastCrawledAt = &now
 			existing.Status = domain.CrawlPageFetched
 			if err := c.store.UpsertCrawlPage(ctx, existing); err != nil {
@@ -312,7 +314,13 @@ func (c *Crawler) embedStage(
 
 		docID := StableDocID(item.ContentHash)
 		category := Categorize(item.URL, item.Source.Category)
+		// Prefer the per-page <html lang> when the parser extracted a supported
+		// language; fall back to the source's configured language otherwise
+		// (PDFs, pages without lang attr, pages tagged with unsupported langs).
 		language := domain.Language(item.Source.Language)
+		if item.Language != "" {
+			language = domain.Language(item.Language)
+		}
 		urlStr := item.URL
 
 		page := &domain.CrawlPage{

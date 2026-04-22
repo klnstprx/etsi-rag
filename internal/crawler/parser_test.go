@@ -171,6 +171,105 @@ func TestParseHTML_FallbackOnMalformedHTML(t *testing.T) {
 	}
 }
 
+func TestExtractNaive_ExcludesTitleFromBody(t *testing.T) {
+	// Unit test on extractNaive directly — the public ParseHTML path rarely
+	// reaches this fallback (readability/content-area usually win), but when
+	// it does fire the title text must not leak into the body.
+	const titleMarker = "UniqueTitleMarker12345"
+	htmlBytes := []byte(`<html><head><title>` + titleMarker + `</title></head><body><div>body text here</div></body></html>`)
+	doc, err := html.Parse(bytes.NewReader(htmlBytes))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+
+	title, text := extractNaive(doc)
+
+	if title != titleMarker {
+		t.Errorf("expected title %q, got %q", titleMarker, title)
+	}
+	if strings.Contains(text, titleMarker) {
+		t.Errorf("title marker leaked into body: %q", text)
+	}
+	if !strings.Contains(text, "body text here") {
+		t.Errorf("expected body text to be preserved, got %q", text)
+	}
+}
+
+func TestNormalizeURL(t *testing.T) {
+	stripList := []string{"utm_source", "utm_medium", "utm_campaign", "fbclid", "gclid", "lang"}
+
+	tests := []struct {
+		name  string
+		raw   string
+		strip []string
+		want  string
+	}{
+		{
+			name:  "no query untouched",
+			raw:   "https://www.uma.es/page",
+			strip: stripList,
+			want:  "https://www.uma.es/page",
+		},
+		{
+			name:  "strips utm params",
+			raw:   "https://www.uma.es/page?utm_source=twitter&utm_medium=social",
+			strip: stripList,
+			want:  "https://www.uma.es/page",
+		},
+		{
+			name:  "strips mixed tracking and keeps semantic",
+			raw:   "https://www.uma.es/page?id=42&utm_campaign=spring&fbclid=abc",
+			strip: stripList,
+			want:  "https://www.uma.es/page?id=42",
+		},
+		{
+			name:  "strips lang param",
+			raw:   "https://www.uma.es/page?lang=es",
+			strip: stripList,
+			want:  "https://www.uma.es/page",
+		},
+		{
+			name:  "canonicalises query-key order",
+			raw:   "https://www.uma.es/page?b=2&a=1",
+			strip: stripList,
+			want:  "https://www.uma.es/page?a=1&b=2",
+		},
+		{
+			name:  "case-insensitive param name match",
+			raw:   "https://www.uma.es/page?UTM_SOURCE=x&id=7",
+			strip: stripList,
+			want:  "https://www.uma.es/page?id=7",
+		},
+		{
+			name:  "nil strip list leaves query alone",
+			raw:   "https://www.uma.es/page?utm_source=x&id=7",
+			strip: nil,
+			want:  "https://www.uma.es/page?id=7&utm_source=x",
+		},
+		{
+			name:  "removes trailing question mark when all params stripped",
+			raw:   "https://www.uma.es/page?utm_source=x",
+			strip: stripList,
+			want:  "https://www.uma.es/page",
+		},
+		{
+			name:  "invalid url returned as-is",
+			raw:   "://bad",
+			strip: stripList,
+			want:  "://bad",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeURL(tt.raw, tt.strip)
+			if got != tt.want {
+				t.Errorf("normalizeURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveLink(t *testing.T) {
 	tests := []struct {
 		name string
@@ -200,48 +299,103 @@ func TestResolveLink(t *testing.T) {
 	}
 }
 
-func TestExtractOGMeta(t *testing.T) {
+func TestExtractHTMLLang(t *testing.T) {
 	tests := []struct {
-		name  string
-		html  string
-		wantT string
-		wantD string
+		name string
+		html string
+		want string
 	}{
 		{
-			name:  "both og tags",
-			html:  `<html><head><meta property="og:title" content="My Title"><meta property="og:description" content="My Description"></head><body></body></html>`,
-			wantT: "My Title",
-			wantD: "My Description",
+			name: "lowercase es",
+			html: `<!DOCTYPE html><html lang="es"><body></body></html>`,
+			want: "es",
 		},
 		{
-			name:  "og title only",
-			html:  `<html><head><meta property="og:title" content="Only Title"></head><body></body></html>`,
-			wantT: "Only Title",
-			wantD: "",
+			name: "lowercase en",
+			html: `<html lang="en"></html>`,
+			want: "en",
 		},
 		{
-			name:  "og description only",
-			html:  `<html><head><meta property="og:description" content="Only Desc"></head><body></body></html>`,
-			wantT: "",
-			wantD: "Only Desc",
+			name: "region-qualified en-US",
+			html: `<html lang="en-US"></html>`,
+			want: "en",
 		},
 		{
-			name:  "fallback to meta name description",
-			html:  `<html><head><meta name="description" content="Fallback Desc"></head><body></body></html>`,
-			wantT: "",
-			wantD: "Fallback Desc",
+			name: "region-qualified es-ES",
+			html: `<html lang="es-ES"></html>`,
+			want: "es",
 		},
 		{
-			name:  "og description preferred over meta name",
-			html:  `<html><head><meta property="og:description" content="OG Desc"><meta name="description" content="Meta Desc"></head><body></body></html>`,
-			wantT: "",
-			wantD: "OG Desc",
+			name: "uppercase normalised",
+			html: `<html lang="ES"></html>`,
+			want: "es",
 		},
 		{
-			name:  "no meta tags",
-			html:  `<html><head><title>Just Title</title></head><body></body></html>`,
-			wantT: "",
-			wantD: "",
+			name: "unsupported language returned empty",
+			html: `<html lang="de"></html>`,
+			want: "",
+		},
+		{
+			name: "missing lang attr",
+			html: `<html></html>`,
+			want: "",
+		},
+		{
+			name: "no html element (fragment)",
+			html: `<p>text</p>`,
+			want: "",
+		},
+		{
+			name: "whitespace trimmed",
+			html: `<html lang=" en "></html>`,
+			want: "en",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, err := html.Parse(bytes.NewReader([]byte(tt.html)))
+			if err != nil {
+				t.Fatalf("html.Parse: %v", err)
+			}
+			if got := extractHTMLLang(doc); got != tt.want {
+				t.Errorf("extractHTMLLang() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseHTML_PopulatesLanguageField(t *testing.T) {
+	body := []byte(`<!DOCTYPE html><html lang="en-US"><body><p>Some content here.</p></body></html>`)
+	result, err := ParseHTML(body, "https://example.com/")
+	if err != nil {
+		t.Fatalf("ParseHTML: %v", err)
+	}
+	if result.Language != "en" {
+		t.Errorf("expected result.Language = %q, got %q", "en", result.Language)
+	}
+}
+
+func TestExtractOGTitle(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+		want string
+	}{
+		{
+			name: "og title present",
+			html: `<html><head><meta property="og:title" content="My Title"></head><body></body></html>`,
+			want: "My Title",
+		},
+		{
+			name: "no og title",
+			html: `<html><head><title>Just Title</title></head><body></body></html>`,
+			want: "",
+		},
+		{
+			name: "og description ignored",
+			html: `<html><head><meta property="og:description" content="Desc"></head><body></body></html>`,
+			want: "",
 		},
 	}
 
@@ -251,12 +405,8 @@ func TestExtractOGMeta(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			gotT, gotD := extractOGMeta(doc)
-			if gotT != tt.wantT {
-				t.Errorf("title = %q, want %q", gotT, tt.wantT)
-			}
-			if gotD != tt.wantD {
-				t.Errorf("description = %q, want %q", gotD, tt.wantD)
+			if got := extractOGTitle(doc); got != tt.want {
+				t.Errorf("title = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -370,21 +520,6 @@ func TestParseHTML_TableInContent(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "| Field | Value |") {
 		t.Errorf("expected header row in text, got %q", result.Text)
-	}
-}
-
-func TestParseHTML_Description(t *testing.T) {
-	body := []byte(`<html><head>
-		<meta property="og:description" content="A useful summary.">
-	</head><body><p>Body text.</p></body></html>`)
-
-	result, err := ParseHTML(body, "https://example.com/")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if result.Description != "A useful summary." {
-		t.Errorf("expected description %q, got %q", "A useful summary.", result.Description)
 	}
 }
 

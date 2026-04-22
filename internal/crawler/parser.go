@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 
+	"etsi-rag/internal/domain"
+
 	readability "codeberg.org/readeck/go-readability/v2"
 	"golang.org/x/net/html"
 )
@@ -15,10 +17,10 @@ var multiNewlineRe = regexp.MustCompile(`\n{3,}`)
 
 // HTMLResult contains the extracted content from an HTML page.
 type HTMLResult struct {
-	Title       string
-	Description string // from og:description or <meta name="description">
-	Text        string
-	Links       []string // absolute URLs
+	Title    string
+	Text     string
+	Language string   // normalized BCP-47 primary subtag ("es", "en") or "" if absent/unsupported
+	Links    []string // absolute URLs
 }
 
 // ParseHTML extracts title, main content text, and links from raw HTML.
@@ -40,8 +42,9 @@ func ParseHTML(body []byte, baseURL string) (*HTMLResult, error) {
 	// Extract links from full DOM (need nav, sidebar, footer links for BFS)
 	links := extractLinks(doc, base)
 
-	// Extract OG metadata
-	ogTitle, ogDesc := extractOGMeta(doc)
+	// Extract OG title + <html lang>
+	ogTitle := extractOGTitle(doc)
+	lang := extractHTMLLang(doc)
 
 	// Try readability (needs its own parse — library API)
 	title, readText := extractReadable(body, base)
@@ -74,29 +77,53 @@ func ParseHTML(body []byte, baseURL string) (*HTMLResult, error) {
 	}
 
 	return &HTMLResult{
-		Title:       title,
-		Description: ogDesc,
-		Text:        text,
-		Links:       links,
+		Title:    title,
+		Text:     text,
+		Language: lang,
+		Links:    links,
 	}, nil
 }
 
-// extractOGMeta extracts og:title and og:description (or fallback meta description) from a parsed DOM.
-func extractOGMeta(doc *html.Node) (title, description string) {
-	var metaDesc string
+// extractHTMLLang reads the `lang` attribute from the first <html> element
+// and returns the normalised primary subtag if it names a language supported
+// by domain.Language. Empty string means "fall back to the source language".
+//
+// Normalisation:
+//   - trim whitespace
+//   - lowercase
+//   - drop the region subtag (en-US → en, es-ES → es)
+//   - reject anything not in the domain.Language.Valid() set
+func extractHTMLLang(doc *html.Node) string {
+	htmlNode := findFirstElement(doc, "html")
+	if htmlNode == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(attrVal(htmlNode, "lang"))
+	if raw == "" {
+		return ""
+	}
+	primary := strings.ToLower(raw)
+	if i := strings.Index(primary, "-"); i > 0 {
+		primary = primary[:i]
+	}
+	if !domain.Language(primary).Valid() {
+		return ""
+	}
+	return primary
+}
+
+// extractOGTitle returns the og:title meta tag content, or empty string if absent.
+func extractOGTitle(doc *html.Node) string {
+	var title string
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
+		if title != "" {
+			return
+		}
 		if n.Type == html.ElementNode && n.Data == "meta" {
-			prop := attrVal(n, "property")
-			name := attrVal(n, "name")
-			content := attrVal(n, "content")
-			switch {
-			case strings.EqualFold(prop, "og:title"):
-				title = content
-			case strings.EqualFold(prop, "og:description"):
-				description = content
-			case strings.EqualFold(name, "description") && metaDesc == "":
-				metaDesc = content
+			if strings.EqualFold(attrVal(n, "property"), "og:title") {
+				title = attrVal(n, "content")
+				return
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -104,11 +131,7 @@ func extractOGMeta(doc *html.Node) (title, description string) {
 		}
 	}
 	walk(doc)
-
-	if description == "" {
-		description = metaDesc
-	}
-	return title, description
+	return title
 }
 
 // extractReadable uses go-readability to extract main article content.
@@ -383,39 +406,38 @@ func attrVal(n *html.Node, key string) string {
 
 // extractNaive walks the full DOM and concatenates visible text as markdown.
 // Used as final fallback when both readability and content-area extraction fail.
+//
+// Title is captured separately via findTitle; body extraction runs against
+// <body> only so <title>/<meta>/<script>/<style> in <head> never leak into
+// the body text. Falls back to the whole document if <body> is missing
+// (rare — html.Parse synthesizes it for any input).
 func extractNaive(doc *html.Node) (title, text string) {
-	var sb strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "script", "style", "nav", "header", "footer", "noscript":
-				return
-			case "title":
-				if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
-					title = strings.TrimSpace(n.FirstChild.Data)
-				}
-			}
-			// Delegate to extractText for markdown-aware rendering
-			extractText(n, &sb)
-			return
-		}
+	title = findTitle(doc)
 
-		if n.Type == html.TextNode {
-			t := strings.TrimSpace(n.Data)
-			if t != "" {
-				sb.WriteString(t)
-				sb.WriteByte(' ')
-			}
-		}
-
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
+	root := findFirstElement(doc, "body")
+	if root == nil {
+		root = doc
 	}
 
-	walk(doc)
+	var sb strings.Builder
+	extractText(root, &sb)
 	return title, sb.String()
+}
+
+// findFirstElement returns the first descendant ElementNode with the given tag name.
+func findFirstElement(n *html.Node, tag string) *html.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type == html.ElementNode && n.Data == tag {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findFirstElement(c, tag); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 // renderTableMarkdown converts an HTML <table> node to markdown table format.
@@ -530,6 +552,37 @@ func extractLinks(doc *html.Node, base *url.URL) []string {
 
 	walk(doc)
 	return links
+}
+
+// normalizeURL removes query-string parameters whose names appear in
+// stripParams (case-insensitive) and canonicalises the remaining query by
+// sorting keys. Dedup-friendly: two URLs that differ only in tracking
+// parameters or key order normalise to the same string.
+//
+// Returns the raw input unchanged on parse failure so caller flow isn't
+// disrupted by malformed URLs that slip through resolveLink.
+func normalizeURL(rawURL string, stripParams []string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if u.RawQuery == "" {
+		return rawURL
+	}
+
+	strip := make(map[string]bool, len(stripParams))
+	for _, p := range stripParams {
+		strip[strings.ToLower(p)] = true
+	}
+
+	q := u.Query()
+	for key := range q {
+		if strip[strings.ToLower(key)] {
+			q.Del(key)
+		}
+	}
+	u.RawQuery = q.Encode() // Encode() sorts keys alphabetically
+	return u.String()
 }
 
 // mustParseURL parses a URL or panics. For use in tests.

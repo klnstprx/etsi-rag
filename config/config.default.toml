@@ -58,6 +58,17 @@ embed_workers = 1
 parse_workers = 4
 max_embed_fails = 3
 js_patterns = ['/centers/subject/']
+rejection_patterns = [
+    'página no encontrada',
+    'error 404',
+    'página en construcción',
+    'sitio en construcción',
+    'sin descripción disponible',
+]
+strip_query_params = [
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+    'fbclid', 'gclid', '_ga', 'ref', 'lang',
+]
 
 [crawler.pdf]
 heading_patterns = [
