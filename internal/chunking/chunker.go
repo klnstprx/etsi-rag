@@ -324,10 +324,19 @@ func (c *RecursiveTokenChunker) mergeSegments(ctx context.Context, segments []st
 }
 
 // hardSplitByTokens splits an oversized segment using tokenize/detokenize.
+// Returns an empty slice (no error) if the input is empty or maxTokens is
+// non-positive — degenerate inputs would otherwise cause an infinite loop or
+// send an empty slice to the detokenizer.
 func (c *RecursiveTokenChunker) hardSplitByTokens(ctx context.Context, text, original string, searchFrom *int, startIdx, maxTokens int, prevChunks []Chunk) ([]Chunk, error) {
+	if maxTokens <= 0 {
+		return nil, nil
+	}
 	tokens, err := c.counter.Tokenize(ctx, text)
 	if err != nil {
 		return nil, fmt.Errorf("tokenizing for hard split: %w", err)
+	}
+	if len(tokens) == 0 {
+		return nil, nil
 	}
 
 	var chunks []Chunk

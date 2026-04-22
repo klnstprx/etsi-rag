@@ -245,6 +245,31 @@ func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, conte
 	// Use separator-based splitting (paragraph, newline, sentence, word)
 	segments := splitBySeparators(content, c.config.Separators, 0)
 
+	// Account for breadcrumb prefix in token budget. If the breadcrumb alone
+	// would leave no usable room, drop it for this section — a chunk without
+	// the breadcrumb is still useful; a zero-content chunk is not.
+	prefixTokens := 0
+	if breadcrumb != "" {
+		pt, err := c.counter.Count(ctx, breadcrumb+":\n")
+		if err != nil {
+			return nil, err
+		}
+		prefixTokens = pt
+	}
+	effectiveMax := maxTokens - prefixTokens
+	floor := c.config.MinChunkSize
+	if floor <= 0 {
+		floor = 16
+	}
+	if effectiveMax < floor {
+		// Breadcrumb consumes too much of the budget — drop it for this section.
+		// Chunks still carry SectionTitle via makeStructuredChunk's idx bookkeeping
+		// when breadcrumb is "" (no inline prefix, empty SectionTitle).
+		breadcrumb = ""
+		prefixTokens = 0
+		effectiveMax = maxTokens
+	}
+
 	var chunks []Chunk
 	var current strings.Builder
 	var currentTokens int
@@ -254,17 +279,6 @@ func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, conte
 		if err != nil {
 			return nil, fmt.Errorf("counting segment tokens: %w", err)
 		}
-
-		// Account for breadcrumb prefix in token budget
-		prefixTokens := 0
-		if breadcrumb != "" {
-			pt, err := c.counter.Count(ctx, breadcrumb+":\n")
-			if err != nil {
-				return nil, err
-			}
-			prefixTokens = pt
-		}
-		effectiveMax := maxTokens - prefixTokens
 
 		if segTokens > effectiveMax {
 			// Flush current
@@ -345,10 +359,19 @@ func (c *StructureAwareChunker) makeStructuredChunk(text, breadcrumb string, idx
 }
 
 // hardSplitByTokens splits an oversized segment using tokenize/detokenize.
+// Returns an empty slice (no error) if the input is empty or maxTokens is
+// non-positive — degenerate inputs would otherwise cause an infinite loop or
+// send an empty slice to the detokenizer.
 func (c *StructureAwareChunker) hardSplitByTokens(ctx context.Context, text, breadcrumb string, maxTokens int, idx *int) ([]Chunk, error) {
+	if maxTokens <= 0 {
+		return nil, nil
+	}
 	tokens, err := c.counter.Tokenize(ctx, text)
 	if err != nil {
 		return nil, fmt.Errorf("tokenizing for hard split: %w", err)
+	}
+	if len(tokens) == 0 {
+		return nil, nil
 	}
 
 	var chunks []Chunk
