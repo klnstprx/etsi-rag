@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/rag"
 )
 
 // crawlStageAll runs BFS crawl for all enabled sources concurrently, sending items to parseCh.
@@ -362,10 +364,21 @@ func (c *Crawler) embedStage(
 		}
 
 		if _, _, err := c.pipeline.Ingest(ctx, []domain.Document{doc}); err != nil {
-			c.logger.Warn().Err(err).Str("url", item.URL).Msg("ingest failed")
+			// Chunking failures (e.g. tokenizer quirks on malformed sections) are
+			// document-specific and shouldn't trip the consecutive-embed-fail circuit
+			// breaker — the backend is healthy, the document just can't be processed.
+			chunkErr := errors.Is(err, rag.ErrChunking)
+			if chunkErr {
+				c.logger.Warn().Err(err).Str("url", item.URL).Msg("chunking failed")
+			} else {
+				c.logger.Warn().Err(err).Str("url", item.URL).Msg("ingest failed")
+			}
 			progress.EmbedFail.Add(1)
 			embedFailed++
 			c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
+			if chunkErr {
+				continue
+			}
 			if progress.ConsecutiveEmbedFails.Add(1) >= int64(c.config.MaxEmbedFails) {
 				c.logger.Error().Int("threshold", c.config.MaxEmbedFails).Msg("consecutive embed failures exceeded threshold, aborting crawl")
 				cancelFn()

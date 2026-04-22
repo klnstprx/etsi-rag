@@ -3,6 +3,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +15,11 @@ import (
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/tokencount"
 )
+
+// ErrChunking sentinels chunking-stage failures during Ingest so callers can
+// distinguish them from embedding or storage failures (for circuit-breaker
+// scoping, retry policy, etc.). Check with errors.Is.
+var ErrChunking = errors.New("chunking failed")
 
 // RetrievalResult represents chunks retrieved for a query.
 type RetrievalResult struct {
@@ -249,7 +255,7 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 
 		chunks, err := p.getChunker().Chunk(ctx, doc.Content)
 		if err != nil {
-			return totalDocs, totalChunks, fmt.Errorf("chunking document %s: %w", doc.ID, err)
+			return totalDocs, totalChunks, fmt.Errorf("chunking document %s: %w: %w", doc.ID, ErrChunking, err)
 		}
 		if len(chunks) == 0 {
 			totalDocs++

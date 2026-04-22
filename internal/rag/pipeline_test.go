@@ -2,6 +2,8 @@ package rag
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,6 +13,14 @@ import (
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/testutil"
 )
+
+// failingChunker returns an error on every Chunk call — used to exercise the
+// chunking-error path in Ingest.
+type failingChunker struct{}
+
+func (failingChunker) Chunk(_ context.Context, _ string) ([]chunking.Chunk, error) {
+	return nil, fmt.Errorf("simulated chunking failure")
+}
 
 // mockEmbedder implements llm.Embedder for testing.
 type mockEmbedder struct {
@@ -89,6 +99,28 @@ func TestIngest(t *testing.T) {
 	}
 	if chunks != 1 {
 		t.Errorf("expected 1 chunk, got %d", chunks)
+	}
+}
+
+// TestIngest_ChunkingFailureIsIdentifiable verifies that chunking failures
+// surface through Ingest wrapped with ErrChunking, so callers (e.g. the crawler
+// embed stage) can distinguish them from embedding failures and scope their
+// circuit breakers accordingly.
+func TestIngest_ChunkingFailureIsIdentifiable(t *testing.T) {
+	p, _ := setupTestPipeline(t)
+	p.SetChunker(failingChunker{})
+
+	_, _, err := p.Ingest(context.Background(), []domain.Document{{
+		ID:       "doc-x",
+		Content:  "anything",
+		Language: domain.LanguageES,
+		Category: domain.CategoryGeneral,
+	}})
+	if err == nil {
+		t.Fatal("expected chunking error, got nil")
+	}
+	if !errors.Is(err, ErrChunking) {
+		t.Errorf("expected errors.Is(err, ErrChunking), err = %v", err)
 	}
 }
 
