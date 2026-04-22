@@ -12,12 +12,16 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
         |
         v HTTP (openai-go SDK, aws-sdk-go-v2)
 +----------------------------------------------------------+
-|  cmd/server/main.go                                      |
+|  cmd/server/main.go  (entry point: loads config, calls   |
+|                       server.New + server.Run)           |
+|        |                                                 |
+|        v                                                 |
+|  internal/server/    (wiring, lifecycle, hot-rebuild)    |
 |        |                                                 |
 |        +-->  api/         (OpenAI-compatible + RAG API)  |
 |        +-->  admin/       (templ + Tailwind + HTMX UI)   |
 |        +-->  agent/       (tool-calling LLM loop)        |
-|        +-->  rag/         (retrieval service)             |
+|        +-->  rag/         (retrieval service)            |
 |        +-->  crawler/     (BFS web crawler, 3-stage)     |
 |        +-->  llm/         (openai-go SDK wrapper)        |
 |        +-->  store/       (SQLite + cosine similarity)   |
@@ -50,7 +54,8 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `session` | Conversation state with TTL expiration |
 | `domain` | Core types: Document, Chunk, SourceReference, Language, Category |
 | `backend` | LLM backend discovery (llama.cpp props, model listing) |
-| `prompts` | System prompt templates |
+| `prompts` | `text/template` system prompt rendering with data injection (doc/chunk counts) |
+| `server` | Application wiring (backend resolution, client construction, hot-rebuild on config save), HTTP server lifecycle |
 
 ## Data Flow
 
@@ -103,7 +108,7 @@ Hot-swap methods: `SetClient`, `SetSystem`, `SetTools`, `SetMaxIterations`.
 
 - **Backends as named endpoints**: `BackendConfig` has `IsLlamaCpp` flag; stage config (`[embedding]`, `[agent]`) references backend by name + specifies model
 - **Agent as single chat entry point**: API handler delegates all chat to the agent; RAG pipeline is a pure retrieval service with no chat client
-- **`main.go` as compositor**: `embedClientForStage()` / `chatClientForStage()` resolve backend by name, merge with stage config, build `llm.EmbedClient` or `llm.ChatClient`. `counterForBackend()` creates the appropriate token counter
+- **`server` package as compositor**: `server.Server.resolveEmbedClient()` / `resolveChatClient()` (in `internal/server/wiring.go`) resolve a backend by name, merge with stage config, and build `llm.EmbedClient` or `llm.ChatClient`. `resolveCounter()` creates the appropriate token counter. `probeLlamaCppBackends()` queries `/props` to auto-detect context size and embedding dimension. `rebuildClients()` (in `rebuild.go`) hot-swaps all clients after a config save in the admin UI
 - **Markdown throughout**: Parser emits markdown, stored as markdown, embedded as markdown, served to LLM as markdown
 - **Content archival**: Raw content stored in RustFS, enabling re-processing (new chunk size, new embedding model) without re-crawling
 

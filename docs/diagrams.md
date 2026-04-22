@@ -4,9 +4,11 @@
 
 ```mermaid
 graph TD
-    Main["cmd/server/main.go<br/>(compositor)"]
+    Main["cmd/server/main.go<br/>(entry point)"]
+    Server["internal/server/<br/>(compositor + lifecycle)"]
 
-    Main --> API & Admin
+    Main --> Server
+    Server --> API & Admin
 
     subgraph HTTP["HTTP Layer"]
         API["api/<br/>OpenAI-compatible + RAG"]
@@ -62,8 +64,10 @@ graph TD
 ```mermaid
 graph TD
     main["cmd/server/main.go"]
+    server["internal/server/"]
 
-    main --> api & admin
+    main --> server
+    server --> api & admin
 
     subgraph Handlers
         api
@@ -191,8 +195,8 @@ flowchart TD
         Koanf --> Config["Config struct"]
     end
 
-    Config --> Stage["Stage config (embedding / chat / agent)"]
-    Stage --> Resolve["GetBackend(name)"]
+    Config --> Stage["Stage config ([embedding] / [agent])"]
+    Stage --> Resolve["server.resolveEmbedClient / resolveChatClient<br/>(GetBackend by name + merge stage cfg)"]
     Resolve --> Backend["BackendConfig"]
 
     Backend --> EmbedClient["llm.EmbedClient"]

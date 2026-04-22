@@ -13,7 +13,7 @@ Split both the interfaces and the concrete implementations:
 - RAG pipeline takes `llm.Embedder` only (pure retrieval service, no chatter)
 - API handler takes `llm.Embedder` + delegates chat to `agent.Agent`
 - Agent takes `*llm.ChatClient` concretely (needs `ChatWithTools`)
-- `main.go` resolves backends via `embedClientForStage()` and `chatClientForStage()`
+- The `server` package resolves backends via `resolveEmbedClient()` and `resolveChatClient()` (in `internal/server/wiring.go`)
 
 Backend config (`[[backends]]`) defines named endpoints. Stage config (`[embedding]`, `[agent]`) references a backend by name and adds model-specific settings. The `[chat]` stage was removed — the agent is the single entry point for all conversations.
 
@@ -21,4 +21,4 @@ Backend config (`[[backends]]`) defines named endpoints. Stage config (`[embeddi
 - Mix and match backends freely (local embed + remote chat)
 - Each stage can have its own model, temperature, max_tokens
 - No unused fields on either client type
-- `main.go` is the only place that knows about backend resolution
+- The `server` package is the only place that knows about backend resolution

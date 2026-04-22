@@ -42,7 +42,8 @@ max_tokens = 1024             # output token limit
 temperature = 0.7
 context_window = 0            # total context window (auto-detected for llama.cpp, 0 = unknown)
 max_iterations = 5            # max tool-calling iterations per turn
-system_prompt = ''            # custom system prompt (empty = use prompts/agent.md)
+system_prompt = ''            # custom system prompt text/template (empty = use embedded prompts/agent.tmpl)
+                              # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
 
 [database]
 path = 'data/etsi-rag.db'
@@ -96,12 +97,12 @@ region = 'us-east-1'
 
 ## Backend Resolution
 
-`main.go` uses `embedClientForStage()` and `chatClientForStage()` to:
-1. Look up the backend by name from `[[backends]]` array
+`server.Server.resolveEmbedClient()` and `resolveChatClient()` (in `internal/server/wiring.go`) are called both at startup and on every admin-UI config save (via `rebuildClients()`):
+1. Look up the backend by name from the `[[backends]]` array
 2. Merge stage-specific config (model, batch_size for embedding; model, max_tokens, temperature for agent)
 3. Build an `llm.EmbedClient` or `llm.ChatClient` with the resolved settings
 
-`counterForBackend()` creates the appropriate token counter:
+`resolveCounter()` creates the appropriate token counter:
 - `is_llama_cpp = true` -> `LlamaCppCounter` (HTTP `/tokenize` endpoint)
 - `is_llama_cpp = false` -> `TiktokenCounter` (tiktoken-go library)
 - Fallback -> `EstimateCounter` (len/4)
