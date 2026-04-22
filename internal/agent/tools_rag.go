@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/rag"
-	"etsi-rag/internal/store"
 
 	"github.com/openai/openai-go"
 )
@@ -65,83 +63,14 @@ func NewSemanticSearchTool(pipeline *rag.Pipeline) Tool {
 				*sources = append(*sources, rag.SourcesFromRetrieval(results)...)
 			}
 
-			// Build context using pipeline's token-aware builder
+			// BuildContext is token-aware and always emits at least the top-1
+			// chunk (truncated if needed). Its output is our authoritative
+			// result — do not fall back to an unbounded formatter.
 			ragContext, err := pipeline.BuildContext(ctx, results)
 			if err != nil {
-				// Fall back to simple formatting if BuildContext fails
-				return formatRAGResults(results), nil
+				return "", fmt.Errorf("building context: %w", err)
 			}
-
-			if ragContext == "" {
-				return formatRAGResults(results), nil
-			}
-
 			return ragContext, nil
 		},
 	}
-}
-
-// ListDocumentsArgs holds the arguments for the list_documents tool.
-type ListDocumentsArgs struct {
-	Language *string `json:"language,omitempty"`
-}
-
-// NewListDocumentsTool creates a tool that lists indexed documents.
-func NewListDocumentsTool(s *store.SQLiteStore) Tool {
-	return Tool{
-		Name:        "list_documents",
-		Description: "List all indexed documents in the knowledge base.",
-		Parameters: openai.FunctionParameters{
-			"type": "object",
-			"properties": map[string]any{
-				"language": map[string]any{
-					"type":        "string",
-					"enum":        []string{"es", "en"},
-					"description": "Filter by language (optional)",
-				},
-			},
-		},
-		Execute: func(ctx context.Context, argsJSON string, _ *[]domain.SourceReference) (string, error) {
-			var args ListDocumentsArgs
-			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-				return "", fmt.Errorf("parsing args: %w", err)
-			}
-
-			var lang *domain.Language
-			if args.Language != nil {
-				l := domain.Language(*args.Language)
-				lang = &l
-			}
-
-			docs, err := s.ListDocuments(ctx, lang)
-			if err != nil {
-				return "", fmt.Errorf("listing documents: %w", err)
-			}
-
-			if len(docs) == 0 {
-				return "No documents found.", nil
-			}
-
-			var b strings.Builder
-			for i, doc := range docs {
-				fmt.Fprintf(&b, "%d. %s (ID: %s, Language: %s, Category: %s)\n",
-					i+1, doc.Title, doc.ID, doc.Language, doc.Category)
-			}
-			return b.String(), nil
-		},
-	}
-}
-
-func formatRAGResults(results *rag.RetrievalResult) string {
-	var b strings.Builder
-	docTitles := make(map[string]string)
-	for _, d := range results.Documents {
-		docTitles[d.ID] = d.Title
-	}
-
-	for i, sc := range results.Chunks {
-		title := docTitles[sc.Chunk.DocID]
-		fmt.Fprintf(&b, "[%d] %s (score: %.2f):\n%s\n\n", i+1, title, sc.Score, sc.Chunk.Content)
-	}
-	return b.String()
 }

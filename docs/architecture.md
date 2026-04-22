@@ -43,7 +43,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `config` | Centralized config types, koanf loading (TOML + env vars), `WriteTo()` for persistence |
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
-| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with semantic_search + list_documents tools; single entry point for all conversations |
+| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with semantic_search tool; single entry point for all conversations |
 | `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
@@ -95,14 +95,14 @@ The agent is the single entry point for all conversations. It owns the system pr
 User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
                                                   ^                     |
                                                   |                     v
-                                                  +---- [Execute tool (semantic_search / list_documents)]
+                                                  +---- [Execute tool (semantic_search)]
                                                         [Collect sources from semantic_search]
 
                                            (max_iterations configurable, default 5)
 ```
 
 Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
-Hot-swap methods: `SetClient`, `SetSystem`, `SetTools`, `SetMaxIterations`.
+Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime.
 
 ## Key Design Patterns
 

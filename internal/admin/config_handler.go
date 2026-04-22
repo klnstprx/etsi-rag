@@ -66,6 +66,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Agent.Temperature = formFloat(r, "temperature", h.config.Agent.Temperature)
 		h.config.Agent.ContextWindow = formInt(r, "context_window", h.config.Agent.ContextWindow)
 		h.config.Agent.MaxIterations = formInt(r, "max_iterations", h.config.Agent.MaxIterations)
+		h.config.Agent.ToolOutputMaxTokens = formInt(r, "tool_output_max_tokens", h.config.Agent.ToolOutputMaxTokens)
 		submitted := strings.TrimSpace(r.FormValue("system_prompt"))
 		if submitted == "" || submitted == strings.TrimSpace(prompts.Agent) {
 			h.config.Agent.SystemPrompt = ""
@@ -174,6 +175,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "temperature", Label: "Temperature", Value: fmt.Sprintf("%.2f", cfg.Agent.Temperature), Type: "text"},
 				{Key: "context_window", Label: "Context Window (auto-detected)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number"},
 				{Key: "max_iterations", Label: "Max Tool Iterations", Value: strconv.Itoa(cfg.Agent.MaxIterations), Type: "number"},
+				{Key: "tool_output_max_tokens", Label: "Tool Output Max Tokens (0 = auto, context_window/4)", Value: strconv.Itoa(cfg.Agent.ToolOutputMaxTokens), Type: "number"},
 				{Key: "system_prompt", Label: "System Prompt (clear to restore default)", Value: effectivePrompt(cfg), Type: "textarea", Hint: "Template variables: {{.DocumentCount}}, {{.ChunkCount}}"},
 			},
 		},

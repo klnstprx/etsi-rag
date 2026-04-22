@@ -347,7 +347,7 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 		Temperature: 0,
 	})
 
-	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
 	h.SetAgent(ag)
 
 	// Create a session in the shared store

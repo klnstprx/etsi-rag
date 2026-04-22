@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/openai/openai-go"
@@ -22,113 +21,39 @@ type ChatResult struct {
 }
 
 // Agent orchestrates LLM tool-calling loops with session management.
+// Fields are set once by NewAgent and never mutated — live config reload
+// constructs a fresh Agent and swaps the pointer at the owning Handler.
 type Agent struct {
-	mu            sync.RWMutex
-	client        *llm.ChatClient
-	tools         []Tool
-	system        string
-	maxIter       int
-	counter       tokencount.Counter
-	contextWindow int
-	sessionStore  *session.Store
-	logger        zerolog.Logger
+	client              *llm.ChatClient
+	tools               []Tool
+	system              string
+	maxIter             int
+	counter             tokencount.Counter
+	contextWindow       int
+	toolOutputMaxTokens int
+	sessionStore        *session.Store
+	logger              zerolog.Logger
 }
 
 // NewAgent creates a new agent with the given configuration.
 // counter and contextWindow enable tool output size guards. If either is nil/zero,
-// the guard is disabled and a warning is logged.
-func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, counter tokencount.Counter, contextWindow int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
+// the guard is disabled and a warning is logged. toolOutputMaxTokens overrides the
+// default (contextWindow/4) ceiling when > 0.
+func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, counter tokencount.Counter, contextWindow, toolOutputMaxTokens int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
 	if counter == nil || contextWindow <= 0 {
 		logger.Warn().Msg("agent tool output guards disabled (no token counter or context window)")
 	}
 	return &Agent{
-		client:        client,
-		tools:         tools,
-		system:        system,
-		maxIter:       maxIter,
-		counter:       counter,
-		contextWindow: contextWindow,
-		sessionStore:  sessionStore,
-		logger:        logger,
+		client:              client,
+		tools:               tools,
+		system:              system,
+		maxIter:             maxIter,
+		counter:             counter,
+		contextWindow:       contextWindow,
+		toolOutputMaxTokens: toolOutputMaxTokens,
+		sessionStore:        sessionStore,
+		logger:              logger,
 	}
-}
-
-// SetClient swaps the chat client (thread-safe).
-func (a *Agent) SetClient(c *llm.ChatClient) {
-	a.mu.Lock()
-	a.client = c
-	a.mu.Unlock()
-}
-
-// SetSystem swaps the system prompt (thread-safe).
-func (a *Agent) SetSystem(s string) {
-	a.mu.Lock()
-	a.system = s
-	a.mu.Unlock()
-}
-
-// SetTools swaps the tool list (thread-safe).
-func (a *Agent) SetTools(t []Tool) {
-	a.mu.Lock()
-	a.tools = t
-	a.mu.Unlock()
-}
-
-// SetMaxIterations swaps the max iterations (thread-safe).
-func (a *Agent) SetMaxIterations(n int) {
-	a.mu.Lock()
-	a.maxIter = n
-	a.mu.Unlock()
-}
-
-// SetCounter swaps the token counter (thread-safe).
-func (a *Agent) SetCounter(c tokencount.Counter) {
-	a.mu.Lock()
-	a.counter = c
-	a.mu.Unlock()
-}
-
-// SetContextWindow swaps the context window size (thread-safe).
-func (a *Agent) SetContextWindow(n int) {
-	a.mu.Lock()
-	a.contextWindow = n
-	a.mu.Unlock()
-}
-
-func (a *Agent) getClient() *llm.ChatClient {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.client
-}
-
-func (a *Agent) getSystem() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.system
-}
-
-func (a *Agent) getTools() []Tool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.tools
-}
-
-func (a *Agent) getCounter() tokencount.Counter {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.counter
-}
-
-func (a *Agent) getContextWindow() int {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.contextWindow
-}
-
-func (a *Agent) getMaxIter() int {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.maxIter
 }
 
 // Chat handles a session-managed conversation turn.
@@ -136,7 +61,7 @@ func (a *Agent) getMaxIter() int {
 // and returns the response with collected sources.
 // events may be nil; if non-nil, ToolEvent values are sent during tool execution.
 func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, events chan<- ToolEvent) (*ChatResult, error) {
-	client := a.getClient()
+	client := a.client
 	if client == nil {
 		return nil, fmt.Errorf("agent not configured")
 	}
@@ -147,9 +72,9 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	system := a.getSystem()
-	tools := a.getTools()
-	maxIter := a.getMaxIter()
+	system := a.system
+	tools := a.tools
+	maxIter := a.maxIter
 
 	// Build messages: system + session history + new user message
 	history := sess.GetMessages()
@@ -215,14 +140,14 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 // No session management — the client is responsible for message history.
 // events may be nil; if non-nil, ToolEvent values are sent during tool execution.
 func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, events chan<- ToolEvent) (*ChatResult, error) {
-	client := a.getClient()
+	client := a.client
 	if client == nil {
 		return nil, fmt.Errorf("agent not configured")
 	}
 
-	tools := a.getTools()
-	maxIter := a.getMaxIter()
-	system := a.getSystem()
+	tools := a.tools
+	maxIter := a.maxIter
+	system := a.system
 
 	// Prepend system prompt
 	full := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
@@ -264,7 +189,7 @@ func (a *Agent) runToolLoop(
 
 	var turnMessages []openai.ChatCompletionMessageParamUnion
 
-	for i := 0; i < maxIter; i++ {
+	for range maxIter {
 		resp, err := client.ChatWithTools(ctx, messages, toolParams)
 		if err != nil {
 			return "", nil, fmt.Errorf("agent chat: %w", err)
@@ -368,16 +293,19 @@ func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string, s
 // If the result is too large, it returns an error message instead so the LLM
 // can self-correct (e.g., refine a query). Returns the result unchanged if
 // within budget or if guards are disabled (no counter/context window).
+//
+// The ceiling is either an explicitly configured toolOutputMaxTokens (>0) or
+// an auto-derived default of contextWindow/4 with a 256-token floor.
 func (a *Agent) checkToolResult(ctx context.Context, toolName string, result string) string {
-	counter := a.getCounter()
-	contextWindow := a.getContextWindow()
+	counter := a.counter
+	contextWindow := a.contextWindow
 	if counter == nil || contextWindow <= 0 {
 		return result
 	}
 
-	maxTokens := contextWindow / 4
-	if maxTokens < 256 {
-		maxTokens = 256
+	maxTokens := a.toolOutputMaxTokens
+	if maxTokens <= 0 {
+		maxTokens = max(contextWindow/4, 256)
 	}
 
 	tokens, err := counter.Count(ctx, result)

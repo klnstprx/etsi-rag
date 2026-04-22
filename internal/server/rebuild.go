@@ -55,14 +55,13 @@ func (s *Server) rebuildClients() {
 		} else {
 			tools := []agent.Tool{
 				agent.NewSemanticSearchTool(s.pipeline),
-				agent.NewListDocumentsTool(s.store),
 			}
 			systemPrompt := s.agentSystemPrompt()
 			agentCounter, counterErr := s.resolveCounter(s.cfg.Agent.Backend, s.cfg.Agent.Model)
 			if counterErr != nil {
 				s.logger.Warn().Err(counterErr).Msg("agent token counter rebuild failed, tool output guards disabled")
 			}
-			a := agent.NewAgent(ac, tools, systemPrompt, s.cfg.Agent.MaxIterations, agentCounter, s.cfg.Agent.ContextWindow, s.sessionStore, s.logger)
+			a := agent.NewAgent(ac, tools, systemPrompt, s.cfg.Agent.MaxIterations, agentCounter, s.cfg.Agent.ContextWindow, s.cfg.Agent.ToolOutputMaxTokens, s.sessionStore, s.logger)
 			s.adminHandler.SetAgent(a)
 			s.apiHandler.SetAgent(a)
 			s.logger.Info().Str("backend", s.cfg.Agent.Backend).Msg("agent rebuilt")

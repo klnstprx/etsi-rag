@@ -175,10 +175,8 @@ flowchart TB
     Check -->|"Yes"| Execute["Execute tool(s)"]
 
     Execute --> SemanticSearch["semantic_search<br/>(vector search + context)"]
-    Execute --> ListDocs["list_documents<br/>(document listing)"]
 
     SemanticSearch --> Append["Append tool results<br/>to messages"]
-    ListDocs --> Append
 
     Append --> Counter{"Iterations<br/>< 5?"}
     Counter -->|"Yes"| LLMCall

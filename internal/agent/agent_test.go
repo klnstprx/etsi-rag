@@ -96,10 +96,10 @@ func newSequentialLLM(t *testing.T, responses []map[string]any) *httptest.Server
 
 func newTestAgent(t *testing.T, srv *httptest.Server, tools []Tool, maxIter int) (*Agent, *session.Store) {
 	t.Helper()
-	return newTestAgentWithCounter(t, srv, tools, maxIter, nil, 0)
+	return newTestAgentWithCounter(t, srv, tools, maxIter, nil, 0, 0)
 }
 
-func newTestAgentWithCounter(t *testing.T, srv *httptest.Server, tools []Tool, maxIter int, counter tokencount.Counter, contextWindow int) (*Agent, *session.Store) {
+func newTestAgentWithCounter(t *testing.T, srv *httptest.Server, tools []Tool, maxIter int, counter tokencount.Counter, contextWindow, toolOutputMaxTokens int) (*Agent, *session.Store) {
 	t.Helper()
 	client := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL:     srv.URL,
@@ -109,7 +109,7 @@ func newTestAgentWithCounter(t *testing.T, srv *httptest.Server, tools []Tool, m
 	})
 	ss := session.NewStore(config.SessionConfig{MaxMessages: 50, TTLSeconds: 3600})
 	t.Cleanup(ss.Close)
-	ag := NewAgent(client, tools, "You are a test assistant.", maxIter, counter, contextWindow, ss, zerolog.Nop())
+	ag := NewAgent(client, tools, "You are a test assistant.", maxIter, counter, contextWindow, toolOutputMaxTokens, ss, zerolog.Nop())
 	return ag, ss
 }
 
@@ -331,7 +331,7 @@ func TestChat_ToolResultTooLarge(t *testing.T) {
 	defer srv.Close()
 
 	counter := &testutil.MockCounter{}
-	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(300)}, 5, counter, 1000)
+	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(300)}, 5, counter, 1000, 0)
 	sessionID := ss.Create()
 
 	result, err := ag.Chat(context.Background(), sessionID, "get big data", nil)
@@ -400,6 +400,46 @@ func collectEvents(ch <-chan ToolEvent) []ToolEvent {
 	return events
 }
 
+func TestChat_ToolOutputMaxTokensOverride(t *testing.T) {
+	// Explicit toolOutputMaxTokens=50 wins over contextWindow/4=250.
+	// Tool returns 100 words → should be rejected by the tighter 50-token limit.
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("large", "call-1", `{}`),
+		chatResp("Result was rejected"),
+	})
+	defer srv.Close()
+
+	counter := &testutil.MockCounter{}
+	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(100)}, 5, counter, 1000, 50)
+	sessionID := ss.Create()
+
+	_, err := ag.Chat(context.Background(), sessionID, "get data", nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	// Verify the tool result in session is the error feedback, not the 100-word blob.
+	sess := ss.Get(sessionID)
+	msgs := sess.GetMessages()
+	var sawToolMsg bool
+	for _, msg := range msgs {
+		if msg.OfTool == nil {
+			continue
+		}
+		sawToolMsg = true
+		content := msg.OfTool.Content.OfString.Value
+		if !strings.Contains(content, "too large") {
+			t.Errorf("tool result should be rejected by explicit 50-token limit, got %q", content)
+		}
+		if !strings.Contains(content, "budget 50") {
+			t.Errorf("error message should reference the configured budget of 50, got %q", content)
+		}
+	}
+	if !sawToolMsg {
+		t.Fatal("expected a tool message in session")
+	}
+}
+
 func TestChat_ToolResultWithinBudget(t *testing.T) {
 	// contextWindow=1000, budget=250 tokens. Tool returns 100 words — within budget.
 	srv := newSequentialLLM(t, []map[string]any{
@@ -409,7 +449,7 @@ func TestChat_ToolResultWithinBudget(t *testing.T) {
 	defer srv.Close()
 
 	counter := &testutil.MockCounter{}
-	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(100)}, 5, counter, 1000)
+	ag, ss := newTestAgentWithCounter(t, srv, []Tool{largeTool(100)}, 5, counter, 1000, 0)
 	sessionID := ss.Create()
 
 	result, err := ag.Chat(context.Background(), sessionID, "get data", nil)
