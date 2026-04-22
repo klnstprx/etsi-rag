@@ -1,10 +1,11 @@
 package admin
 
 import (
+	"context"
 	"embed"
 	"io/fs"
 	"net/http"
-	"sync"
+	"sync/atomic"
 
 	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
@@ -28,14 +29,14 @@ type Handler struct {
 	config       *config.Config
 	configPath   string
 	sessionStore *session.Store
-	agent        *agent.Agent
+	agent        atomic.Pointer[agent.Agent]
 	crawler      *crawler.Crawler
 	pipeline     *rag.Pipeline
 	objStore     *objectstore.Client
 	logger       zerolog.Logger
 	onConfigSave func()
-	chatMu       sync.RWMutex
-	chatStreams  map[string]*chatStream
+	baseCtx      context.Context
+	chatStreams  *chatStreamManager
 }
 
 // HandlerConfig holds dependencies for the admin handler.
@@ -49,10 +50,18 @@ type HandlerConfig struct {
 	ObjStore     *objectstore.Client
 	Logger       zerolog.Logger
 	OnConfigSave func()
+	// BaseCtx is a server-lifetime context used for background goroutines
+	// (e.g. crawl runs) that outlive the request they were spawned from.
+	// Cancelled when the server shuts down.
+	BaseCtx context.Context
 }
 
 // NewHandler creates a new admin handler.
 func NewHandler(cfg HandlerConfig) *Handler {
+	baseCtx := cfg.BaseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return &Handler{
 		store:        cfg.Store,
 		config:       cfg.Config,
@@ -63,7 +72,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		objStore:     cfg.ObjStore,
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,
-		chatStreams:  make(map[string]*chatStream),
+		baseCtx:      baseCtx,
+		chatStreams:  newChatStreamManager(),
 	}
 }
 

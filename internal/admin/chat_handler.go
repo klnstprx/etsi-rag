@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -24,9 +23,9 @@ type chatStream struct {
 	cancel context.CancelFunc
 }
 
-// SetAgent sets the agent instance for chat handlers.
+// SetAgent sets the agent instance for chat handlers (thread-safe).
 func (h *Handler) SetAgent(a *agent.Agent) {
-	h.agent = a
+	h.agent.Store(a)
 }
 
 // ChatPage handles GET /admin/chat.
@@ -56,23 +55,22 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 	// Create a cancellable context for the agent goroutine.
 	// Ownership: created here, canceled by ChatStream (on SSE disconnect or completion).
 	// Timeout is a safety net for orphaned goroutines (SSE never connects).
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), h.config.Admin.ChatStreamTimeout)
 	tokenChan := make(chan string, 64)
 	eventChan := make(chan agent.ToolEvent, 16)
 	stream := &chatStream{tokens: tokenChan, events: eventChan, cancel: cancel}
 
-	h.chatMu.Lock()
-	h.chatStreams[sessionID] = stream
-	h.chatMu.Unlock()
+	h.chatStreams.register(sessionID, stream)
 
 	// Run agent in background if available.
 	// The goroutine only closes the channels when done — ChatStream handles
 	// map cleanup, so the stream entry survives until the SSE client connects.
-	if h.agent != nil {
+	ag := h.agent.Load()
+	if ag != nil {
 		go func() {
 			defer close(tokenChan)
 			defer close(eventChan)
-			result, err := h.agent.Chat(ctx, sessionID, message, eventChan)
+			result, err := ag.Chat(ctx, sessionID, message, eventChan)
 			if err != nil {
 				tokenChan <- fmt.Sprintf("[Error: %s]", err.Error())
 				return
@@ -97,9 +95,7 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ChatStream(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "sessionID")
 
-	h.chatMu.RLock()
-	stream, ok := h.chatStreams[sessionID]
-	h.chatMu.RUnlock()
+	stream, ok := h.chatStreams.get(sessionID)
 
 	if !ok {
 		http.Error(w, "stream not found", http.StatusNotFound)
@@ -109,9 +105,7 @@ func (h *Handler) ChatStream(w http.ResponseWriter, r *http.Request) {
 	// Clean up when SSE exits (client disconnect or natural completion).
 	defer func() {
 		stream.cancel()
-		h.chatMu.Lock()
-		delete(h.chatStreams, sessionID)
-		h.chatMu.Unlock()
+		h.chatStreams.remove(sessionID)
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")

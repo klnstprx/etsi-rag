@@ -41,6 +41,9 @@ type Server struct {
 	apiHandler   *api.Handler
 	adminHandler *admin.Handler
 	httpServer   *http.Server
+
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 }
 
 // New initializes all application components and returns a ready-to-run Server.
@@ -72,11 +75,14 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 
 	sqliteStore := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
 
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:        cfg,
 		configPath: configPath,
 		logger:     logger,
 		store:      sqliteStore,
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
 	}
 
 	// Resolve embedding backend and create client (graceful: nil on failure)
@@ -136,14 +142,13 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		} else {
 			tools := []agent.Tool{
 				agent.NewSemanticSearchTool(s.pipeline),
-				agent.NewListDocumentsTool(sqliteStore),
 			}
 			systemPrompt := s.agentSystemPrompt()
 			agentCounter, err := s.resolveCounter(cfg.Agent.Backend, cfg.Agent.Model)
 			if err != nil {
 				logger.Warn().Err(err).Msg("agent token counter not available, tool output guards disabled")
 			}
-			agentInstance = agent.NewAgent(agentClient, tools, systemPrompt, cfg.Agent.MaxIterations, agentCounter, cfg.Agent.ContextWindow, s.sessionStore, logger)
+			agentInstance = agent.NewAgent(agentClient, tools, systemPrompt, cfg.Agent.MaxIterations, agentCounter, cfg.Agent.ContextWindow, cfg.Agent.ToolOutputMaxTokens, s.sessionStore, logger)
 			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent initialized")
 		}
 	} else {
@@ -172,6 +177,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Pipeline:     s.pipeline,
 		ObjStore:     objStore,
 		Logger:       logger,
+		BaseCtx:      s.baseCtx,
 	})
 	s.adminHandler.SetAgent(agentInstance)
 	s.adminHandler.SetOnConfigSave(s.rebuildClients)
@@ -186,7 +192,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Handler:      router,
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
-		IdleTimeout:  60 * time.Second,
+		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
 	return s, nil
@@ -218,12 +224,15 @@ func (s *Server) Run() error {
 
 // Close performs graceful shutdown of all components.
 func (s *Server) Close() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownTimeout)
 	defer cancel()
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		s.logger.Warn().Err(err).Msg("server shutdown error")
 	}
+	// Cancel server-lifetime context so in-flight background goroutines
+	// (e.g. crawl runs spawned by admin handlers) observe shutdown.
+	s.baseCancel()
 	if s.crawler != nil {
 		s.crawler.Close()
 	}

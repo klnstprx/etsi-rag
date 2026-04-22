@@ -775,9 +775,7 @@ func TestChatStream_ToolEvents(t *testing.T) {
 		cancel: func() {},
 	}
 
-	h.chatMu.Lock()
-	h.chatStreams[sessionID] = stream
-	h.chatMu.Unlock()
+	h.chatStreams.register(sessionID, stream)
 
 	// Send tool events + token + close channels (simulates agent goroutine)
 	go func() {
@@ -825,9 +823,7 @@ func TestChatStream_NoToolEvents(t *testing.T) {
 		cancel: func() {},
 	}
 
-	h.chatMu.Lock()
-	h.chatStreams[sessionID] = stream
-	h.chatMu.Unlock()
+	h.chatStreams.register(sessionID, stream)
 
 	// No tool events, just token
 	go func() {

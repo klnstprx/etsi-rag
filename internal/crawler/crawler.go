@@ -162,11 +162,11 @@ func (c *Crawler) Reprocess(ctx context.Context) (int64, error) {
 	})
 }
 
-// startProgressTicker logs progress every 30s and returns a stop function.
+// startProgressTicker logs progress at CrawlerConfig.ProgressLogInterval and returns a stop function.
 func (c *Crawler) startProgressTicker(runID int64, progress *RunProgress, startedAt time.Time, label string) func() {
 	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(c.config.ProgressLogInterval)
 		defer ticker.Stop()
 		for {
 			select {

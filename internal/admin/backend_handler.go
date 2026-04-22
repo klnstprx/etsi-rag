@@ -153,7 +153,7 @@ func (h *Handler) BackendHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	healthy := checkBackendHealth(b.BaseURL)
+	healthy := checkBackendHealth(b.BaseURL, h.config.Admin.BackendProbeTimeout)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	templates.StatusBadge(healthy).Render(r.Context(), w)
 }
@@ -170,10 +170,10 @@ func (h *Handler) BackendModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), h.config.Admin.BackendModelsTimeout)
 	defer cancel()
 
-	models, err := backend.FetchModelIDs(ctx, b.BaseURL, b.APIKey)
+	models, err := backend.FetchModelIDs(ctx, b.BaseURL, b.APIKey, nil)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("backend", name).Msg("fetching models")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -185,8 +185,8 @@ func (h *Handler) BackendModels(w http.ResponseWriter, r *http.Request) {
 	templates.ModelOptions(models, selected).Render(r.Context(), w)
 }
 
-func checkBackendHealth(baseURL string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+func checkBackendHealth(baseURL string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
 	if err != nil {
