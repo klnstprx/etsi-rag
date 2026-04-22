@@ -64,6 +64,29 @@ func TestLlamaCppCounter(t *testing.T) {
 	}
 }
 
+func TestLlamaCppCounterDetokenizeEmpty(t *testing.T) {
+	// Regression: llama-server's /detokenize returns 400 for empty tokens arrays.
+	// Short-circuit empty slices and do not make a round-trip at all.
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := NewLlamaCppCounter(srv.URL, "test-model", nil)
+	text, err := c.Detokenize(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("empty Detokenize should not error: %v", err)
+	}
+	if text != "" {
+		t.Errorf("expected empty text, got %q", text)
+	}
+	if called {
+		t.Error("HTTP call should have been short-circuited for empty tokens")
+	}
+}
+
 func TestLlamaCppCounterError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
