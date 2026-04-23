@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"etsi-rag/internal/config"
@@ -325,7 +326,7 @@ func TestAgentSystemPrompt_Default(t *testing.T) {
 		t.Fatal("expected non-empty prompt")
 	}
 	// Default template has "0 documents" when DB is empty
-	if !contains(result, "0 documents") {
+	if !strings.Contains(result, "0 documents") {
 		t.Errorf("expected '0 documents' in default prompt, got: %s", result)
 	}
 }
@@ -357,10 +358,10 @@ func TestAgentSystemPrompt_WithDocuments(t *testing.T) {
 	}
 
 	result := s.agentSystemPrompt()
-	if !contains(result, "1 documents") {
+	if !strings.Contains(result, "1 documents") {
 		t.Errorf("expected '1 documents' in prompt, got: %s", result)
 	}
-	if !contains(result, "1 searchable chunks") {
+	if !strings.Contains(result, "1 searchable chunks") {
 		t.Errorf("expected '1 searchable chunks' in prompt, got: %s", result)
 	}
 }
@@ -386,7 +387,7 @@ func TestAgentSystemPrompt_InvalidTemplateFallsBackToDefault(t *testing.T) {
 	result := s.agentSystemPrompt()
 
 	// Should contain text from the default template
-	if !contains(result, "ETSI") {
+	if !strings.Contains(result, "ETSI") {
 		t.Errorf("expected default prompt content, got: %s", result)
 	}
 }
@@ -407,17 +408,4 @@ func TestAgentSystemPrompt_DefaultTemplateString(t *testing.T) {
 	if prompts.Agent == "" {
 		t.Fatal("prompts.Agent should not be empty")
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

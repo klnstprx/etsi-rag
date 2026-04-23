@@ -73,15 +73,7 @@ func subjectCode(rawURL string) string {
 	return numerics[1]
 }
 
-// isNumeric returns true if s is a non-empty string of digits.
+// isNumeric returns true if s is a non-empty string of ASCII digits.
 func isNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
+	return s != "" && !strings.ContainsFunc(s, func(r rune) bool { return r < '0' || r > '9' })
 }

@@ -137,7 +137,7 @@ func (s *SQLiteStore) CountChunks(ctx context.Context) (int, error) {
 func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset int, search string) ([]DocumentSummary, int, error) {
 	// Count total (with optional search filter)
 	var total int
-	var countArgs []interface{}
+	var countArgs []any
 	countQuery := `SELECT COUNT(*) FROM documents`
 	if search != "" {
 		countQuery += ` WHERE title LIKE ? OR url LIKE ?`
@@ -155,7 +155,7 @@ func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset in
 			(SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) as chunk_count
 		FROM documents d
 	`
-	var args []interface{}
+	var args []any
 	if search != "" {
 		query += ` WHERE d.title LIKE ? OR d.url LIKE ?`
 		like := "%" + search + "%"
