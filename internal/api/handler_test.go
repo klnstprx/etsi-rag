@@ -376,7 +376,7 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 	}
 
 	// Verify response content
-	var resp ChatCompletionWithSources
+	var resp ChatCompletionWithCitations
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
