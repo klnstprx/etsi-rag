@@ -33,6 +33,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 |        +-->  domain/      (core types)                   |
 |        +-->  config/      (TOML + env var config)        |
 |        +-->  backend/     (LLM backend discovery)        |
+|        +-->  markers/     (inline image-ref syntax)      |
 +----------------------------------------------------------+
 ```
 
@@ -55,6 +56,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `domain` | Core types: Document, Chunk, SourceReference, Language, Category |
 | `backend` | LLM backend discovery (llama.cpp props, model listing) |
 | `prompts` | `text/template` system prompt rendering with data injection (doc/chunk counts) |
+| `markers` | Inline `[[image:ref]]` marker syntax used by the parser, embedder, and retrieval to link chunks to image artifacts |
 | `server` | Application wiring (backend resolution, client construction, hot-rebuild on config save), HTTP server lifecycle |
 
 ## Data Flow
@@ -117,7 +119,7 @@ Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config sa
 ## Routes
 
 - **Health**: `GET /health`, `GET /v1/health`
-- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
+- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `POST /v1/rag/query` (retrieval-layer introspection for eval — returns ranked chunks with document_url, used to compute Recall@k / MRR), `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
 - **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents, agent chat)
 - Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX + SSE
 

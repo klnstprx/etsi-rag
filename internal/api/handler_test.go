@@ -252,6 +252,92 @@ func TestDeleteDocumentNotFound(t *testing.T) {
 	}
 }
 
+// TestRAGQuery_HappyPath exercises the retrieval-introspection endpoint that
+// the eval harness uses to compute Recall@k / MRR. We ingest a couple of
+// docs, then POST a query and assert the response shape: each result must
+// carry chunk_id, document_url, document_title, section_title, score, and
+// a snippet, in score-descending order. The eval needs document_url to map
+// retrieved chunks back to golden URLs.
+func TestRAGQuery_HappyPath(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	urlA := "https://example.com/a"
+	urlB := "https://example.com/b"
+	body, _ := json.Marshal(IngestRequest{
+		Documents: []DocumentInput{
+			{ID: "doc-a", Title: "Doc A", Content: "alpha bravo charlie delta", URL: &urlA, Language: "es", Category: "general"},
+			{ID: "doc-b", Title: "Doc B", Content: "echo foxtrot golf hotel", URL: &urlB, Language: "es", Category: "general"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/rag/ingest", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.Ingest(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("ingest setup failed: %d %s", w.Code, w.Body.String())
+	}
+
+	// Now query.
+	topK := 5
+	qBody, _ := json.Marshal(RAGQueryRequest{Query: "alpha bravo", TopK: &topK})
+	req = httptest.NewRequest(http.MethodPost, "/v1/rag/query", bytes.NewReader(qBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.RAGQuery(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp RAGQueryResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Results) == 0 {
+		t.Fatalf("expected at least one result, got 0")
+	}
+	for i, r := range resp.Results {
+		if r.DocumentURL == nil || *r.DocumentURL == "" {
+			t.Errorf("result %d: missing document_url", i)
+		}
+		if r.DocumentTitle == "" {
+			t.Errorf("result %d: missing document_title", i)
+		}
+		if r.Snippet == "" {
+			t.Errorf("result %d: missing snippet", i)
+		}
+		if r.ChunkID == 0 {
+			t.Errorf("result %d: missing chunk_id", i)
+		}
+		if i > 0 && resp.Results[i-1].Score < r.Score {
+			t.Errorf("results not sorted by score desc: pos %d = %f, pos %d = %f",
+				i-1, resp.Results[i-1].Score, i, r.Score)
+		}
+	}
+}
+
+// TestRAGQuery_EmptyQuery rejects an empty query with 400 — saves a wasted
+// embedding call and a useless top-k against zero signal.
+func TestRAGQuery_EmptyQuery(t *testing.T) {
+	h, _ := setupTestHandler(t)
+	body, _ := json.Marshal(RAGQueryRequest{Query: ""})
+	req := httptest.NewRequest(http.MethodPost, "/v1/rag/query", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.RAGQuery(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// TestRAGQuery_InvalidJSON ensures malformed bodies are rejected cleanly.
+func TestRAGQuery_InvalidJSON(t *testing.T) {
+	h, _ := setupTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/rag/query", bytes.NewReader([]byte("not json")))
+	w := httptest.NewRecorder()
+	h.RAGQuery(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestIngestInvalidLanguage(t *testing.T) {
 	h, _ := setupTestHandler(t)
 

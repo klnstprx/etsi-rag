@@ -20,4 +20,9 @@ internal/admin/static/styles.css
 # OS
 .DS_Store
 
+# Mermaids
 *.svg
+
+# Python
+__pycache__
+eval/results

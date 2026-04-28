@@ -85,6 +85,40 @@ type IngestError struct {
 	Error string `json:"error"`
 }
 
+// RAGQueryRequest is used to inspect the retrieval layer directly, without
+// going through the agent's tool-calling loop. Primary consumer: the eval
+// harness, which uses the response to compute Recall@k / MRR against a
+// ground-truth set of golden URLs.
+type RAGQueryRequest struct {
+	// Query is the natural-language query to retrieve against.
+	Query string `json:"query"`
+
+	// Language optionally restricts the search to documents in this language
+	// ("es" or "en"). Empty means no language filter.
+	Language string `json:"language,omitempty"`
+
+	// TopK overrides the configured top_k for this request only. Optional.
+	TopK *int `json:"top_k,omitempty"`
+}
+
+// RAGQueryResponse is the ranked chunk list returned by /v1/rag/query.
+type RAGQueryResponse struct {
+	Results []RetrievedChunk `json:"results"`
+}
+
+// RetrievedChunk is one chunk returned by the retrieval layer, in the shape
+// the eval harness needs to map results back to ground truth.
+type RetrievedChunk struct {
+	ChunkID       int64   `json:"chunk_id"`
+	DocumentID    string  `json:"document_id"`
+	DocumentTitle string  `json:"document_title"`
+	DocumentURL   *string `json:"document_url,omitempty"`
+	SectionTitle  string  `json:"section_title,omitempty"`
+	ChunkIndex    int     `json:"chunk_index"`
+	Score         float32 `json:"score"`
+	Snippet       string  `json:"snippet"`
+}
+
 // HealthResponse is returned by the health check endpoint.
 type HealthResponse struct {
 	Status string `json:"status"`

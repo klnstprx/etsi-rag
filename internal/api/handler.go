@@ -336,6 +336,66 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RAGQuery handles POST /v1/rag/query — retrieval-layer introspection.
+//
+// Returns the top-k chunks the retrieval layer would surface for a query,
+// without going through the agent's tool-calling loop. Used by the eval
+// harness to compute Recall@k / MRR against a ground-truth golden URL set.
+// The response intentionally exposes document_url so the caller can map
+// chunks back to their source document.
+func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
+	var req RAGQueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		ErrBadRequest("invalid request body").WriteJSON(w)
+		return
+	}
+	if req.Query == "" {
+		ErrBadRequest("query cannot be empty").WriteJSON(w)
+		return
+	}
+
+	if req.Language != "" {
+		if !domain.Language(req.Language).Valid() {
+			ErrInvalidLanguage(req.Language).WriteJSON(w)
+			return
+		}
+	}
+
+	var lang *string
+	if req.Language != "" {
+		lang = &req.Language
+	}
+
+	result, err := h.pipeline.Retrieve(r.Context(), req.Query, lang, req.TopK)
+	if err != nil {
+		ErrInternal(err).WriteJSON(w)
+		return
+	}
+
+	docByID := make(map[string]domain.Document, len(result.Documents))
+	for _, d := range result.Documents {
+		docByID[d.ID] = d
+	}
+
+	out := make([]RetrievedChunk, 0, len(result.Chunks))
+	for _, sc := range result.Chunks {
+		d := docByID[sc.Chunk.DocID]
+		out = append(out, RetrievedChunk{
+			ChunkID:       sc.Chunk.ID,
+			DocumentID:    d.ID,
+			DocumentTitle: d.Title,
+			DocumentURL:   d.URL,
+			SectionTitle:  sc.Chunk.SectionTitle,
+			ChunkIndex:    sc.Chunk.ChunkIndex,
+			Score:         sc.Score,
+			Snippet:       sc.Chunk.Content,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(RAGQueryResponse{Results: out})
+}
+
 // ListDocuments handles GET /v1/rag/documents.
 func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 	var lang *domain.Language

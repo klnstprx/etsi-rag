@@ -74,7 +74,7 @@ graph TD
         admin
     end
 
-    api --> rag & llm & session
+    api --> agent & rag & llm & session & store & objectstore
     admin --> agent & crawler & rag & config
 
     subgraph Core
@@ -122,15 +122,15 @@ flowchart TB
         Embed --> StoreDoc["Store document +<br/>chunks + embeddings<br/>(SQLite)"]
     end
 
-    subgraph Query["Query Flow"]
+    subgraph Query["Query Flow (retrieval-only — agent owns chat)"]
         direction TB
-        Q["User query"] --> EmbedQ["Embed query"]
+        Q["User query"] --> Agent["agent.Chat<br/>(LLM + tools loop)"]
+        Agent -->|"semantic_search tool call"| EmbedQ["Embed tool query"]
         EmbedQ --> Search["Vector search<br/>(cosine similarity)"]
         Search --> TopK["Top-K chunks"]
         TopK --> BuildCtx["Build context<br/>(chunks + metadata)"]
-        BuildCtx --> Messages["System prompt +<br/>context + history"]
-        Messages --> Chat["Chat completion<br/>(chat model)"]
-        Chat --> Response["Streamed response"]
+        BuildCtx -->|"ToolResult.Text + Citations"| Agent
+        Agent --> Response["Streamed response<br/>(text + citations)"]
     end
 
     StoreDoc -.->|"stored embeddings"| Search
@@ -178,9 +178,9 @@ flowchart TB
 
     SemanticSearch --> Append["Append tool results<br/>to messages"]
 
-    Append --> Counter{"Iterations<br/>< 5?"}
+    Append --> Counter{"Iterations<br/>< max_iterations?"}
     Counter -->|"Yes"| LLMCall
-    Counter -->|"No"| Error["Error: max iterations"]
+    Counter -->|"No"| Error["Error: max iterations<br/>(configured by [agent].max_iterations, default 5)"]
 ```
 
 ## 6. Configuration & Client Resolution
@@ -216,11 +216,13 @@ flowchart TB
 
     V1 --> ChatComp["POST /v1/chat/completions"]
     V1 --> Embeddings["POST /v1/embeddings"]
+    V1 --> Artifacts["GET /v1/artifacts/{token}<br/>(image artifact stream)"]
     V1 --> RAGRoutes["/v1/rag/*"]
 
     RAGRoutes --> Ingest["POST /v1/rag/ingest"]
     RAGRoutes --> ListDocs["GET /v1/rag/documents"]
     RAGRoutes --> DeleteDoc["DELETE /v1/rag/documents/{id}"]
+    RAGRoutes --> Query["POST /v1/rag/query<br/>(retrieval introspection for eval)"]
 
     AdminRoutes --> Dashboard["GET /admin/"]
     AdminRoutes --> Backends["GET/POST /admin/backends"]
@@ -291,8 +293,19 @@ erDiagram
         int pages_ingested
     }
 
+    document_artifacts {
+        int id PK
+        text doc_id FK
+        text ref
+        text kind
+        text object_store_key
+        text mime_type
+        text public_token UK
+    }
+
     documents ||--o{ chunks : "has"
     chunks ||--|| chunk_embeddings : "has"
+    documents ||--o{ document_artifacts : "has"
     crawl_sources ||--o{ crawl_pages : "has"
     crawl_pages }o--o| documents : "references"
 ```

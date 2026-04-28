@@ -44,6 +44,7 @@ func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
 			r.Post("/ingest", handler.Ingest)
 			r.Get("/documents", handler.ListDocuments)
 			r.Delete("/documents/{id}", handler.DeleteDocument)
+			r.Post("/query", handler.RAGQuery)
 		})
 	})
 

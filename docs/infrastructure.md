@@ -36,14 +36,16 @@ access_key = 'minioadmin'
 secret_key = 'minioadmin'
 ```
 
-Object key schema: `crawl/{html|pdf}/{url_sha256}`
+Object key schema:
+- `crawl/{html|pdf}/{url_sha256}` — raw fetched bytes (re-processable)
+- `crawl/img/{url_sha256}/{ref}.png` — rendered image artifacts (`ref` is `p1`, `p2`, … for PDF pages or `full` for HTML screenshots)
 
 ## System Dependencies
 
 | Package | Purpose | Install |
 |---------|---------|---------|
-| `poppler` | `pdftotext` for PDF text extraction | `paru -S poppler` |
-| `chromium` | Headless browser for JS-rendered pages (go-rod) | `paru -S chromium` |
+| `poppler` | `pdftotext` (PDF text extraction), `pdfinfo` (PDF metadata), `pdftoppm` (PDF page → PNG renders) | `paru -S poppler` |
+| `chromium` | Headless browser for JS-rendered pages and full-page screenshots (go-rod) | `paru -S chromium` |
 
 ## Build Dependencies
 

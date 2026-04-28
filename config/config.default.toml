@@ -20,8 +20,8 @@ is_llama_cpp = true
 
 [embedding]
 backend = 'local-llama'
-model = 'Qwen3-Embedding-8B-Q8_0.gguf'
-dimension = 4096
+model = 'Qwen3-Embedding-4B-Q8_0.gguf'
+dimension = 2560
 max_tokens = 512
 batch_size = 2
 
@@ -94,3 +94,11 @@ bucket = 'etsi-rag'
 access_key = 'minioadmin'
 secret_key = 'minioadmin'
 region = 'us-east-1'
+
+# [eval] is consumed by the eval/ harness only; the Go server ignores it.
+# Required when running the eval tool. judge_backend must reference an enabled
+# [[backends]] entry. Pick a different backend from [agent] to avoid
+# self-preference bias.
+# [eval]
+# judge_backend = 'remote-claude'
+# judge_model = 'claude-sonnet-4-6'

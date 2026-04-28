@@ -40,7 +40,7 @@ supports_vision = false       # set true when the configured model has an mmproj
 [embedding]
 backend = 'local-llama'       # references backend by name
 model = 'embedding-model'
-dimension = 4096
+dimension = 2560
 max_tokens = 512              # embedding context window
 batch_size = 2                # texts per embedding API call
 
@@ -124,6 +124,15 @@ bucket = 'etsi-rag'
 access_key = 'minioadmin'
 secret_key = 'minioadmin'
 region = 'us-east-1'
+
+# [eval] is consumed only by the eval/ harness (Python). The Go server ignores it.
+# The harness refuses to start if [eval] is missing or malformed.
+# judge_backend must reference an enabled [[backends]] entry; pick a different
+# backend/model from [agent] to avoid self-preference bias when the same model
+# grades its own answers.
+[eval]
+judge_backend = 'remote-claude'
+judge_model   = 'claude-sonnet-4-6'
 ```
 
 ## Backend Resolution
