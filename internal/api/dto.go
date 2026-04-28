@@ -5,7 +5,7 @@ package api
 import (
 	"github.com/openai/openai-go"
 
-	"etsi-rag/internal/domain"
+	"etsi-rag/internal/agent"
 )
 
 // ChatCompletionRequest is the OpenAI-compatible chat completion request.
@@ -15,13 +15,13 @@ type ChatCompletionRequest = openai.ChatCompletionNewParams
 // ChatCompletionResponse is the OpenAI-compatible chat completion response.
 type ChatCompletionResponse = openai.ChatCompletion
 
-// ChatCompletionWithSources extends the chat response with source references.
-// Used in session mode to return sources collected by the agent's semantic_search tool.
-type ChatCompletionWithSources struct {
+// ChatCompletionWithCitations extends the chat response with citations
+// produced by the agent's tool calls (e.g. semantic_search, web_search).
+type ChatCompletionWithCitations struct {
 	openai.ChatCompletion
 
-	// Sources contains the documents used for context.
-	Sources []domain.SourceReference `json:"sources,omitempty"`
+	// Citations lists external resources referenced during the turn.
+	Citations []agent.Citation `json:"citations,omitempty"`
 }
 
 // EmbeddingRequest is the OpenAI-compatible embedding request.

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"etsi-rag/internal/config"
-	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/testutil"
@@ -113,47 +112,52 @@ func newTestAgentWithCounter(t *testing.T, srv *httptest.Server, tools []Tool, m
 	return ag, ss
 }
 
+// stubTool is a minimal Tool implementation for tests.
+type stubTool struct {
+	name        string
+	description string
+	parameters  openai.FunctionParameters
+	execute     func(ctx context.Context, argsJSON string) (ToolResult, error)
+}
+
+func (t *stubTool) Name() string                          { return t.name }
+func (t *stubTool) Description() string                   { return t.description }
+func (t *stubTool) Parameters() openai.FunctionParameters { return t.parameters }
+func (t *stubTool) Execute(ctx context.Context, argsJSON string) (ToolResult, error) {
+	return t.execute(ctx, argsJSON)
+}
+
+func newStubTool(name, description string, exec func(ctx context.Context, argsJSON string) (ToolResult, error)) Tool {
+	return &stubTool{
+		name:        name,
+		description: description,
+		parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
+		execute:     exec,
+	}
+}
+
 // echoTool returns its arguments as the result.
 func echoTool() Tool {
-	return Tool{
-		Name:        "echo",
-		Description: "Echoes the input",
-		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
-		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
-			return "echo: " + argsJSON, nil
-		},
-	}
+	return newStubTool("echo", "Echoes the input", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		return ToolResult{Text: "echo: " + argsJSON}, nil
+	})
 }
 
 // errorTool always returns an error.
 func errorTool() Tool {
-	return Tool{
-		Name:        "fail",
-		Description: "Always fails",
-		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
-		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
-			return "", fmt.Errorf("tool failure")
-		},
-	}
+	return newStubTool("fail", "Always fails", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		return ToolResult{}, fmt.Errorf("tool failure")
+	})
 }
 
-// sourceTool appends a test source reference.
+// sourceTool returns a citation along with its result.
 func sourceTool() Tool {
-	return Tool{
-		Name:        "search",
-		Description: "Search with sources",
-		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
-		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
-			if sources != nil {
-				*sources = append(*sources, domain.SourceReference{
-					ID:    "doc-1",
-					Title: "Test Doc",
-					Score: 0.95,
-				})
-			}
-			return "found relevant content", nil
-		},
-	}
+	return newStubTool("search", "Search with sources", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		return ToolResult{
+			Text:      "found relevant content",
+			Citations: []Citation{{Title: "Test Doc", URL: "https://example.com/doc-1"}},
+		}, nil
+	})
 }
 
 // --- Tests ---
@@ -174,8 +178,8 @@ func TestChat_SimpleResponse(t *testing.T) {
 	if result.Response != "Hello!" {
 		t.Errorf("response = %q, want %q", result.Response, "Hello!")
 	}
-	if len(result.Sources) != 0 {
-		t.Errorf("expected no sources, got %d", len(result.Sources))
+	if len(result.Citations) != 0 {
+		t.Errorf("expected no citations, got %d", len(result.Citations))
 	}
 
 	// Verify session has user + assistant messages
@@ -210,12 +214,15 @@ func TestChat_WithToolCall(t *testing.T) {
 		t.Errorf("response = %q, want %q", result.Response, "Based on the search results...")
 	}
 
-	// Verify sources were collected
-	if len(result.Sources) != 1 {
-		t.Fatalf("expected 1 source, got %d", len(result.Sources))
+	// Verify citations were collected
+	if len(result.Citations) != 1 {
+		t.Fatalf("expected 1 citation, got %d", len(result.Citations))
 	}
-	if result.Sources[0].ID != "doc-1" {
-		t.Errorf("source ID = %q, want %q", result.Sources[0].ID, "doc-1")
+	if result.Citations[0].Title != "Test Doc" {
+		t.Errorf("citation title = %q, want %q", result.Citations[0].Title, "Test Doc")
+	}
+	if result.Citations[0].URL != "https://example.com/doc-1" {
+		t.Errorf("citation URL = %q, want %q", result.Citations[0].URL, "https://example.com/doc-1")
 	}
 
 	// Session should have: user + assistant(tool_call) + tool_result + assistant(final) = 4
@@ -307,18 +314,13 @@ func TestChatPassthrough(t *testing.T) {
 
 // largeTool returns a tool that produces a result with the given number of words.
 func largeTool(wordCount int) Tool {
-	return Tool{
-		Name:        "large",
-		Description: "Returns a large result",
-		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
-		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
-			words := make([]string, wordCount)
-			for i := range words {
-				words[i] = "word"
-			}
-			return strings.Join(words, " "), nil
-		},
-	}
+	return newStubTool("large", "Returns a large result", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		words := make([]string, wordCount)
+		for i := range words {
+			words[i] = "word"
+		}
+		return ToolResult{Text: strings.Join(words, " ")}, nil
+	})
 }
 
 func TestChat_ToolResultTooLarge(t *testing.T) {
@@ -697,15 +699,10 @@ func TestChatPassthrough_ToolEvents(t *testing.T) {
 
 func TestChat_ToolEvents_Duration(t *testing.T) {
 	// Use a tool that sleeps briefly to verify duration tracking.
-	sleepTool := Tool{
-		Name:        "slow",
-		Description: "Sleeps briefly",
-		Parameters:  openai.FunctionParameters{"type": "object", "properties": map[string]any{}},
-		Execute: func(ctx context.Context, argsJSON string, sources *[]domain.SourceReference) (string, error) {
-			time.Sleep(50 * time.Millisecond)
-			return "done", nil
-		},
-	}
+	sleepTool := newStubTool("slow", "Sleeps briefly", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		time.Sleep(50 * time.Millisecond)
+		return ToolResult{Text: "done"}, nil
+	})
 
 	srv := newSequentialLLM(t, []map[string]any{
 		toolCallResp("slow", "call-1", `{}`),

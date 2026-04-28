@@ -89,14 +89,16 @@ Three-stage concurrent pipeline using Go channels. Each source runs independent 
 
 ### Agent Loop
 
-The agent is the single entry point for all conversations. It owns the system prompt, manages sessions, and collects sources from `semantic_search` tool calls.
+The agent is the single entry point for all conversations. It owns the system prompt, manages sessions, and collects citations from tool calls.
+
+`Tool` is an interface (`Name`, `Description`, `Parameters`, `Execute`). Each concrete tool (e.g. `SemanticSearchTool`) is its own type. `Execute` returns a `ToolResult` carrying the LLM-facing text and optional `[]Citation` (tool-agnostic `{Title, URL}` references used to render links in the UI and in the REST response).
 
 ```
 User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
                                                   ^                     |
                                                   |                     v
-                                                  +---- [Execute tool (semantic_search)]
-                                                        [Collect sources from semantic_search]
+                                                  +---- [Execute tool]
+                                                        [Aggregate ToolResult.Citations]
 
                                            (max_iterations configurable, default 5)
 ```

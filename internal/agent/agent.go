@@ -8,7 +8,6 @@ import (
 	"github.com/openai/openai-go"
 	"github.com/rs/zerolog"
 
-	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/tokencount"
@@ -16,8 +15,8 @@ import (
 
 // ChatResult is the result of an agent conversation turn.
 type ChatResult struct {
-	Response string
-	Sources  []domain.SourceReference
+	Response  string
+	Citations []Citation
 }
 
 // Agent orchestrates LLM tool-calling loops with session management.
@@ -97,11 +96,10 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 	}
 	messages = append(messages, userMsg)
 
-	// Reset per-turn sources
-	var sources []domain.SourceReference
+	var citations []Citation
 
 	// Run tool loop
-	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources, events, nil)
+	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, events, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +110,7 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 		sess.AddMessage(msg)
 	}
 
-	return &ChatResult{Response: response, Sources: sources}, nil
+	return &ChatResult{Response: response, Citations: citations}, nil
 }
 
 // ChatStreamOutcome is the terminal value emitted on ChatStream's outcome channel
@@ -172,9 +170,9 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 		}
 		messages = append(messages, userMsg)
 
-		var sources []domain.SourceReference
+		var citations []Citation
 
-		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources, events, tokens)
+		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, events, tokens)
 		if err != nil {
 			outcome <- ChatStreamOutcome{Err: err}
 			return
@@ -185,7 +183,7 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 			sess.AddMessage(msg)
 		}
 
-		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Sources: sources}}
+		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Citations: citations}}
 	}()
 
 	return tokens, outcome
@@ -215,14 +213,14 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 	})
 	full = append(full, messages...)
 
-	var sources []domain.SourceReference
+	var citations []Citation
 
-	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &sources, events, nil)
+	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &citations, events, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ChatResult{Response: response, Sources: sources}, nil
+	return &ChatResult{Response: response, Citations: citations}, nil
 }
 
 // runToolLoop executes the tool-calling loop and returns the final text response
@@ -237,13 +235,13 @@ func (a *Agent) runToolLoop(
 	messages []openai.ChatCompletionMessageParamUnion,
 	tools []Tool,
 	maxIter int,
-	sources *[]domain.SourceReference,
+	citations *[]Citation,
 	events chan<- ToolEvent,
 	tokens chan<- string,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
 	toolParams := make([]openai.ChatCompletionToolParam, len(tools))
 	for i, t := range tools {
-		toolParams[i] = t.toFunctionTool()
+		toolParams[i] = toFunctionTool(t)
 	}
 
 	var turnMessages []openai.ChatCompletionMessageParamUnion
@@ -308,32 +306,42 @@ func (a *Agent) runToolLoop(
 			}
 
 			execStart := time.Now()
-			result, err := a.executeTool(ctx, tc.Function.Name, tc.Function.Arguments, sources)
+			toolRes, err := a.executeTool(ctx, tc.Function.Name, tc.Function.Arguments)
 			execDuration := time.Since(execStart)
 			toolErr := err != nil
 
+			var resultText string
+			var callCitations []Citation
 			if err != nil {
 				a.logger.Warn().Err(err).Str("tool", tc.Function.Name).Msg("tool execution failed")
-				result = fmt.Sprintf("Error: %s", err.Error())
+				resultText = fmt.Sprintf("Error: %s", err.Error())
+			} else {
+				resultText = toolRes.Text
+				callCitations = toolRes.Citations
+				if citations != nil && len(callCitations) > 0 {
+					*citations = append(*citations, callCitations...)
+				}
 			}
 
-			result = a.checkToolResult(ctx, tc.Function.Name, result)
+			resultText = a.checkToolResult(ctx, tc.Function.Name, resultText)
 
 			if events != nil {
 				events <- ToolEvent{
-					Type:     "done",
-					CallID:   tc.ID,
-					Name:     tc.Function.Name,
-					Result:   result,
-					Duration: execDuration,
-					Error:    toolErr,
+					Type:      "done",
+					CallID:    tc.ID,
+					Name:      tc.Function.Name,
+					Result:    resultText,
+					Duration:  execDuration,
+					Error:     toolErr,
+					Citations: callCitations,
 				}
 			}
 
 			a.logger.Debug().
 				Str("tool", tc.Function.Name).
 				Str("args", tc.Function.Arguments).
-				Int("result_len", len(result)).
+				Int("result_len", len(resultText)).
+				Int("citations", len(callCitations)).
 				Dur("duration", execDuration).
 				Msg("tool executed")
 
@@ -341,7 +349,7 @@ func (a *Agent) runToolLoop(
 				OfTool: &openai.ChatCompletionToolMessageParam{
 					ToolCallID: tc.ID,
 					Content: openai.ChatCompletionToolMessageParamContentUnion{
-						OfString: openai.String(result),
+						OfString: openai.String(resultText),
 					},
 				},
 			}
@@ -353,13 +361,13 @@ func (a *Agent) runToolLoop(
 	return "", nil, fmt.Errorf("agent exceeded max tool iterations (%d)", maxIter)
 }
 
-func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string, sources *[]domain.SourceReference) (string, error) {
+func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string) (ToolResult, error) {
 	for _, t := range a.tools {
-		if t.Name == name {
-			return t.Execute(ctx, argsJSON, sources)
+		if t.Name() == name {
+			return t.Execute(ctx, argsJSON)
 		}
 	}
-	return "", fmt.Errorf("unknown tool: %s", name)
+	return ToolResult{}, fmt.Errorf("unknown tool: %s", name)
 }
 
 // checkToolResult validates that a tool result fits within the context budget.

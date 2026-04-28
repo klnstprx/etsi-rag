@@ -163,7 +163,7 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 	}
 
 	// Build response
-	resp := ChatCompletionWithSources{
+	resp := ChatCompletionWithCitations{
 		ChatCompletion: openai.ChatCompletion{
 			ID:      "chatcmpl-local",
 			Model:   string(req.Model),
@@ -178,7 +178,7 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 				},
 			},
 		},
-		Sources: result.Sources,
+		Citations: result.Citations,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
