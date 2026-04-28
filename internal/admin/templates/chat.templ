@@ -23,7 +23,7 @@ templ ChatContent(sessionID string) {
 				hx-target="#chat-messages"
 				hx-swap="beforeend scroll:bottom"
 				hx-on:htmx:after-request="this.reset()"
-				class="flex gap-3"
+				class="flex items-center gap-3"
 			>
 				<input type="hidden" name="session_id" value={ sessionID }/>
 				<input
@@ -34,6 +34,15 @@ templ ChatContent(sessionID string) {
 					placeholder="Type a message..."
 					class="flex-1 rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
 				/>
+				<label class="flex items-center gap-2 text-xs text-gray-600 select-none whitespace-nowrap">
+					<input
+						type="checkbox"
+						name="stream"
+						checked
+						class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+					/>
+					Stream
+				</label>
 				@BtnPrimary("Send", templ.Attributes{"type": "submit"})
 				@BtnSecondary("Reset", templ.Attributes{
 					"type":    "button",
@@ -57,13 +66,22 @@ templ UserMessage(text string) {
 templ AssistantMessageSSE(sessionID string) {
 	<div class="flex justify-start">
 		<div
-			class="max-w-2xl w-full space-y-1"
+			class="assistant-thinking-host max-w-2xl w-full space-y-1"
 			hx-ext="sse"
 			sse-connect={ "/admin/chat/stream/" + sessionID }
-			sse-swap="tool_start,tool_done,token"
-			hx-swap="beforeend scroll:#chat-messages:bottom"
 			sse-close="done"
 		>
+			<div class="assistant-thinking flex items-center gap-1 rounded-lg px-4 py-2.5 bg-gray-100 w-fit" aria-label="Assistant is thinking">
+				<span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>
+				<span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]"></span>
+				<span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]"></span>
+			</div>
+			<div class="assistant-tools" sse-swap="tool_start,tool_done" hx-swap="beforeend scroll:#chat-messages:bottom"></div>
+			<div
+				class="assistant-bubble rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap empty:hidden"
+				sse-swap="token"
+				hx-swap="beforeend scroll:#chat-messages:bottom"
+			></div>
 		</div>
 	</div>
 }

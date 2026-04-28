@@ -46,6 +46,7 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 
 	message := r.FormValue("message")
 	sessionID := r.FormValue("session_id")
+	streamMode := r.FormValue("stream") != ""
 
 	if message == "" || sessionID == "" {
 		http.Error(w, "missing message or session_id", http.StatusBadRequest)
@@ -66,7 +67,25 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 	// The goroutine only closes the channels when done — ChatStream handles
 	// map cleanup, so the stream entry survives until the SSE client connects.
 	ag := h.agent.Load()
-	if ag != nil {
+	if ag == nil {
+		go func() {
+			defer close(tokenChan)
+			defer close(eventChan)
+			tokenChan <- "Agent not configured. Please configure the [agent] section in config."
+		}()
+	} else if streamMode {
+		go func() {
+			defer close(tokenChan)
+			defer close(eventChan)
+			tokens, outcome := ag.ChatStream(ctx, sessionID, message, eventChan)
+			for tok := range tokens {
+				tokenChan <- tok
+			}
+			if out := <-outcome; out.Err != nil {
+				tokenChan <- fmt.Sprintf("[Error: %s]", out.Err.Error())
+			}
+		}()
+	} else {
 		go func() {
 			defer close(tokenChan)
 			defer close(eventChan)
@@ -76,12 +95,6 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			tokenChan <- result.Response
-		}()
-	} else {
-		go func() {
-			defer close(tokenChan)
-			defer close(eventChan)
-			tokenChan <- "Agent not configured. Please configure the [agent] section in config."
 		}()
 	}
 
@@ -133,8 +146,7 @@ func (h *Handler) ChatStream(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				tokens = nil
 			} else {
-				wrapped := fmt.Sprintf(`<div class="rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap">%s</div>`, html.EscapeString(token))
-				writeSSE(w, "token", wrapped)
+				writeSSE(w, "token", html.EscapeString(token))
 				flusher.Flush()
 			}
 		case <-r.Context().Done():
@@ -161,7 +173,7 @@ func (h *Handler) ChatReset(w http.ResponseWriter, r *http.Request) {
 // writeSSE writes a properly formatted SSE event with multi-line data support.
 func writeSSE(w io.Writer, event, data string) {
 	fmt.Fprintf(w, "event: %s\n", event)
-	for _, line := range strings.Split(data, "\n") {
+	for line := range strings.SplitSeq(data, "\n") {
 		fmt.Fprintf(w, "data: %s\n", line)
 	}
 	fmt.Fprint(w, "\n")

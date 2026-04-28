@@ -101,7 +101,7 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 	var sources []domain.SourceReference
 
 	// Run tool loop
-	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources, events)
+	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources, events, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -115,25 +115,80 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 	return &ChatResult{Response: response, Sources: sources}, nil
 }
 
-// ChatStream handles a session-managed conversation turn with streaming final response.
-// events may be nil; if non-nil, ToolEvent values are sent during tool execution.
-func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage string, events chan<- ToolEvent) (<-chan string, *ChatResult, error) {
-	// For now, run the full turn, then stream the result as a single chunk.
-	// True streaming of the final LLM call can be added later.
-	result, err := a.Chat(ctx, sessionID, userMessage, events)
-	if err != nil {
-		return nil, nil, err
-	}
+// ChatStreamOutcome is the terminal value emitted on ChatStream's outcome channel
+// once the agent goroutine finishes. Result is nil when Err is non-nil.
+type ChatStreamOutcome struct {
+	Result *ChatResult
+	Err    error
+}
 
-	tokens := make(chan string, 1)
+// ChatStream is like Chat but streams the assistant's content token-by-token to
+// the returned tokens channel. The outcome channel emits exactly one value when
+// the agent goroutine finishes (success or error) and is then closed. tokens is
+// closed when streaming finishes; events is owned by the caller and is NOT
+// closed here. events may be nil; if non-nil, ToolEvent values are sent during
+// tool execution.
+func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage string, events chan<- ToolEvent) (<-chan string, <-chan ChatStreamOutcome) {
+	tokens := make(chan string, 64)
+	outcome := make(chan ChatStreamOutcome, 1)
+
 	go func() {
 		defer close(tokens)
-		if result.Response != "" {
-			tokens <- result.Response
+		defer close(outcome)
+
+		client := a.client
+		if client == nil {
+			outcome <- ChatStreamOutcome{Err: fmt.Errorf("agent not configured")}
+			return
 		}
+
+		sess := a.sessionStore.Get(sessionID)
+		if sess == nil {
+			outcome <- ChatStreamOutcome{Err: fmt.Errorf("session not found: %s", sessionID)}
+			return
+		}
+
+		system := a.system
+		tools := a.tools
+		maxIter := a.maxIter
+
+		history := sess.GetMessages()
+		messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(history)+2)
+		messages = append(messages, openai.ChatCompletionMessageParamUnion{
+			OfSystem: &openai.ChatCompletionSystemMessageParam{
+				Content: openai.ChatCompletionSystemMessageParamContentUnion{
+					OfString: openai.String(system),
+				},
+			},
+		})
+		messages = append(messages, history...)
+
+		userMsg := openai.ChatCompletionMessageParamUnion{
+			OfUser: &openai.ChatCompletionUserMessageParam{
+				Content: openai.ChatCompletionUserMessageParamContentUnion{
+					OfString: openai.String(userMessage),
+				},
+			},
+		}
+		messages = append(messages, userMsg)
+
+		var sources []domain.SourceReference
+
+		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &sources, events, tokens)
+		if err != nil {
+			outcome <- ChatStreamOutcome{Err: err}
+			return
+		}
+
+		sess.AddMessage(userMsg)
+		for _, msg := range turnMessages {
+			sess.AddMessage(msg)
+		}
+
+		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Sources: sources}}
 	}()
 
-	return tokens, result, nil
+	return tokens, outcome
 }
 
 // ChatPassthrough handles a stateless conversation (client provides full history).
@@ -162,7 +217,7 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 
 	var sources []domain.SourceReference
 
-	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &sources, events)
+	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &sources, events, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +228,9 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 // runToolLoop executes the tool-calling loop and returns the final text response
 // plus all intermediate messages (assistant+tool messages, excluding the initial messages).
 // events may be nil; if non-nil, ToolEvent values are sent for each tool execution.
+// tokens may be nil; if non-nil, the streaming LLM path is used and assistant content
+// deltas are forwarded onto it as they arrive. Ownership of `tokens` (closing) stays
+// with the caller.
 func (a *Agent) runToolLoop(
 	ctx context.Context,
 	client *llm.ChatClient,
@@ -181,6 +239,7 @@ func (a *Agent) runToolLoop(
 	maxIter int,
 	sources *[]domain.SourceReference,
 	events chan<- ToolEvent,
+	tokens chan<- string,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
 	toolParams := make([]openai.ChatCompletionToolParam, len(tools))
 	for i, t := range tools {
@@ -190,9 +249,23 @@ func (a *Agent) runToolLoop(
 	var turnMessages []openai.ChatCompletionMessageParamUnion
 
 	for range maxIter {
-		resp, err := client.ChatWithTools(ctx, messages, toolParams)
-		if err != nil {
-			return "", nil, fmt.Errorf("agent chat: %w", err)
+		var resp *openai.ChatCompletion
+		var err error
+		if tokens != nil {
+			deltas, resCh := client.ChatStreamWithTools(ctx, messages, toolParams)
+			for delta := range deltas {
+				tokens <- delta
+			}
+			res := <-resCh
+			if res.Err != nil {
+				return "", nil, fmt.Errorf("agent chat: %w", res.Err)
+			}
+			resp = res.Completion
+		} else {
+			resp, err = client.ChatWithTools(ctx, messages, toolParams)
+			if err != nil {
+				return "", nil, fmt.Errorf("agent chat: %w", err)
+			}
 		}
 
 		if len(resp.Choices) == 0 {

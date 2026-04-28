@@ -211,6 +211,60 @@ func (c *ChatClient) ChatWithTools(ctx context.Context, messages []openai.ChatCo
 	return resp, nil
 }
 
+// ChatStreamResult carries the assembled completion (or terminal error) from a
+// streaming chat call. Exactly one value is sent on the channel returned by
+// ChatStreamWithTools, after which the channel is closed.
+type ChatStreamResult struct {
+	Completion *openai.ChatCompletion
+	Err        error
+}
+
+// ChatStreamWithTools is the streaming counterpart to ChatWithTools. Content
+// deltas are forwarded to the returned tokens channel as they arrive; once the
+// upstream stream finishes, the accumulated *openai.ChatCompletion (with
+// merged tool_calls) is sent on the result channel. Both channels are closed
+// by this method's goroutine.
+func (c *ChatClient) ChatStreamWithTools(
+	ctx context.Context,
+	messages []openai.ChatCompletionMessageParamUnion,
+	tools []openai.ChatCompletionToolParam,
+) (<-chan string, <-chan ChatStreamResult) {
+	tokens := make(chan string, 1024)
+	resultCh := make(chan ChatStreamResult, 1)
+
+	go func() {
+		defer close(tokens)
+		defer close(resultCh)
+
+		acc := openai.ChatCompletionAccumulator{}
+		stream := c.client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+			Messages:    messages,
+			Model:       c.model,
+			MaxTokens:   openai.Int(c.maxTokens),
+			Temperature: openai.Float(c.temperature),
+			Tools:       tools,
+		})
+
+		for stream.Next() {
+			chunk := stream.Current()
+			acc.AddChunk(chunk)
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content != "" {
+					tokens <- choice.Delta.Content
+				}
+			}
+		}
+
+		res := ChatStreamResult{Completion: &acc.ChatCompletion}
+		if err := stream.Err(); err != nil {
+			res.Err = fmt.Errorf("streaming chat with tools: %w", err)
+		}
+		resultCh <- res
+	}()
+
+	return tokens, resultCh
+}
+
 // float64sToFloat32s converts a []float64 to []float32.
 func float64sToFloat32s(in []float64) []float32 {
 	out := make([]float32, len(in))
