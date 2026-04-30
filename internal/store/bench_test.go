@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"etsi-rag/internal/domain"
 )
 
 // BenchmarkSearchSimilarRealDB measures brute-force cosine search latency
@@ -50,52 +48,46 @@ func BenchmarkSearchSimilarRealDB(b *testing.B) {
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM chunk_embeddings").Scan(&totalChunks); err != nil {
 		b.Fatalf("counting chunks: %v", err)
 	}
-	var esChunks int
-	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM chunk_embeddings ce
-		JOIN chunks c ON c.id = ce.chunk_id
-		JOIN documents d ON d.id = c.doc_id
-		WHERE d.language = 'es'
-	`).Scan(&esChunks); err != nil {
-		b.Fatalf("counting es chunks: %v", err)
-	}
-	b.Logf("dim=%d total_chunks=%d es_chunks=%d", dim, totalChunks, esChunks)
+	b.Logf("dim=%d total_chunks=%d", dim, totalChunks)
 
 	store := NewSQLiteStore(db, func() int { return dim })
 
-	b.Run("topK=10/no_filter", func(b *testing.B) {
+	b.Run("topK=10/uncached", func(b *testing.B) {
 		b.ReportMetric(float64(totalChunks), "chunks")
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := store.SearchSimilar(ctx, query, 10, nil); err != nil {
+			if _, err := store.SearchSimilar(ctx, query, 10); err != nil {
 				b.Fatalf("search: %v", err)
 			}
 		}
 	})
 
-	b.Run("topK=10/lang=es", func(b *testing.B) {
-		b.ReportMetric(float64(esChunks), "chunks")
-		lang := domain.LanguageES
+	b.Run("topK=50/uncached", func(b *testing.B) {
+		b.ReportMetric(float64(totalChunks), "chunks")
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := store.SearchSimilar(ctx, query, 10, &lang); err != nil {
+			if _, err := store.SearchSimilar(ctx, query, 50); err != nil {
 				b.Fatalf("search: %v", err)
 			}
 		}
 	})
 
-	b.Run("topK=50/no_filter", func(b *testing.B) {
+	b.Run("topK=10/cached", func(b *testing.B) {
+		if _, err := store.Warm(ctx); err != nil {
+			b.Fatalf("warming cache: %v", err)
+		}
 		b.ReportMetric(float64(totalChunks), "chunks")
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := store.SearchSimilar(ctx, query, 50, nil); err != nil {
+			if _, err := store.SearchSimilar(ctx, query, 10); err != nil {
 				b.Fatalf("search: %v", err)
 			}
 		}
 	})
 
 	// In-memory variant: isolates pure cosine compute + sort cost from
-	// the SQLite load + deserialize cost that dominates SearchSimilar.
+	// the SQLite load + deserialize cost that dominates the uncached path.
+	// Kept as a reference for the theoretical floor.
 	b.Run("inmem_cosine_only", func(b *testing.B) {
 		rows, err := db.QueryContext(ctx, `SELECT embedding FROM chunk_embeddings`)
 		if err != nil {
@@ -122,14 +114,11 @@ func BenchmarkSearchSimilarRealDB(b *testing.B) {
 			for j, v := range vecs {
 				scores[j] = cosineSimilarity(query, v)
 			}
-			// top-K via partial selection would be faster; use full sort to
-			// match SearchSimilar's behavior.
 			idx := make([]int, len(scores))
 			for j := range idx {
 				idx[j] = j
 			}
 			topK := 10
-			// O(n*k) selection — still cheaper than full sort here.
 			for k := range topK {
 				best := k
 				for j := k + 1; j < len(idx); j++ {

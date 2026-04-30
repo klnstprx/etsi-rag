@@ -29,15 +29,12 @@ def query(
     question: str,
     *,
     top_k: int | None = None,
-    language: str | None = None,
     timeout: float = 30.0,
 ) -> list[RetrievedChunk]:
     """POST /v1/rag/query and return the ranked chunk list (highest score first)."""
     payload: dict[str, object] = {"query": question}
     if top_k is not None:
         payload["top_k"] = top_k
-    if language is not None:
-        payload["language"] = language
 
     url = f"{server_base_url.rstrip('/')}/v1/rag/query"
     with httpx.Client(timeout=timeout) as client:

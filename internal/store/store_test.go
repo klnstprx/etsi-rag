@@ -210,9 +210,9 @@ func TestVectorSearch(t *testing.T) {
 		t.Fatalf("creating English chunks: %v", err)
 	}
 
-	// Search without language filter
+	// Cosine similarity ranks across languages without a hard filter.
 	query := []float32{0.9, 0.1, 0.0, 0.0} // Closer to Spanish
-	results, err := store.SearchSimilar(ctx, query, 10, nil)
+	results, err := store.SearchSimilar(ctx, query, 10)
 	if err != nil {
 		t.Fatalf("searching: %v", err)
 	}
@@ -225,19 +225,6 @@ func TestVectorSearch(t *testing.T) {
 	}
 	if results[0].Score <= results[1].Score {
 		t.Errorf("expected first result to have higher score: %f <= %f", results[0].Score, results[1].Score)
-	}
-
-	// Search with language filter
-	langEN := domain.LanguageEN
-	resultsEN, err := store.SearchSimilar(ctx, query, 10, &langEN)
-	if err != nil {
-		t.Fatalf("searching with English filter: %v", err)
-	}
-	if len(resultsEN) != 1 {
-		t.Fatalf("expected 1 English result, got %d", len(resultsEN))
-	}
-	if resultsEN[0].Document.Language != domain.LanguageEN {
-		t.Errorf("expected English result, got %s", resultsEN[0].Document.Language)
 	}
 }
 
@@ -274,7 +261,7 @@ func TestSearchSimilar_TopKLimit(t *testing.T) {
 	query := []float32{1.0, 0.0, 0.0, 0.0}
 
 	t.Run("topK less than total", func(t *testing.T) {
-		results, err := s.SearchSimilar(ctx, query, 3, nil)
+		results, err := s.SearchSimilar(ctx, query, 3)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -284,7 +271,7 @@ func TestSearchSimilar_TopKLimit(t *testing.T) {
 	})
 
 	t.Run("topK greater than total", func(t *testing.T) {
-		results, err := s.SearchSimilar(ctx, query, 100, nil)
+		results, err := s.SearchSimilar(ctx, query, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -294,7 +281,7 @@ func TestSearchSimilar_TopKLimit(t *testing.T) {
 	})
 
 	t.Run("topK zero returns empty", func(t *testing.T) {
-		results, err := s.SearchSimilar(ctx, query, 0, nil)
+		results, err := s.SearchSimilar(ctx, query, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,7 +321,7 @@ func TestSearchSimilar_ScoreOrdering(t *testing.T) {
 
 	// Query that is mostly Alpha, a bit Bravo, no Charlie.
 	query := []float32{0.8, 0.2, 0.0, 0.0}
-	results, err := s.SearchSimilar(ctx, query, 10, nil)
+	results, err := s.SearchSimilar(ctx, query, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +372,7 @@ func TestSearchSimilar_ChunkMetadata(t *testing.T) {
 	}
 
 	// Query matching the first chunk.
-	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 1, nil)
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +442,7 @@ func TestSearchSimilar_MultipleChunksSameDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 10, nil)
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,42 +464,12 @@ func TestSearchSimilar_EmptyStore(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 5, nil)
+	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if results != nil {
 		t.Errorf("expected nil results on empty store, got %d", len(results))
-	}
-}
-
-func TestSearchSimilar_LanguageFilterExcludesAll(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	// Only Spanish documents.
-	doc := &domain.Document{
-		ID: "doc-es", Title: "Spanish Only", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
-	}
-	if err := s.CreateDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateChunks(ctx, "doc-es",
-		[]domain.Chunk{{Content: "chunk", ChunkIndex: 0}},
-		[][]float32{{1.0, 0.0, 0.0, 0.0}},
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	// Filter by English should return nothing.
-	langEN := domain.LanguageEN
-	results, err := s.SearchSimilar(ctx, []float32{1.0, 0.0, 0.0, 0.0}, 10, &langEN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if results != nil {
-		t.Errorf("expected nil results for non-matching language, got %d", len(results))
 	}
 }
 
@@ -544,7 +501,7 @@ func TestEmbeddingDimensionValidation(t *testing.T) {
 
 	// Try to search with wrong dimension
 	wrongQuery := []float32{1.0, 0.0}
-	_, err = store.SearchSimilar(ctx, wrongQuery, 10, nil)
+	_, err = store.SearchSimilar(ctx, wrongQuery, 10)
 	if err == nil {
 		t.Error("expected error for wrong query dimension")
 	}

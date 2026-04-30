@@ -185,9 +185,9 @@ func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset in
 	return docs, total, nil
 }
 
-// DeleteDocument deletes a document and its chunks + embeddings (via CASCADE).
+// DeleteDocument deletes a document and its chunks + embeddings (via CASCADE),
+// then drops the matching entries from the in-memory cache.
 func (s *SQLiteStore) DeleteDocument(ctx context.Context, id string) error {
-	// Delete document (chunks and embeddings are deleted via CASCADE)
 	deleteDocQuery := `DELETE FROM documents WHERE id = ?`
 	result, err := s.db.ExecContext(ctx, deleteDocQuery, id)
 	if err != nil {
@@ -202,5 +202,6 @@ func (s *SQLiteStore) DeleteDocument(ctx context.Context, id string) error {
 		return fmt.Errorf("document %s: %w", id, ErrNotFound)
 	}
 
+	s.cache.removeByDocIDs([]string{id})
 	return nil
 }

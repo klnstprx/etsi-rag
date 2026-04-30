@@ -75,6 +75,21 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 
 	sqliteStore := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
 
+	// Warm the in-memory embedding cache so the first user query doesn't pay
+	// the ~300 ms full-table BLOB load. Failures are non-fatal: SearchSimilar
+	// transparently falls back to a SQL scan when the cache is unloaded.
+	{
+		warmStart := time.Now()
+		if n, err := sqliteStore.Warm(context.Background()); err != nil {
+			logger.Warn().Err(err).Msg("embedding cache warm failed; SearchSimilar will use SQL fallback")
+		} else {
+			logger.Info().
+				Int("chunks", n).
+				Dur("duration", time.Since(warmStart)).
+				Msg("embedding cache warmed")
+		}
+	}
+
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:        cfg,

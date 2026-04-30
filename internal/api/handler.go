@@ -354,19 +354,7 @@ func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Language != "" {
-		if !domain.Language(req.Language).Valid() {
-			ErrInvalidLanguage(req.Language).WriteJSON(w)
-			return
-		}
-	}
-
-	var lang *string
-	if req.Language != "" {
-		lang = &req.Language
-	}
-
-	result, err := h.pipeline.Retrieve(r.Context(), req.Query, lang, req.TopK)
+	result, err := h.pipeline.Retrieve(r.Context(), req.Query, req.TopK)
 	if err != nil {
 		ErrInternal(err).WriteJSON(w)
 		return

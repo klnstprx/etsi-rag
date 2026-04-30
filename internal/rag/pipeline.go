@@ -123,7 +123,7 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 }
 
 // Retrieve finds relevant chunks for a query.
-func (p *Pipeline) Retrieve(ctx context.Context, query string, language *string, topK *int) (*RetrievalResult, error) {
+func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*RetrievalResult, error) {
 	embedder := p.getEmbedder()
 	if embedder == nil {
 		return nil, fmt.Errorf("embedding backend not configured")
@@ -140,15 +140,7 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, language *string,
 		k = *topK
 	}
 
-	var lang *domain.Language
-	if language != nil {
-		l := domain.Language(*language)
-		if l.Valid() {
-			lang = &l
-		}
-	}
-
-	results, err := p.store.SearchSimilar(ctx, embedding, k, lang)
+	results, err := p.store.SearchSimilar(ctx, embedding, k)
 	if err != nil {
 		return nil, fmt.Errorf("searching: %w", err)
 	}

@@ -182,33 +182,72 @@ func (s *SQLiteStore) MarkStalePages(ctx context.Context, sourceID int64, runSta
 // crawl_page. Orphans arise when the URL that pointed at a document moves to
 // new content (content-hash-derived doc IDs mean the old doc stays behind
 // until another URL also points away from it). Chunks + embeddings cascade.
+//
+// The target doc IDs are captured inside the same transaction as the DELETE
+// so the cache invalidation hook drops exactly the rows that were removed —
+// avoids races against concurrent writers between SELECT and DELETE.
 func (s *SQLiteStore) PurgeOrphanDocuments(ctx context.Context) (int, error) {
-	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM documents WHERE id NOT IN (
-			SELECT doc_id FROM crawl_pages WHERE doc_id IS NOT NULL
-		)`)
+	const cond = `WHERE id NOT IN (SELECT doc_id FROM crawl_pages WHERE doc_id IS NOT NULL)`
+	purgedIDs, n, err := s.purgeDocumentsTx(ctx, "SELECT id FROM documents "+cond, "DELETE FROM documents "+cond)
 	if err != nil {
 		return 0, fmt.Errorf("purging orphan documents: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return int(n), nil
+	s.cache.removeByDocIDs(purgedIDs)
+	return n, nil
 }
 
 // PurgeStaleDocuments deletes documents linked to stale crawl pages.
 func (s *SQLiteStore) PurgeStaleDocuments(ctx context.Context) (int, error) {
-	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM documents WHERE id IN (
-			SELECT doc_id FROM crawl_pages WHERE status = 'stale' AND doc_id IS NOT NULL
-		)`)
+	const cond = `WHERE id IN (SELECT doc_id FROM crawl_pages WHERE status = 'stale' AND doc_id IS NOT NULL)`
+	purgedIDs, n, err := s.purgeDocumentsTx(ctx, "SELECT id FROM documents "+cond, "DELETE FROM documents "+cond)
 	if err != nil {
 		return 0, fmt.Errorf("purging stale documents: %w", err)
 	}
-	n, _ := result.RowsAffected()
+	s.cache.removeByDocIDs(purgedIDs)
 
-	// Clear doc_id references on stale pages
+	// Clear doc_id references on now-orphaned stale pages (best effort).
 	s.db.ExecContext(ctx, `UPDATE crawl_pages SET doc_id = NULL WHERE status = 'stale'`)
 
-	return int(n), nil
+	return n, nil
+}
+
+// purgeDocumentsTx runs a SELECT + DELETE pair against documents in the same
+// transaction and returns the IDs that were deleted plus the affected count.
+func (s *SQLiteStore) purgeDocumentsTx(ctx context.Context, selectQuery, deleteQuery string) ([]string, int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, selectQuery)
+	if err != nil {
+		return nil, 0, fmt.Errorf("collecting target doc IDs: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, 0, fmt.Errorf("scanning target id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating target ids: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, deleteQuery)
+	if err != nil {
+		return nil, 0, fmt.Errorf("deleting documents: %w", err)
+	}
+	n, _ := result.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return nil, 0, fmt.Errorf("committing transaction: %w", err)
+	}
+	return ids, int(n), nil
 }
 
 // --- Runs ---

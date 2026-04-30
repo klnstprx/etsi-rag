@@ -42,9 +42,8 @@ func (t *SemanticSearchTool) SetStore(s *store.SQLiteStore) { t.Store = s }
 func (t *SemanticSearchTool) SetMaxImages(n int) { t.MaxImages = n }
 
 type semanticSearchArgs struct {
-	Query    string  `json:"query"`
-	Language *string `json:"language,omitempty"`
-	TopK     *int    `json:"top_k,omitempty"`
+	Query string `json:"query"`
+	TopK  *int   `json:"top_k,omitempty"`
 }
 
 func (*SemanticSearchTool) Name() string { return "semantic_search" }
@@ -61,11 +60,6 @@ func (*SemanticSearchTool) Parameters() openai.FunctionParameters {
 				"type":        "string",
 				"description": "The search query",
 			},
-			"language": map[string]any{
-				"type":        "string",
-				"enum":        []string{"es", "en"},
-				"description": "Language filter (optional)",
-			},
 			"top_k": map[string]any{
 				"type":        "integer",
 				"description": "Number of results to return (default: 5)",
@@ -81,7 +75,7 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		return ToolResult{}, fmt.Errorf("parsing args: %w", err)
 	}
 
-	results, err := t.Pipeline.Retrieve(ctx, args.Query, args.Language, args.TopK)
+	results, err := t.Pipeline.Retrieve(ctx, args.Query, args.TopK)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("RAG search: %w", err)
 	}

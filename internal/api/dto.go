@@ -93,10 +93,6 @@ type RAGQueryRequest struct {
 	// Query is the natural-language query to retrieve against.
 	Query string `json:"query"`
 
-	// Language optionally restricts the search to documents in this language
-	// ("es" or "en"). Empty means no language filter.
-	Language string `json:"language,omitempty"`
-
 	// TopK overrides the configured top_k for this request only. Optional.
 	TopK *int `json:"top_k,omitempty"`
 }

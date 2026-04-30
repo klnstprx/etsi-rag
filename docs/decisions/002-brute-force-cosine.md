@@ -1,7 +1,7 @@
 # ADR-002: Brute-Force Cosine Similarity
 
 ## Status
-Accepted — empirical numbers added 2026-04-30; the decision still holds.
+Accepted — empirical numbers added 2026-04-30; in-memory cache shipped 2026-04-30, dropping `SearchSimilar` from ~368 ms to ~37 ms at 16 K chunks.
 
 ## Context
 Vector search is needed for RAG retrieval. Options: sqlite-vec extension (ANN index), external vector DB, or brute-force in Go.
@@ -31,21 +31,24 @@ Real ETSI crawl, AMD Ryzen 5 5600X, dim=2,560 (Qwen3-Embedding-4B), embeddings s
 go test -bench=BenchmarkSearchSimilarRealDB -benchmem -run='^$' -benchtime=5s ./internal/store/
 ```
 
-| Path                                     | Latency  | Notes                                       |
-|------------------------------------------|----------|---------------------------------------------|
-| `embedder.Embed(query)` warm             | ~10 ms   | First call after server idle ~30–80 ms (one-shot llama-server first-inference setup, not TCP/connection); query length is not a factor |
-| `SearchSimilar` topK=10, no filter       | ~368 ms  | 16,140 chunks, 498 MB allocated per call    |
-| `SearchSimilar` topK=10, `language='es'` | ~394 ms  | join overhead; the filter is not selective at our corpus mix |
-| `SearchSimilar` topK=50, no filter       | ~365 ms  | topK has negligible effect at this size     |
-| In-memory cosine + top-K (preloaded)     | ~33 ms   | 192 KB allocated; isolates pure compute     |
+| Path                                     | Latency  | Allocs/op  | Notes                                       |
+|------------------------------------------|----------|------------|---------------------------------------------|
+| `embedder.Embed(query)` warm             | ~10 ms   | —          | First call after server idle ~30–80 ms (one-shot llama-server first-inference setup, not TCP/connection); query length is not a factor |
+| `SearchSimilar` topK=10, **uncached**    | ~372 ms  | 498 MB     | 16,140 chunks; full SQL scan + deserialize  |
+| `SearchSimilar` topK=50, **uncached**    | ~371 ms  | 498 MB     | topK has negligible effect — load dominates |
+| `SearchSimilar` topK=10, **cached**      | **~37 ms** | **307 KB** | post-Warm; metadata IN-fetch is the residual cost |
+| In-memory cosine + top-K only            | ~33 ms   | 192 KB     | theoretical floor, no metadata fetch        |
 
-**Where the time actually goes:** ~91% of `SearchSimilar` is spent loading 16K embedding BLOBs from SQLite and deserializing little-endian float32 (498 MB/op). Only ~9% is the cosine math. The synthetic table above modeled the compute path correctly — its 29 ms at 10K/dim=4096 is in the same order of magnitude as our 33 ms at 16K/dim=2560 for in-memory cosine — but underestimated the production path by ~11× because it omitted SQLite I/O + blob deserialization.
+**Where the time went pre-cache:** ~91% of `SearchSimilar` was spent loading 16 K embedding BLOBs from SQLite and deserializing little-endian float32 (498 MB/op). Only ~9% was the cosine math. The synthetic table above modeled the compute path correctly — 29 ms at 10 K/dim=4 096 is the same order of magnitude as 33 ms at 16 K/dim=2 560 for in-memory cosine — but underestimated the production path by ~11× because it omitted the SQLite I/O.
 
-A typical retrieval tool call at the current corpus size is therefore **~378 ms** (10 ms embed + 368 ms search), not the ~30 ms the synthetic table suggested.
+## In-memory cache (shipped 2026-04-30)
+
+`SQLiteStore` now embeds an `embeddingCache` (a slice of `(chunkID, docID, vec)` guarded by `sync.RWMutex`). `Warm(ctx)` is called once at server startup and loads every embedding into memory; `CreateChunks`, `DeleteDocument`, and the purge methods write through. When the cache is unloaded (e.g. `:memory:` tests that never warm), `SearchSimilar` falls through to the legacy SQL scan.
+
+Memory cost: `chunks × dim × 4 B`. At 16 K/dim=2 560: ~165 MB. At 100 K: ~1 GB. Linear, predictable.
 
 ## Consequences
-- Simple implementation, no extra dependencies — still holds.
-- "Fast enough for ~5K–10K chunks" framing revised: 378 ms per retrieval tool call at 16K chunks is acceptable because the **agent loop is dominated by chat completions**, not retrieval. It is *not* fast in absolute terms.
-- If retrieval latency becomes a UX concern, the highest-leverage fix is an **in-memory cache of deserialized embeddings** (would drop `SearchSimilar` from ~368 ms → ~33 ms with no algorithmic change). That is a much cheaper change than switching to sqlite-vec or HNSW, since the bottleneck is I/O, not the cosine math.
-- If chunk count grows ~5× beyond 16K, revisit: the linear I/O cost will start to bite the user-perceived latency even with the LLM in the loop. Migrate to an in-memory cache first; only consider ANN once compute (not I/O) is the bottleneck.
-- Latency scales linearly O(n) in both compute and I/O — predictable and easy to reason about.
+- Simple implementation, no extra dependencies — still holds. The cache adds ~140 lines of Go in `internal/store/cache.go`; no new packages, no schema change, no ANN.
+- A typical retrieval tool call at the current corpus size is now **~47 ms** (10 ms embed + 37 ms search), down from ~378 ms — the cache fully reclaims the I/O overhead that the original synthetic table had silently omitted.
+- The remaining ~4 ms gap above the theoretical floor (33 ms) is the metadata `IN(...)` SQL roundtrip for the top-K rows. Cheap to optimize further by caching chunk content + document metadata too, but probably not worth the invalidation complexity at this scale.
+- If chunk count grows ~5× beyond 16 K, the cache still scales linearly in compute (no I/O term) — at 100 K we project ~200 ms, still well under the LLM completion budget. Only consider ANN (sqlite-vec / HNSW) once *compute* (not I/O) is the bottleneck.

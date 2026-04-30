@@ -139,7 +139,7 @@ RustFS (S3)             SQLite
 +----------------+      +--------------------+
 ```
 
-**Why both?** RustFS preserves raw content for re-processing. SQLite holds structured data, metadata, and vectors (brute-force cosine similarity in Go — fast enough up to ~10K chunks, see [ADR-002](decisions/002-brute-force-cosine.md)).
+**Why both?** RustFS preserves raw content for re-processing. SQLite holds structured data, metadata, and vectors. Brute-force cosine similarity in Go, with an in-memory embedding cache warmed at startup so retrieval avoids re-loading 16 K BLOBs from SQLite per query (~37 ms cached vs ~370 ms uncached at the current corpus); see [ADR-002](decisions/002-brute-force-cosine.md).
 
 ## Multimodal artifacts
 
