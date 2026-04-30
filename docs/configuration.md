@@ -34,6 +34,8 @@ base_url = 'http://localhost:1337/v1'
 api_key = ''
 enabled = true
 is_llama_cpp = true           # enables llama.cpp /tokenize endpoint
+supports_vision = false       # set true when the configured model has an mmproj/vision adapter loaded;
+                              # admin UI shows a hint when /props detects --mmproj on the model
 
 [embedding]
 backend = 'local-llama'       # references backend by name
@@ -52,6 +54,11 @@ max_iterations = 5            # max tool-calling iterations per turn
 system_prompt = ''            # custom system prompt text/template (empty = use embedded prompts/agent.tmpl)
                               # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
 tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto (context_window/4, min 256)
+max_images_per_call = 6       # cap on image artifacts attached per tool call (vision-capable backends only)
+max_image_bytes_per_call = 65536  # cap on total image_url URL bytes attached per tool call
+public_base_url = ''          # absolute base URL prefixed onto /v1/artifacts/{token}.png so the LLM
+                              # backend can fetch image content blocks (e.g. 'http://localhost:8080');
+                              # empty disables image attachment regardless of backend.supports_vision
 
 [database]
 path = 'data/etsi-rag.db'
@@ -109,6 +116,7 @@ heading_patterns = [          # substring patterns for known PDF section headers
     'RESULTADOS DE APRENDIZAJE', 'EQUIPO DOCENTE',
     'RECOMENDACIONES', 'DISTRIBUCION DEL TRABAJO',
 ]
+render_dpi = 120              # pdftoppm -r DPI for PDF page-image renders; 0 disables image rendering
 
 [object_store]
 endpoint = 'http://localhost:9000'

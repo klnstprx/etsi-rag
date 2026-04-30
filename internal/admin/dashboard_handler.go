@@ -22,12 +22,20 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	artifactCount, err := h.store.CountArtifacts(r.Context())
+	if err != nil {
+		// Non-fatal: don't block the dashboard if artifact counting fails.
+		h.logger.Warn().Err(err).Msg("counting artifacts")
+		artifactCount = 0
+	}
+
 	data := templates.DashboardData{
-		DocCount:     docCount,
-		ChunkCount:   chunkCount,
-		BackendCount: len(h.config.Backends),
-		Backends:     h.config.Backends,
-		HasObjStore:  h.objStore != nil,
+		DocCount:      docCount,
+		ChunkCount:    chunkCount,
+		ArtifactCount: artifactCount,
+		BackendCount:  len(h.config.Backends),
+		Backends:      h.config.Backends,
+		HasObjStore:   h.objStore != nil,
 	}
 
 	page := templates.DashboardPage(data)

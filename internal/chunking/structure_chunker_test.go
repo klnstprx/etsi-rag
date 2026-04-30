@@ -8,6 +8,49 @@ import (
 	"etsi-rag/internal/config"
 )
 
+// TestImageMarkersPassthrough verifies that the chunker preserves [[image:p1]]
+// markers in chunk content. The markers carry image references for
+// vision-capable retrieval and must survive chunking unaltered.
+//
+// Critically, this test mirrors the parser's dense placement (one marker per
+// non-heading content line) so that EVERY chunk produced — not just the
+// first one in a section — contains a marker. The naive once-per-page
+// placement broke when the chunker sliced sections mid-page; the fix is
+// dense per-line marker prefixing in the parser.
+func TestImageMarkersPassthrough(t *testing.T) {
+	cfg := config.ChunkingConfig{
+		MaxChunkSize: 200,
+		ChunkOverlap: 0,
+		MinChunkSize: 5,
+	}
+	chunker := NewStructureAwareChunker(cfg, &mockCounter{}, 512)
+
+	content := "## Heading One\n\n" +
+		"[[image:p1]] Some content for page 1, line 1.\n" +
+		"[[image:p1]] Some content for page 1, line 2.\n\n" +
+		"## Heading Two\n\n" +
+		"[[image:p2]] Some content for page 2, line 1.\n" +
+		"[[image:p2]] Some content for page 2, line 2."
+
+	chunks, err := chunker.Chunk(context.Background(), content)
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least one chunk")
+	}
+
+	// Every chunk that has any non-heading content should contain at least
+	// one marker — this is the invariant we need for vision retrieval.
+	for i, c := range chunks {
+		hasContent := strings.Contains(c.Content, "content for page")
+		hasMarker := strings.Contains(c.Content, "[[image:")
+		if hasContent && !hasMarker {
+			t.Errorf("chunk[%d] has body content but no marker: %q", i, c.Content)
+		}
+	}
+}
+
 func TestStructureAwareChunker(t *testing.T) {
 	ctx := context.Background()
 	counter := &mockCounter{}

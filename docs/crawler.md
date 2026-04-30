@@ -41,9 +41,23 @@ Parser emits markdown: headings, lists, bold/italic, links. This markdown is sto
 
 Raw pdftotext output goes through three stages before ingestion:
 
-1. **Page header/footer stripping**: Lines that repeat across 2+ pages (e.g., "GUÍA DOCENTE DE LA ASIGNATURA") are removed. "Página X de Y" footers are stripped via regex.
-2. **Heading detection**: ALL-CAPS lines matching configured `heading_patterns` are converted to `## Title Case Heading` markdown headings. This enables the `StructureAwareChunker` to split PDFs on section boundaries with breadcrumb context.
+1. **Page header/footer stripping**: Lines that repeat across 2+ pages (e.g., "GUÍA DOCENTE DE LA ASIGNATURA") are removed. "Página X de Y" footers are stripped via regex. Form-feed page boundaries are preserved.
+2. **Heading detection + image markers**: ALL-CAPS lines matching configured `heading_patterns` are converted to `## Title Case Heading`. Each page boundary emits a `[[image:p{N}]]` marker so chunks can later reference the corresponding `pdftoppm`-rendered page image.
 3. **Normalization**: `normalizeStructured()` collapses excessive blank lines while preserving paragraph boundaries.
+
+### Image Artifact Rendering
+
+In parallel with text extraction, the parse stage renders one PNG per PDF
+page via `pdftoppm -png -r {render_dpi}` and (for HTML pages fetched via
+go-rod) one full-page screenshot. Each image is stored in RustFS at
+`crawl/img/{url_sha256}/{ref}.png` (`ref` = `p1`, `p2`, … or `full`) and
+recorded in the `document_artifacts` SQLite table. See
+[ADR-006](decisions/006-multimodal-artifacts.md) for retrieval semantics.
+
+**Coverage caveat:** static-HTML pages (those that don't match a
+`js_patterns` prefix) are fetched via plain HTTP, not go-rod, so they have
+no screenshot artifact. PDFs always get full coverage. Reprocess re-renders
+PDFs from archived bytes for free; HTML screenshots require a fresh crawl.
 
 ## BFS Algorithm (per source)
 
@@ -123,11 +137,11 @@ Consequences:
 | `fetcher.go` | Rate-limited HTTP + body size limit + JS pattern routing |
 | `browser.go` | go-rod headless Chrome wrapper |
 | `parser.go` | HTML -> markdown + links (readability + html walker) |
-| `pdf.go` | PDF -> markdown via pdftotext + pdfinfo + heading detection |
+| `pdf.go` | PDF -> markdown via pdftotext + pdfinfo + heading detection; per-page PNG renders via pdftoppm |
 | `filter.go` | Content quality filtering (`isLowQualityContent`) + subject URL dedup (`subjectCode`) |
 | `categorizer.go` | URL-based document categorization + content-hash-based `StableDocID` |
 
 ## System Dependencies
 
-- `poppler` — provides `pdftotext` (`paru -S poppler`)
+- `poppler` — provides `pdftotext`, `pdfinfo`, `pdftoppm` (`paru -S poppler`)
 - `chromium` or `google-chrome` — headless browser for JS pages (auto-detected by go-rod)

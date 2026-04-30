@@ -99,6 +99,22 @@ func Migrate(db *sql.DB) error {
 			started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			finished_at DATETIME
 		);
+
+		CREATE TABLE IF NOT EXISTS document_artifacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+			ref TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			object_store_key TEXT NOT NULL,
+			mime_type TEXT NOT NULL,
+			width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0,
+			public_token TEXT NOT NULL UNIQUE,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(doc_id, ref)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_artifacts_doc ON document_artifacts(doc_id);
 	`
 
 	_, err := db.Exec(schema)

@@ -12,6 +12,7 @@ import (
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
+	"etsi-rag/internal/markers"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/tokencount"
 )
@@ -262,7 +263,10 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 			continue
 		}
 
-		// Convert chunking.Chunk to domain.Chunk and collect texts
+		// Convert chunking.Chunk to domain.Chunk and collect texts. Strip image
+		// markers from the embed-time text so they don't pollute the embedding
+		// space; the storage path keeps the markers so retrieval can resolve
+		// them to image artifacts.
 		domainChunks := make([]domain.Chunk, len(chunks))
 		texts := make([]string, len(chunks))
 		for i, c := range chunks {
@@ -271,7 +275,7 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 				ChunkIndex:   c.Index,
 				SectionTitle: c.SectionTitle,
 			}
-			texts[i] = c.Content
+			texts[i] = markers.Strip(c.Content)
 		}
 
 		embeddings, err := embedder.EmbedBatch(ctx, texts)

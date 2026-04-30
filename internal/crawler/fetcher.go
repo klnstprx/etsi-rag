@@ -18,6 +18,7 @@ type FetchResult struct {
 	Body        []byte
 	ContentType string // "html" or "pdf"
 	StatusCode  int
+	Screenshot  []byte // full-page PNG when JS rendering captured one; nil otherwise
 }
 
 // Fetcher performs rate-limited HTTP fetching with optional JS rendering.
@@ -137,9 +138,10 @@ func (f *Fetcher) fetchStatic(ctx context.Context, rawURL string) (*FetchResult,
 	}, nil
 }
 
-// fetchDynamic uses the headless browser to render JS and return the page HTML.
+// fetchDynamic uses the headless browser to render JS, capture the page HTML
+// and a full-page PNG screenshot for downstream multimodal retrieval.
 func (f *Fetcher) fetchDynamic(ctx context.Context, rawURL string) (*FetchResult, error) {
-	body, err := f.browser.Fetch(ctx, rawURL)
+	body, png, err := f.browser.FetchWithScreenshot(ctx, rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("dynamic fetch %s: %w", rawURL, err)
 	}
@@ -153,6 +155,7 @@ func (f *Fetcher) fetchDynamic(ctx context.Context, rawURL string) (*FetchResult
 		Body:        body,
 		ContentType: "html",
 		StatusCode:  200,
+		Screenshot:  png,
 	}, nil
 }
 

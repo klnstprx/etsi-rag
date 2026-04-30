@@ -107,52 +107,64 @@ func TestStripPageHeaders(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
-		want string
+		want []string
 	}{
 		{
 			name: "repeating header across pages",
 			text: "GUÍA DOCENTE\nReal content page 1\f" +
 				"GUÍA DOCENTE\nReal content page 2\f" +
 				"GUÍA DOCENTE\nReal content page 3",
-			want: "Real content page 1\n\nReal content page 2\n\nReal content page 3",
+			want: []string{"Real content page 1", "Real content page 2", "Real content page 3"},
 		},
 		{
 			name: "page numbers stripped",
 			text: "Content here\nPágina 1 de 4\f" +
 				"More content\nPágina 2 de 4",
-			want: "Content here\n\nMore content",
+			want: []string{"Content here", "More content"},
 		},
 		{
 			name: "single page no repeating headers",
 			text: "GUÍA DOCENTE\nSome content here",
-			want: "GUÍA DOCENTE\nSome content here",
+			want: []string{"GUÍA DOCENTE\nSome content here"},
 		},
 		{
 			name: "empty text",
 			text: "",
-			want: "",
+			want: nil,
 		},
 		{
 			name: "pagina case insensitive",
 			text: "Content\npagina 1 de 3\fMore\npagina 2 de 3",
-			want: "Content\n\nMore",
+			want: []string{"Content", "More"},
 		},
 		{
 			name: "split page number Página X de on its own line",
 			text: "Content\nPágina 1 de\f" +
 				"More content\nPágina 2 de",
-			want: "Content\n\nMore content",
+			want: []string{"Content", "More content"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := stripPageHeaders(tt.text)
-			if got != tt.want {
-				t.Errorf("stripPageHeaders() =\n%q\nwant:\n%q", got, tt.want)
+			if !slicesEqual(got, tt.want) {
+				t.Errorf("stripPageHeaders() =\n%#v\nwant:\n%#v", got, tt.want)
 			}
 		})
 	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPdfTextToMarkdown(t *testing.T) {
@@ -162,35 +174,36 @@ func TestPdfTextToMarkdown(t *testing.T) {
 		want string
 	}{
 		{
-			name: "headings converted to markdown",
+			name: "single page prefixes p1 marker on every content line",
 			raw: "DESCRIPCION DE LA ASIGNATURA\n\n" +
 				"This is a course about programming.\n\n" +
 				"OBJETIVOS Y RESULTADOS DE APRENDIZAJE\n\n" +
 				"Students will learn to code.",
 			want: "## Descripcion de la Asignatura\n\n" +
-				"This is a course about programming.\n\n" +
+				"[[image:p1]] This is a course about programming.\n\n" +
 				"## Objetivos y Resultados de Aprendizaje\n\n" +
-				"Students will learn to code.",
+				"[[image:p1]] Students will learn to code.",
 		},
 		{
-			name: "repeating headers stripped across pages",
+			name: "multi-page uses page-specific marker per content line",
 			raw: "GUÍA DOCENTE\nDESCRIPCION DE LA ASIGNATURA\n\nContent page 1\nPágina 1 de 2\f" +
 				"GUÍA DOCENTE\nOBJETIVOS\n\nContent page 2\nPágina 2 de 2",
-			want: "## Descripcion de la Asignatura\n\nContent page 1\n\n## Objetivos\n\nContent page 2",
+			want: "## Descripcion de la Asignatura\n\n[[image:p1]] Content page 1\n\n" +
+				"## Objetivos\n\n[[image:p2]] Content page 2",
 		},
 		{
-			name: "plain text without headings preserved",
+			name: "plain text without headings: every line prefixed",
 			raw:  "Just some regular text.\n\nWith paragraph breaks.",
-			want: "Just some regular text.\n\nWith paragraph breaks.",
+			want: "[[image:p1]] Just some regular text.\n\n[[image:p1]] With paragraph breaks.",
 		},
 		{
-			name: "professor names not promoted to headings",
+			name: "professor names not promoted to headings still prefixed",
 			raw: "EQUIPO DOCENTE\n\nCOORDINADOR/A\n\n" +
 				"FRANCISCO JAVIER\nHORMIGO AGUILAR\n\n" +
 				"ARQUITECTURA DE COMPUTADORES",
-			want: "## Equipo Docente\n\nCOORDINADOR/A\n\n" +
-				"FRANCISCO JAVIER\nHORMIGO AGUILAR\n\n" +
-				"ARQUITECTURA DE COMPUTADORES",
+			want: "## Equipo Docente\n\n[[image:p1]] COORDINADOR/A\n\n" +
+				"[[image:p1]] FRANCISCO JAVIER\n[[image:p1]] HORMIGO AGUILAR\n\n" +
+				"[[image:p1]] ARQUITECTURA DE COMPUTADORES",
 		},
 		{
 			name: "empty input",

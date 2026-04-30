@@ -111,3 +111,26 @@ type SourceReference struct {
 	ChunkIndex int     `json:"chunk_index"`
 	Score      float32 `json:"score"`
 }
+
+// ArtifactKind classifies an image artifact derived from a document.
+type ArtifactKind string
+
+const (
+	ArtifactPDFPage        ArtifactKind = "pdf_page"
+	ArtifactHTMLScreenshot ArtifactKind = "html_screenshot"
+)
+
+// Artifact is an image rendered from a source document (PDF page or HTML page
+// screenshot) that the agent can attach to a vision-capable LLM as visual
+// context. The Ref is the chunk-marker reference (e.g. "p1", "p2", "full").
+type Artifact struct {
+	ID             int64
+	DocID          string
+	Ref            string
+	Kind           ArtifactKind
+	ObjectStoreKey string
+	MimeType       string
+	Width          int
+	Height         int
+	PublicToken    string // opaque token used in /v1/artifacts/{token}.png
+}

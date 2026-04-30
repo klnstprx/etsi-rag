@@ -143,6 +143,16 @@ func echoTool() Tool {
 	})
 }
 
+// imagesTool returns a tool result with a citation, no images.
+func imagesToolWithRefs(images []ImageRef) Tool {
+	return newStubTool("search_with_images", "Search returning images", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		return ToolResult{
+			Text:   "found relevant content (image markers stripped)",
+			Images: images,
+		}, nil
+	})
+}
+
 // errorTool always returns an error.
 func errorTool() Tool {
 	return newStubTool("fail", "Always fails", func(ctx context.Context, argsJSON string) (ToolResult, error) {
@@ -731,5 +741,253 @@ func TestChat_ToolEvents_Duration(t *testing.T) {
 	}
 	if done.Duration > 5*time.Second {
 		t.Errorf("duration = %v, unreasonably long", done.Duration)
+	}
+}
+
+// recordingLLM is like newSequentialLLM but also records every request body
+// so tests can introspect what the agent sent to the model.
+func recordingLLM(t *testing.T, responses []map[string]any, recorded *[]map[string]any) *httptest.Server {
+	t.Helper()
+	var callIdx atomic.Int64
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding LLM request body: %v", err)
+		}
+		*recorded = append(*recorded, body)
+		idx := int(callIdx.Add(1) - 1)
+		if idx >= len(responses) {
+			t.Errorf("LLM server received unexpected call #%d (only %d responses configured)", idx+1, len(responses))
+			http.Error(w, "no more responses", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(responses[idx])
+	}))
+}
+
+// findImageURLs walks a recorded request's messages and returns every
+// image_url URL found across all user-message content parts. Used to assert
+// the agent injected the synthetic user message with image parts.
+func findImageURLs(req map[string]any) []string {
+	var out []string
+	msgs, _ := req["messages"].([]any)
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm["role"] != "user" {
+			continue
+		}
+		parts, ok := mm["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, p := range parts {
+			pp, _ := p.(map[string]any)
+			if pp["type"] != "image_url" {
+				continue
+			}
+			iu, _ := pp["image_url"].(map[string]any)
+			if u, ok := iu["url"].(string); ok {
+				out = append(out, u)
+			}
+		}
+	}
+	return out
+}
+
+// TestChat_ImagesAttachedWhenVisionEnabled asserts that when the agent's
+// VisionGetter reports vision=true with a baseURL and the tool returns
+// Images, the agent appends a synthetic user message containing image_url
+// content parts in the SECOND request to the LLM (the one after the tool
+// message).
+func TestChat_ImagesAttachedWhenVisionEnabled(t *testing.T) {
+	images := []ImageRef{
+		{DocID: "doc-1", Ref: "p1", URL: "/v1/artifacts/aaa.png"},
+		{DocID: "doc-1", Ref: "p2", URL: "/v1/artifacts/bbb.png"},
+	}
+
+	var recorded []map[string]any
+	srv := recordingLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("here is the answer based on the images"),
+	}, &recorded)
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	ag.SetVisionGetter(func() (bool, string) { return true, "http://localhost:8080" })
+
+	sessID := ss.Create()
+
+	res, err := ag.Chat(context.Background(), sessID, "describe pages", nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.Response == "" {
+		t.Fatal("empty response")
+	}
+	if len(res.Images) != 2 {
+		t.Fatalf("ChatResult.Images len = %d, want 2", len(res.Images))
+	}
+
+	if len(recorded) < 2 {
+		t.Fatalf("expected 2 LLM requests, got %d", len(recorded))
+	}
+
+	urls := findImageURLs(recorded[1])
+	if len(urls) != 2 {
+		t.Fatalf("expected 2 image_url parts in second request, got %d", len(urls))
+	}
+	wantPrefixes := []string{
+		"http://localhost:8080/v1/artifacts/aaa.png",
+		"http://localhost:8080/v1/artifacts/bbb.png",
+	}
+	for i, want := range wantPrefixes {
+		if urls[i] != want {
+			t.Errorf("image url[%d] = %q, want %q", i, urls[i], want)
+		}
+	}
+}
+
+// TestChat_ImagesNotAttachedWhenVisionDisabled asserts the inverse: same
+// tool returns Images, but VisionGetter says false → no image_url parts in
+// any request.
+func TestChat_ImagesNotAttachedWhenVisionDisabled(t *testing.T) {
+	images := []ImageRef{{DocID: "doc-1", Ref: "p1", URL: "/v1/artifacts/aaa.png"}}
+
+	var recorded []map[string]any
+	srv := recordingLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("text-only answer"),
+	}, &recorded)
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	// Default: no vision getter set → SupportsVision treated as false.
+
+	sessID := ss.Create()
+
+	res, err := ag.Chat(context.Background(), sessID, "describe pages", nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(res.Images) != 0 {
+		t.Errorf("ChatResult.Images should be empty when vision disabled, got %d", len(res.Images))
+	}
+	for i, req := range recorded {
+		if urls := findImageURLs(req); len(urls) > 0 {
+			t.Errorf("request[%d] unexpectedly has image_url parts: %v", i, urls)
+		}
+	}
+}
+
+// TestChat_ToolEventCarriesImagesEvenWhenVisionOff is the observability
+// invariant: ToolEvent.Images must always reflect what the tool resolved
+// (so the UI can show thumbnails / links) regardless of whether vision was
+// enabled. VisionAttached distinguishes "actually sent to LLM" from "just
+// available for reference". Without this, a misconfigured backend gives no
+// UI signal that images existed.
+func TestChat_ToolEventCarriesImagesEvenWhenVisionOff(t *testing.T) {
+	images := []ImageRef{
+		{DocID: "doc-1", Ref: "p1", URL: "/v1/artifacts/aaa.png"},
+		{DocID: "doc-1", Ref: "p2", URL: "/v1/artifacts/bbb.png"},
+	}
+
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("text-only answer"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	// No vision getter → vision off, but tool still resolved images.
+
+	events := make(chan ToolEvent, 8)
+	sessID := ss.Create()
+	if _, err := ag.Chat(context.Background(), sessID, "x", events); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	close(events)
+
+	var doneEvt *ToolEvent
+	for evt := range events {
+		if evt.Type == "done" {
+			doneEvt = &evt
+		}
+	}
+	if doneEvt == nil {
+		t.Fatal("no done event observed")
+	}
+	if len(doneEvt.Images) != 2 {
+		t.Errorf("ToolEvent.Images len = %d, want 2 (observability: tool's resolved images surface regardless of vision config)", len(doneEvt.Images))
+	}
+	if doneEvt.VisionAttached {
+		t.Error("VisionAttached should be false when vision is off")
+	}
+}
+
+// TestChat_ToolEventVisionAttachedWhenEnabled is the positive complement:
+// when vision IS enabled, VisionAttached=true and Images carries the same
+// list (the SDK shape was already verified by other tests).
+func TestChat_ToolEventVisionAttachedWhenEnabled(t *testing.T) {
+	images := []ImageRef{{DocID: "doc-1", Ref: "p1", URL: "/v1/artifacts/aaa.png"}}
+
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("answer with image context"),
+	})
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	ag.SetVisionGetter(func() (bool, string) { return true, "http://localhost:8080" })
+
+	events := make(chan ToolEvent, 8)
+	sessID := ss.Create()
+	if _, err := ag.Chat(context.Background(), sessID, "x", events); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	close(events)
+
+	var doneEvt *ToolEvent
+	for evt := range events {
+		if evt.Type == "done" {
+			doneEvt = &evt
+		}
+	}
+	if doneEvt == nil {
+		t.Fatal("no done event observed")
+	}
+	if len(doneEvt.Images) != 1 {
+		t.Errorf("ToolEvent.Images len = %d, want 1", len(doneEvt.Images))
+	}
+	if !doneEvt.VisionAttached {
+		t.Error("VisionAttached should be true when vision is enabled")
+	}
+}
+
+// TestChat_ImagesNotAttachedWhenBaseURLEmpty covers the partial-config case:
+// SupportsVision=true but PublicBaseURL is empty. Expected behavior: no
+// images attached, since the LLM backend would fail to fetch a path-only URL.
+func TestChat_ImagesNotAttachedWhenBaseURLEmpty(t *testing.T) {
+	images := []ImageRef{{DocID: "doc-1", Ref: "p1", URL: "/v1/artifacts/aaa.png"}}
+
+	var recorded []map[string]any
+	srv := recordingLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("answer"),
+	}, &recorded)
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	ag.SetVisionGetter(func() (bool, string) { return true, "" })
+
+	sessID := ss.Create()
+
+	if _, err := ag.Chat(context.Background(), sessID, "x", nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	for i, req := range recorded {
+		if urls := findImageURLs(req); len(urls) > 0 {
+			t.Errorf("request[%d] unexpectedly has image_url parts: %v", i, urls)
+		}
 	}
 }

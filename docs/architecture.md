@@ -104,7 +104,7 @@ User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
 ```
 
 Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
-Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime.
+Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime. Agent construction (search-tool wiring, vision getter) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
 
 ## Key Design Patterns
 
@@ -117,23 +117,28 @@ Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config sa
 ## Routes
 
 - **Health**: `GET /health`, `GET /v1/health`
-- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`
+- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
 - **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents, agent chat)
 - Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX + SSE
 
 ## Storage
 
 ```
-RustFS (S3)          SQLite
-+--------------+     +-------------------+
-| Raw HTML     |     | documents         |
-| Raw PDFs     |     | chunks            |
-| crawl/{type} |     | chunk_embeddings  |
-|   /{sha256}  |     | backends          |
-+--------------+     | crawl_sources     |
-                     | crawl_pages       |
-                     | crawl_runs        |
-                     +-------------------+
+RustFS (S3)             SQLite
++----------------+      +--------------------+
+| Raw HTML       |      | documents          |
+| Raw PDFs       |      | chunks             |
+| crawl/{type}   |      | chunk_embeddings   |
+|   /{sha256}    |      | document_artifacts |
+| Page images    |      | backends           |
+| crawl/img/     |      | crawl_sources      |
+|   {sha256}/    |      | crawl_pages        |
+|   {ref}.png    |      | crawl_runs         |
++----------------+      +--------------------+
 ```
 
 **Why both?** RustFS preserves raw content for re-processing. SQLite holds structured data, metadata, and vectors (brute-force cosine similarity in Go — fast enough up to ~10K chunks, see [ADR-002](decisions/002-brute-force-cosine.md)).
+
+## Multimodal artifacts
+
+Image artifacts (PDF pages via `pdftoppm`, HTML full-page screenshots via go-rod) are rendered during crawl and stored under `crawl/img/{url_sha256}/{ref}.png` in RustFS, with a `document_artifacts` row linking them to the parent document by `doc_id`. The parser embeds inline `[[image:ref]]` markers in chunk text; embeddings strip them in-flight, retrieval scans them to attach `image_url` parts to a synthetic user message when the configured backend is vision-capable. See [ADR-006](decisions/006-multimodal-artifacts.md) for the full design.

@@ -3,17 +3,30 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/openai/openai-go"
 
+	"etsi-rag/internal/markers"
 	"etsi-rag/internal/rag"
+	"etsi-rag/internal/store"
 )
 
 // SemanticSearchTool performs semantic search over indexed documents and
 // returns both an LLM-facing context string and a set of citations for the UI.
+// When configured with a Store, it also resolves [[image:ref]] markers in
+// retrieved chunks to attached image artifacts (Images field on ToolResult).
 type SemanticSearchTool struct {
 	Pipeline *rag.Pipeline
+
+	// Store provides artifact lookup for image markers; optional. Without it
+	// the tool returns text-only.
+	Store *store.SQLiteStore
+
+	// MaxImages caps the number of image_url parts the agent attaches per
+	// tool call. <= 0 disables image attachment.
+	MaxImages int
 }
 
 // NewSemanticSearchTool constructs a semantic_search tool backed by the given
@@ -21,6 +34,12 @@ type SemanticSearchTool struct {
 func NewSemanticSearchTool(pipeline *rag.Pipeline) *SemanticSearchTool {
 	return &SemanticSearchTool{Pipeline: pipeline}
 }
+
+// SetStore enables image-marker resolution. Pass nil to disable.
+func (t *SemanticSearchTool) SetStore(s *store.SQLiteStore) { t.Store = s }
+
+// SetMaxImages caps how many image artifacts a single tool call attaches.
+func (t *SemanticSearchTool) SetMaxImages(n int) { t.MaxImages = n }
 
 type semanticSearchArgs struct {
 	Query    string  `json:"query"`
@@ -99,5 +118,58 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		citations = append(citations, c)
 	}
 
-	return ToolResult{Text: ragContext, Citations: citations}, nil
+	// Resolve image markers from the retrieved chunks to artifact URLs. The
+	// LLM-visible text gets markers stripped (clean prose for the model);
+	// the URLs are attached to ToolResult.Images for the agent loop to inject
+	// as a synthetic user message when the backend supports vision.
+	images := t.collectImages(ctx, results)
+	llmText := markers.Strip(ragContext)
+
+	return ToolResult{Text: llmText, Citations: citations, Images: images}, nil
+}
+
+// collectImages walks retrieved chunks for [[image:ref]] markers, looks up
+// the matching artifact in the store, and builds path-only URLs that the
+// agent can absolutize at injection time. Duplicates (same doc_id+ref) are
+// deduped; total count is capped by MaxImages.
+func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.RetrievalResult) []ImageRef {
+	if t.Store == nil || t.MaxImages <= 0 {
+		return nil
+	}
+
+	type key struct{ doc, ref string }
+	picked := make(map[key]struct{})
+	var out []ImageRef
+
+	for _, sc := range results.Chunks {
+		for _, ref := range markers.Extract(sc.Chunk.Content) {
+			k := key{doc: sc.Chunk.DocID, ref: ref}
+			if _, dup := picked[k]; dup {
+				continue
+			}
+			picked[k] = struct{}{}
+
+			art, err := t.Store.GetArtifact(ctx, sc.Chunk.DocID, ref)
+			if err != nil {
+				if !errors.Is(err, store.ErrNotFound) {
+					// Storage error is not fatal — log via the result text isn't
+					// useful, the agent layer just sees fewer images.
+					continue
+				}
+				// Marker without artifact: pdftoppm probably failed for this
+				// page, or backfill hasn't run yet. Skip silently.
+				continue
+			}
+
+			out = append(out, ImageRef{
+				DocID: sc.Chunk.DocID,
+				Ref:   ref,
+				URL:   "/v1/artifacts/" + art.PublicToken + ".png",
+			})
+			if len(out) >= t.MaxImages {
+				return out
+			}
+		}
+	}
+	return out
 }

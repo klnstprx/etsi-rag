@@ -102,6 +102,69 @@ func TestIngest(t *testing.T) {
 	}
 }
 
+// TestIngest_StripsImageMarkersFromEmbedText asserts that image markers in
+// chunk content are removed before being passed to the embedder, while the
+// chunk content stored in the DB still carries the markers (verified
+// separately by retrieval). The motivation is that embedding bracketed
+// pseudo-tokens like [[image:p1]] would pollute the embedding space.
+func TestIngest_StripsImageMarkersFromEmbedText(t *testing.T) {
+	p, s := setupTestPipeline(t)
+	ctx := context.Background()
+
+	var seenTexts []string
+	mock := &mockEmbedder{
+		embedFn: func(ctx context.Context, text string) ([]float32, error) {
+			return []float32{0.5, 0.5, 0.0, 0.0}, nil
+		},
+		embedBatchFn: func(ctx context.Context, texts []string) ([][]float32, error) {
+			seenTexts = append(seenTexts, texts...)
+			out := make([][]float32, len(texts))
+			for i := range texts {
+				out[i] = []float32{0.5, 0.5, 0.0, 0.0}
+			}
+			return out, nil
+		},
+	}
+	p.SetEmbedder(mock)
+
+	docs := []domain.Document{{
+		ID:       "doc-img",
+		Title:    "imgdoc",
+		Content:  "[[image:p1]] some text body before the embed call",
+		Language: domain.LanguageES,
+		Category: domain.CategoryGeneral,
+	}}
+
+	if _, _, err := p.Ingest(ctx, docs); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	if len(seenTexts) == 0 {
+		t.Fatal("embedder was not called")
+	}
+	for i, txt := range seenTexts {
+		if strings.Contains(txt, "[[image:") {
+			t.Errorf("embedder text[%d] still contains marker: %q", i, txt)
+		}
+	}
+
+	// Stored chunk content should keep the marker so retrieval can extract it.
+	stored, err := s.GetChunksByDocument(ctx, "doc-img")
+	if err != nil {
+		t.Fatalf("GetChunksByDocument: %v", err)
+	}
+	if len(stored) == 0 {
+		t.Fatal("expected stored chunks")
+	}
+	all := ""
+	for _, c := range stored {
+		all += c.Content
+	}
+	if !strings.Contains(all, "[[image:p1]]") {
+		t.Errorf("stored chunk content lost marker; got: %q", all)
+	}
+}
+
 // TestIngest_ChunkingFailureIsIdentifiable verifies that chunking failures
 // surface through Ingest wrapped with ErrChunking, so callers (e.g. the crawler
 // embed stage) can distinguish them from embedding failures and scope their

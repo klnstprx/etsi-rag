@@ -22,6 +22,11 @@ type ChatCompletionWithCitations struct {
 
 	// Citations lists external resources referenced during the turn.
 	Citations []agent.Citation `json:"citations,omitempty"`
+
+	// Images lists image artifacts attached during the turn (path-only URLs
+	// rooted under /v1/artifacts/{token}.png). Empty when the configured
+	// backend doesn't support vision or no markers were resolved.
+	Images []agent.ImageRef `json:"images,omitempty"`
 }
 
 // EmbeddingRequest is the OpenAI-compatible embedding request.

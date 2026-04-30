@@ -10,6 +10,7 @@ type CrawlItem struct {
 	ObjKey      string
 	Source      CrawlSourceRef
 	HTMLParsed  *HTMLResult // non-nil for HTML (already parsed for BFS links)
+	Screenshot  []byte      // full-page PNG when go-rod captured one (HTML only)
 }
 
 // CrawlSourceRef is a lightweight reference to a crawl source, avoiding domain import in pipeline types.
@@ -29,6 +30,18 @@ type ParseItem struct {
 	Language    string // normalised primary subtag from <html lang>, "" falls back to Source.Language
 	ObjKey      string
 	Source      CrawlSourceRef
+	// Artifacts is the set of image bytes (PDF page renders or HTML screenshot)
+	// that the embed stage will store in RustFS and link via document_artifacts.
+	// Each ref matches a [[image:ref]] marker embedded in Text.
+	Artifacts []ParsedArtifact
+}
+
+// ParsedArtifact carries one rendered image from parse stage to embed stage.
+type ParsedArtifact struct {
+	Ref      string // "p1","p2",… or "full"
+	Kind     string // "pdf_page" | "html_screenshot"
+	MimeType string // "image/png"
+	Data     []byte
 }
 
 // RunProgress holds atomic counters for live progress tracking across pipeline stages.

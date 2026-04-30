@@ -14,6 +14,7 @@ import (
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
+	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
@@ -29,6 +30,7 @@ type Handler struct {
 	pipeline        *rag.Pipeline
 	store           *store.SQLiteStore
 	sessionStore    *session.Store
+	objStore        *objectstore.Client
 	passthrough     bool
 }
 
@@ -92,6 +94,7 @@ type HandlerConfig struct {
 	Pipeline        *rag.Pipeline
 	Store           *store.SQLiteStore
 	SessionStore    *session.Store
+	ObjStore        *objectstore.Client
 	Passthrough     bool
 }
 
@@ -104,6 +107,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		pipeline:        cfg.Pipeline,
 		store:           cfg.Store,
 		sessionStore:    cfg.SessionStore,
+		objStore:        cfg.ObjStore,
 		passthrough:     cfg.Passthrough,
 	}
 }
@@ -179,6 +183,7 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 			},
 		},
 		Citations: result.Citations,
+		Images:    result.Images,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -351,6 +356,54 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(docs)
+}
+
+// GetArtifact handles GET /v1/artifacts/{token}.png. The {token} path
+// component is the artifact's opaque public_token (random 128-bit hex), not
+// its raw integer ID — this prevents trivial enumeration of all stored
+// artifact images. The handler streams the underlying object from RustFS
+// with the artifact's stored MIME type.
+func (h *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
+	if h.objStore == nil {
+		ErrInternal(errors.New("object store not configured")).WriteJSON(w)
+		return
+	}
+	token := chi.URLParam(r, "token")
+	// Strip a trailing ".png" extension if present so /v1/artifacts/abc and
+	// /v1/artifacts/abc.png both resolve to the same row. Storing the
+	// artifact's MIME type means we don't actually rely on the extension.
+	if dot := len(token) - 4; dot > 0 && token[dot:] == ".png" {
+		token = token[:dot]
+	}
+	if token == "" {
+		ErrBadRequest("missing artifact token").WriteJSON(w)
+		return
+	}
+
+	a, err := h.store.GetArtifactByToken(r.Context(), token)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			ErrNotFound("artifact not found").WriteJSON(w)
+			return
+		}
+		ErrInternal(err).WriteJSON(w)
+		return
+	}
+
+	data, err := h.objStore.Get(r.Context(), a.ObjectStoreKey)
+	if err != nil {
+		ErrInternal(fmt.Errorf("fetching artifact bytes: %w", err)).WriteJSON(w)
+		return
+	}
+
+	mime := a.MimeType
+	if mime == "" {
+		mime = "image/png"
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
 }
 
 // DeleteDocument handles DELETE /v1/rag/documents/{id}.

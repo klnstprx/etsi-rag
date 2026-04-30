@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
 	"etsi-rag/internal/config"
+	"etsi-rag/internal/markers"
 )
 
 var pageNumberRe = regexp.MustCompile(`(?im)^\s*p[aá]gina\s+\d+\s+de\s*(\s+\d+)?\s*$`)
@@ -82,24 +85,50 @@ func extractPDFTitle(ctx context.Context, pdfPath string) string {
 	return ""
 }
 
-// pdfTextToMarkdown converts raw pdftotext output to structured markdown.
-// Pipeline: strip page headers → detect headings → normalize.
+// pdfTextToMarkdown converts raw pdftotext output to structured markdown
+// with `[[image:pN]]` markers densely prefixed onto each non-heading content
+// line of page N. Dense placement (rather than once-per-page) is necessary
+// because the structure-aware chunker may split sections mid-page; we want
+// every chunk that contains page-N content to carry at least one marker so
+// retrieval can attach the corresponding pdftoppm page image. The embedder
+// strips markers in-flight via markers.Strip, so they don't contaminate the
+// embedding space.
+//
+// Headings are emitted without a marker to keep chunk boundaries clean —
+// the structure-aware chunker keys off `## ` lines.
+//
+// Pipeline: strip page headers → detect headings per page → prefix markers
+// onto content lines → normalize.
 func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 	if raw == "" {
 		return ""
 	}
 
-	text := stripPageHeaders(raw)
+	pages := stripPageHeaders(raw)
+	if len(pages) == 0 {
+		return ""
+	}
 
 	var sb strings.Builder
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if isHeadingLine(trimmed, cfg.HeadingPatterns) {
-			sb.WriteString("## ")
-			sb.WriteString(toTitleCase(trimmed))
-			sb.WriteByte('\n')
-		} else {
+	for i, page := range pages {
+		if i > 0 {
+			sb.WriteString("\n\n")
+		}
+		marker := markers.Format(fmt.Sprintf("p%d", i+1))
+		for line := range strings.SplitSeq(page, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				sb.WriteByte('\n')
+				continue
+			}
+			if isHeadingLine(trimmed, cfg.HeadingPatterns) {
+				sb.WriteString("## ")
+				sb.WriteString(toTitleCase(trimmed))
+				sb.WriteByte('\n')
+				continue
+			}
+			sb.WriteString(marker)
+			sb.WriteByte(' ')
 			sb.WriteString(line)
 			sb.WriteByte('\n')
 		}
@@ -108,45 +137,44 @@ func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 	return normalizeStructured(sb.String())
 }
 
-// stripPageHeaders removes repeating lines across pages (headers/footers)
-// and "Página X de Y" page numbers. Pages are separated by \f (form feed).
-func stripPageHeaders(text string) string {
+// stripPageHeaders splits raw pdftotext output on \f (form feed) page
+// boundaries, removes lines that repeat across pages (running headers and
+// footers) and "Página X de Y" page-number lines, and returns the cleaned
+// per-page text. The slice length equals the number of pages with at least
+// one non-empty line; callers can map slice index → page number.
+func stripPageHeaders(text string) []string {
 	if text == "" {
-		return ""
+		return nil
 	}
 
 	pages := strings.Split(text, "\f")
-	if len(pages) <= 1 {
-		// Single page — just strip page numbers.
-		return strings.TrimSpace(pageNumberRe.ReplaceAllString(text, ""))
-	}
 
 	// Count line occurrences across pages to find repeating headers/footers.
-	lineCounts := make(map[string]int)
-	for _, page := range pages {
-		seen := make(map[string]bool)
-		for _, line := range strings.Split(page, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if !seen[trimmed] {
-				seen[trimmed] = true
-				lineCounts[trimmed]++
-			}
-		}
-	}
-
-	// Lines appearing on 2+ pages are headers/footers.
+	// Single-page inputs have no repeating set; this loop is a no-op for them.
 	repeating := make(map[string]bool)
-	for line, count := range lineCounts {
-		if count >= 2 {
-			repeating[line] = true
+	if len(pages) > 1 {
+		lineCounts := make(map[string]int)
+		for _, page := range pages {
+			seen := make(map[string]bool)
+			for line := range strings.SplitSeq(page, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" {
+					continue
+				}
+				if !seen[trimmed] {
+					seen[trimmed] = true
+					lineCounts[trimmed]++
+				}
+			}
+		}
+		for line, count := range lineCounts {
+			if count >= 2 {
+				repeating[line] = true
+			}
 		}
 	}
 
-	// Rebuild without repeating lines, page numbers, or form feeds.
-	var result []string
+	out := make([]string, 0, len(pages))
 	for _, page := range pages {
 		var pageLines []string
 		for line := range strings.SplitSeq(page, "\n") {
@@ -161,11 +189,99 @@ func stripPageHeaders(text string) string {
 		}
 		cleaned := strings.TrimSpace(strings.Join(pageLines, "\n"))
 		if cleaned != "" {
-			result = append(result, cleaned)
+			out = append(out, cleaned)
 		}
 	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
-	return strings.Join(result, "\n\n")
+// ExtractPDFImages renders each PDF page to a PNG using pdftoppm (poppler) at
+// the given DPI. The returned slice is ordered by page number — pages[0] is
+// page 1, pages[1] is page 2, etc. Pages that fail to render individually are
+// skipped (returned slice may have gaps); a fully empty result returns
+// (nil, error).
+func ExtractPDFImages(ctx context.Context, pdfData []byte, dpi int) ([][]byte, error) {
+	if dpi <= 0 {
+		return nil, nil
+	}
+
+	tmp, err := os.CreateTemp("", "crawl-img-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp pdf: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+
+	if _, err := tmp.Write(pdfData); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("writing temp pdf: %w", err)
+	}
+	tmp.Close()
+
+	outDir, err := os.MkdirTemp("", "crawl-img-out-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating output dir: %w", err)
+	}
+	defer os.RemoveAll(outDir)
+
+	prefix := filepath.Join(outDir, "page")
+	cmd := exec.CommandContext(ctx, "pdftoppm",
+		"-png", "-r", fmt.Sprintf("%d", dpi),
+		tmp.Name(), prefix,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("pdftoppm: %w: %s", err, stderr.String())
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading output dir: %w", err)
+	}
+
+	// pdftoppm emits page-1.png, page-2.png, ... (no zero-padding by default).
+	// Sort by name to ensure page order is preserved across filesystems that
+	// don't guarantee directory iteration order.
+	type entry struct {
+		page int
+		name string
+	}
+	var files []entry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".png") {
+			continue
+		}
+		// Strip "page-" prefix and ".png" suffix to get the page number.
+		base := strings.TrimSuffix(e.Name(), ".png")
+		base = strings.TrimPrefix(base, "page-")
+		var n int
+		if _, err := fmt.Sscanf(base, "%d", &n); err != nil {
+			continue
+		}
+		files = append(files, entry{page: n, name: e.Name()})
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("pdftoppm produced no output")
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].page < files[j].page })
+
+	images := make([][]byte, 0, len(files))
+	for _, f := range files {
+		data, err := os.ReadFile(filepath.Join(outDir, f.name))
+		if err != nil {
+			// Per plan: log+skip per-page failures, don't fail the whole doc.
+			continue
+		}
+		images = append(images, data)
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("pdftoppm produced output but all reads failed")
+	}
+	return images, nil
 }
 
 // isAllCaps returns true if the line contains only uppercase letters (including

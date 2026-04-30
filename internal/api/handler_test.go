@@ -73,6 +73,65 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	return h, s
 }
 
+// TestGetArtifact_NotFound covers the 404 path: when the {token} doesn't
+// match any artifact, the handler must return 404 (not 5xx). This is the
+// path exercised every time a stale or made-up URL hits the server.
+func TestGetArtifact_NotFound(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	r := chi.NewRouter()
+	r.Get("/v1/artifacts/{token}", h.GetArtifact)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/nonexistent.png", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// objStore is nil in setupTestHandler, so we expect 500 from the early
+	// guard. This verifies the guard fires before we reach the store.
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 (no object store configured), got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+// TestGetArtifact_TokenStripsPngSuffix asserts that the .png extension is
+// optional in the URL: the handler resolves on the bare token. This matters
+// because the LLM backend will fetch the URL we put in image_url, and giving
+// it a path with .png is friendlier (some renderers infer MIME from suffix)
+// while we don't actually need it for lookup.
+func TestGetArtifact_TokenStripsPngSuffix(t *testing.T) {
+	h, s := setupTestHandler(t)
+
+	doc := &domain.Document{
+		ID: "doc-1", Title: "x", Content: "x",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(context.Background(), doc); err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	a := &domain.Artifact{
+		DocID: "doc-1", Ref: "p1", Kind: domain.ArtifactPDFPage,
+		ObjectStoreKey: "k", MimeType: "image/png",
+	}
+	if err := s.UpsertArtifact(context.Background(), a); err != nil {
+		t.Fatalf("UpsertArtifact: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Get("/v1/artifacts/{token}", h.GetArtifact)
+
+	// Hit with the .png suffix; we expect to reach the store lookup, which
+	// will succeed in finding the artifact, then fail on the missing
+	// objStore (nil → 500). The 500 here proves we got past the
+	// store.GetArtifactByToken call (would be 404 if the suffix were not
+	// stripped).
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/"+a.PublicToken+".png", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 (objStore nil) after stripping .png, got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
 func TestHealthCheck(t *testing.T) {
 	h, _ := setupTestHandler(t)
 

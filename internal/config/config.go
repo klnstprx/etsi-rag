@@ -28,11 +28,12 @@ const (
 
 // BackendConfig represents an LLM server endpoint.
 type BackendConfig struct {
-	Name       string `koanf:"name"`
-	BaseURL    string `koanf:"base_url"`
-	APIKey     string `koanf:"api_key"`
-	Enabled    bool   `koanf:"enabled"`
-	IsLlamaCpp bool   `koanf:"is_llama_cpp"`
+	Name           string `koanf:"name"`
+	BaseURL        string `koanf:"base_url"`
+	APIKey         string `koanf:"api_key"`
+	Enabled        bool   `koanf:"enabled"`
+	IsLlamaCpp     bool   `koanf:"is_llama_cpp"`
+	SupportsVision bool   `koanf:"supports_vision"`
 }
 
 // Config holds all application configuration.
@@ -100,14 +101,17 @@ type EmbeddingConfig struct {
 
 // AgentConfig holds agent/chat stage settings.
 type AgentConfig struct {
-	Backend             string  `koanf:"backend"`
-	Model               string  `koanf:"model"`
-	MaxTokens           int     `koanf:"max_tokens"`
-	Temperature         float64 `koanf:"temperature"`
-	ContextWindow       int     `koanf:"context_window"`         // total context window (auto-detected for llama.cpp)
-	MaxIterations       int     `koanf:"max_iterations"`         // max tool-calling iterations
-	SystemPrompt        string  `koanf:"system_prompt"`          // empty = use prompts/agent.md
-	ToolOutputMaxTokens int     `koanf:"tool_output_max_tokens"` // max tokens allowed per tool result; 0 = auto (context_window/4)
+	Backend              string  `koanf:"backend"`
+	Model                string  `koanf:"model"`
+	MaxTokens            int     `koanf:"max_tokens"`
+	Temperature          float64 `koanf:"temperature"`
+	ContextWindow        int     `koanf:"context_window"`           // total context window (auto-detected for llama.cpp)
+	MaxIterations        int     `koanf:"max_iterations"`           // max tool-calling iterations
+	SystemPrompt         string  `koanf:"system_prompt"`            // empty = use prompts/agent.md
+	ToolOutputMaxTokens  int     `koanf:"tool_output_max_tokens"`   // max tokens allowed per tool result; 0 = auto (context_window/4)
+	MaxImagesPerCall     int     `koanf:"max_images_per_call"`      // max image artifacts attached per tool call; 0 = default 6
+	MaxImageBytesPerCall int64   `koanf:"max_image_bytes_per_call"` // max bytes of image_url URLs (text length, not image data) per tool call; 0 = default 65536
+	PublicBaseURL        string  `koanf:"public_base_url"`          // absolute base URL prefixed onto /v1/artifacts/... paths so the LLM backend can fetch them; empty disables image attachment
 }
 
 // APIConfig holds API endpoint settings.
@@ -162,6 +166,7 @@ type CrawlerConfig struct {
 // PDFConfig holds PDF text extraction settings.
 type PDFConfig struct {
 	HeadingPatterns []string `koanf:"heading_patterns"` // substring patterns for known section headers
+	RenderDPI       int      `koanf:"render_dpi"`       // pdftoppm -r <dpi> for page renders, 0 disables image rendering
 }
 
 // ObjectStoreConfig holds S3-compatible object storage settings (RustFS).
@@ -309,6 +314,12 @@ func (c *Config) applyDefaults() {
 	if c.Agent.MaxIterations == 0 {
 		c.Agent.MaxIterations = 5
 	}
+	if c.Agent.MaxImagesPerCall == 0 {
+		c.Agent.MaxImagesPerCall = 6
+	}
+	if c.Agent.MaxImageBytesPerCall == 0 {
+		c.Agent.MaxImageBytesPerCall = 65536
+	}
 
 	if c.RAG.TopK == 0 {
 		c.RAG.TopK = 10
@@ -400,6 +411,9 @@ func (c *Config) applyDefaults() {
 			"RESULTADOS DE APRENDIZAJE", "EQUIPO DOCENTE",
 			"RECOMENDACIONES", "DISTRIBUCION DEL TRABAJO",
 		}
+	}
+	if c.Crawler.PDF.RenderDPI == 0 {
+		c.Crawler.PDF.RenderDPI = 120
 	}
 
 	if c.ObjectStore.Region == "" {

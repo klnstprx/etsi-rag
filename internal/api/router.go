@@ -34,6 +34,11 @@ func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
 		r.Post("/chat/completions", handler.ChatCompletions)
 		r.Post("/embeddings", handler.Embeddings)
 
+		// Image artifact serving — fed to vision-capable LLMs as image_url.
+		// {token} is the artifact's opaque public_token; .png suffix is
+		// optional and ignored by the handler.
+		r.Get("/artifacts/{token}", handler.GetArtifact)
+
 		// RAG endpoints
 		r.Route("/rag", func(r chi.Router) {
 			r.Post("/ingest", handler.Ingest)

@@ -140,16 +140,11 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		if err != nil {
 			logger.Warn().Err(err).Msg("agent backend not available, agent disabled")
 		} else {
-			tools := []agent.Tool{
-				agent.NewSemanticSearchTool(s.pipeline),
-			}
-			systemPrompt := s.agentSystemPrompt()
-			agentCounter, err := s.resolveCounter(cfg.Agent.Backend, cfg.Agent.Model)
-			if err != nil {
-				logger.Warn().Err(err).Msg("agent token counter not available, tool output guards disabled")
-			}
-			agentInstance = agent.NewAgent(agentClient, tools, systemPrompt, cfg.Agent.MaxIterations, agentCounter, cfg.Agent.ContextWindow, cfg.Agent.ToolOutputMaxTokens, s.sessionStore, logger)
-			logger.Info().Str("backend", cfg.Agent.Backend).Msg("agent initialized")
+			agentInstance = s.buildAgent(agentClient)
+			logger.Info().Str("backend", cfg.Agent.Backend).
+				Bool("supports_vision", s.cfg.GetBackend(cfg.Agent.Backend) != nil && s.cfg.GetBackend(cfg.Agent.Backend).SupportsVision).
+				Str("public_base_url", cfg.Agent.PublicBaseURL).
+				Msg("agent initialized")
 		}
 	} else {
 		logger.Warn().Msg("no [agent] backend configured, agent disabled")
@@ -163,6 +158,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Pipeline:        s.pipeline,
 		Store:           sqliteStore,
 		SessionStore:    s.sessionStore,
+		ObjStore:        objStore,
 		Passthrough:     cfg.API.Passthrough,
 	})
 	router := api.NewRouter(s.apiHandler, logger)

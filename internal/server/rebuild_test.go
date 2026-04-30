@@ -120,3 +120,96 @@ func TestRebuildClients_PropagatesNonLLMConfig(t *testing.T) {
 	// Should not panic and should propagate changes
 	srv.rebuildClients()
 }
+
+// TestRebuildClients_PreservesVisionWiring locks the rebuild path against a
+// regression where the agent was reconstructed without its VisionGetter or
+// without the search tool's Store/MaxImages — silently disabling vision and
+// image attachment after any admin save.
+func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true, SupportsVision: true},
+	}
+	cfg.Embedding.Backend = "test"
+	cfg.Embedding.Model = "test-model"
+	cfg.Agent.Backend = "test"
+	cfg.Agent.Model = "test-model"
+	cfg.Agent.MaxTokens = 1024
+	cfg.Agent.Temperature = 0.7
+	cfg.Agent.MaxIterations = 5
+	cfg.Agent.MaxImagesPerCall = 4
+	cfg.Agent.PublicBaseURL = "http://localhost:3000"
+
+	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
+	srv, err := New(cfg, t.TempDir()+"/config.toml", logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	t.Cleanup(func() { srv.store.Close(); srv.sessionStore.Close() })
+
+	// Initial state: vision wired through to the configured backend + URL.
+	a := srv.adminHandler.GetAgent()
+	if a == nil {
+		t.Fatal("agent should be wired after New()")
+	}
+	if enabled, baseURL := a.Vision(); !enabled || baseURL != "http://localhost:3000" {
+		t.Fatalf("after New: Vision()=(%v,%q), want (true,%q)", enabled, baseURL, "http://localhost:3000")
+	}
+
+	// Simulate any admin save (e.g. tweaking another config section). The
+	// rebuilt agent must keep the same vision wiring.
+	srv.rebuildClients()
+
+	a = srv.adminHandler.GetAgent()
+	if a == nil {
+		t.Fatal("agent should still be wired after rebuildClients()")
+	}
+	if enabled, baseURL := a.Vision(); !enabled || baseURL != "http://localhost:3000" {
+		t.Errorf("after rebuild: Vision()=(%v,%q), want (true,%q) — VisionGetter dropped on rebuild", enabled, baseURL, "http://localhost:3000")
+	}
+
+	// Toggling SupportsVision off via the live cfg pointer must take effect
+	// without a further rebuild — the getter reads cfg per call.
+	cfg.Backends[0].SupportsVision = false
+	if enabled, _ := a.Vision(); enabled {
+		t.Error("Vision() should observe SupportsVision=false through live cfg")
+	}
+}
+
+// TestRebuildClients_VisionReportsBaseURLEmpty asserts the diagnostic
+// distinction between "supports_vision off" and "public_base_url empty":
+// when SupportsVision=true but PublicBaseURL is empty, the getter must
+// return (true, "") so the agent can log the actual misconfiguration
+// instead of misattributing it to supports_vision.
+func TestRebuildClients_VisionReportsBaseURLEmpty(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true, SupportsVision: true},
+	}
+	cfg.Embedding.Backend = "test"
+	cfg.Embedding.Model = "test-model"
+	cfg.Agent.Backend = "test"
+	cfg.Agent.Model = "test-model"
+	cfg.Agent.MaxTokens = 1024
+	cfg.Agent.MaxIterations = 5
+	// PublicBaseURL intentionally left empty.
+
+	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
+	srv, err := New(cfg, t.TempDir()+"/config.toml", logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	t.Cleanup(func() { srv.store.Close(); srv.sessionStore.Close() })
+
+	a := srv.adminHandler.GetAgent()
+	if a == nil {
+		t.Fatal("agent should be wired")
+	}
+	enabled, baseURL := a.Vision()
+	if !enabled {
+		t.Error("Vision().enabled should be true when SupportsVision=true even with empty PublicBaseURL — distinguishes the two failure modes for diagnostic logging")
+	}
+	if baseURL != "" {
+		t.Errorf("Vision().baseURL = %q, want empty", baseURL)
+	}
+}

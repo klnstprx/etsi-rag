@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"etsi-rag/internal/agent"
 	"etsi-rag/internal/backend"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/prompts"
@@ -93,7 +94,17 @@ func (s *Server) probeLlamaCppBackends() {
 			Int("n_ctx", props.ContextSize).
 			Int("n_embd", props.EmbeddingDim).
 			Str("model_path", props.ModelPath).
+			Str("model_alias", props.ModelAlias).
+			Bool("supports_vision_detected", props.SupportsVision).
 			Msg("probed llama.cpp backend")
+
+		// Vision hint: never override the manual SupportsVision flag, but log
+		// a suggestion when probe disagrees with config so the user can flip
+		// the toggle in admin without re-reading the discovery output.
+		if props.SupportsVision && !b.SupportsVision {
+			s.logger.Info().Str("backend", b.Name).Str("model", st.model).
+				Msg("hint: probe detected modalities.vision — consider enabling supports_vision in admin")
+		}
 	}
 
 	// Apply embedding-specific results
@@ -116,6 +127,44 @@ func (s *Server) probeLlamaCppBackends() {
 				Msg("agent max_tokens exceeds context window")
 		}
 	}
+}
+
+// buildAgent constructs a fully-wired agent given a chat client. Used by both
+// server.New (initial setup) and rebuildClients (config reload), so the
+// search-tool wiring (store, max-images) and vision getter cannot drift
+// between the two paths.
+//
+// Vision getter design: SupportsVision and PublicBaseURL are reported
+// separately. The getter returns (false, "") when SupportsVision is off or
+// the backend is missing, and (true, "") when SupportsVision is on but
+// PublicBaseURL is empty — the agent's switch distinguishes these two
+// failure modes in its diagnostic logging.
+func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
+	searchTool := agent.NewSemanticSearchTool(s.pipeline)
+	searchTool.SetStore(s.store)
+	searchTool.SetMaxImages(s.cfg.Agent.MaxImagesPerCall)
+	tools := []agent.Tool{searchTool}
+
+	systemPrompt := s.agentSystemPrompt()
+	agentCounter, err := s.resolveCounter(s.cfg.Agent.Backend, s.cfg.Agent.Model)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("agent token counter not available, tool output guards disabled")
+	}
+
+	a := agent.NewAgent(
+		client, tools, systemPrompt,
+		s.cfg.Agent.MaxIterations, agentCounter,
+		s.cfg.Agent.ContextWindow, s.cfg.Agent.ToolOutputMaxTokens,
+		s.sessionStore, s.logger,
+	)
+	a.SetVisionGetter(func() (bool, string) {
+		b := s.cfg.GetBackend(s.cfg.Agent.Backend)
+		if b == nil || !b.SupportsVision {
+			return false, ""
+		}
+		return true, s.cfg.Agent.PublicBaseURL
+	})
+	return a
 }
 
 // agentSystemPrompt renders the system prompt template with current data.

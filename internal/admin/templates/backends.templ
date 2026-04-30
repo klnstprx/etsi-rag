@@ -27,9 +27,10 @@ templ BackendsContent(backends []config.BackendConfig) {
 					@FormField("name", "Name", "text", "", "local-llama", true)
 					@FormField("base_url", "Base URL", "url", "", "http://localhost:8081/v1", true)
 					@FormField("api_key", "API Key", "password", "", "Optional", false)
-					<div class="flex items-end gap-4">
+					<div class="flex items-end gap-4 flex-wrap">
 						@FormCheckbox("enabled", "Enabled", true)
 						@FormCheckbox("is_llama_cpp", "llama.cpp", false)
+						@FormCheckbox("supports_vision", "Supports Vision", false)
 					</div>
 					<div class="sm:col-span-2 flex justify-end">
 						@BtnPrimary("Create", templ.Attributes{"type": "submit"})
@@ -86,9 +87,10 @@ templ BackendEditRow(b config.BackendConfig) {
 				@FormField("name", "Name", "text", b.Name, "", true)
 				@FormField("base_url", "Base URL", "url", b.BaseURL, "", true)
 				@FormField("api_key", "API Key", "password", "", "API key unchanged", false)
-				<div class="flex items-end gap-4">
+				<div class="flex items-end gap-4 flex-wrap">
 					@FormCheckbox("enabled", "Enabled", b.Enabled)
 					@FormCheckbox("is_llama_cpp", "llama.cpp", b.IsLlamaCpp)
+					@FormCheckbox("supports_vision", "Supports Vision", b.SupportsVision)
 				</div>
 				<div class="sm:col-span-2 flex justify-end gap-3">
 					@BtnSecondary("Cancel", templ.Attributes{

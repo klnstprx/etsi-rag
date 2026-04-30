@@ -106,7 +106,7 @@ templ ToolCardLoading(callID string, name string) {
 	</div>
 }
 
-templ ToolCardDone(callID string, name string, duration time.Duration, isError bool, citations []agent.Citation) {
+templ ToolCardDone(callID string, name string, duration time.Duration, isError bool, citations []agent.Citation, images []agent.ImageRef, visionAttached bool) {
 	<div id={ "tool-" + callID } hx-swap-oob="outerHTML">
 		if isError {
 			<div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-red-50 text-red-700 text-xs">
@@ -132,7 +132,55 @@ templ ToolCardDone(callID string, name string, duration time.Duration, isError b
 				}
 			</ul>
 		}
+		if len(images) > 0 {
+			<div class="mt-2 ml-2 space-y-1">
+				@imageBadge(visionAttached, len(images))
+				<div class="flex flex-wrap gap-2">
+					for _, img := range images {
+						@imageThumb(img)
+					}
+				</div>
+			</div>
+		}
 	</div>
+}
+
+// imageBadge surfaces whether the tool's images were actually forwarded to
+// the LLM as image_url parts. When attached=false the user can see the
+// images in the UI but knows the model couldn't read them — usually a
+// SupportsVision or public_base_url misconfiguration.
+templ imageBadge(attached bool, count int) {
+	if attached {
+		<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 text-[11px] font-medium">
+			<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M2 6l8 8 4-4 8 8M14 6h8v8"/>
+			</svg>
+			{ fmt.Sprintf("%d image%s attached to LLM", count, plural(count)) }
+		</span>
+	} else {
+		<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[11px] font-medium" title="Images shown for reference. Set [agent].public_base_url and tick supports_vision on the backend to attach them as visual context.">
+			<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
+			</svg>
+			{ fmt.Sprintf("%d image%s available (vision off)", count, plural(count)) }
+		</span>
+	}
+}
+
+templ imageThumb(img agent.ImageRef) {
+	<a href={ templ.SafeURL(img.URL) } target="_blank" rel="noopener noreferrer" class="block group" title={ img.DocID + " " + img.Ref }>
+		<img src={ img.URL } alt={ img.DocID + " " + img.Ref }
+			class="h-24 w-auto rounded border border-gray-300 group-hover:border-blue-500 transition-colors"
+			loading="lazy"/>
+		<div class="text-[10px] text-gray-500 mt-0.5 text-center">{ img.Ref }</div>
+	</a>
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 templ citationItem(c agent.Citation) {

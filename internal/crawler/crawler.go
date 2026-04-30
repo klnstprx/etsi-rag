@@ -531,10 +531,17 @@ func shouldFollow(link, seedPath string) bool {
 	}
 }
 
-// objectStoreKey returns the RustFS key for a crawled page.
+// objectStoreKey returns the RustFS key for a crawled page's raw body.
 func objectStoreKey(contentType, pageURL string) string {
 	h := sha256.Sum256([]byte(pageURL))
 	return fmt.Sprintf("crawl/%s/%x", contentType, h)
+}
+
+// imageObjectStoreKey returns the RustFS key for an image artifact rendered
+// from the page at pageURL. Refs are page tags like "p1", "p2", or "full".
+func imageObjectStoreKey(pageURL, ref string) string {
+	h := sha256.Sum256([]byte(pageURL))
+	return fmt.Sprintf("crawl/img/%x/%s.png", h, ref)
 }
 
 // titleFromURL extracts a title from a URL (for PDFs which lack HTML title).

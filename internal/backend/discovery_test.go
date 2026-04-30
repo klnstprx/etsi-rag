@@ -127,6 +127,75 @@ func TestFetchLlamaCppProps(t *testing.T) {
 	}
 }
 
+// TestFetchLlamaCppProps_VisionDetection covers the SupportsVision flag path.
+// The probe trusts only the canonical "modalities.vision" boolean returned
+// by /props?model=<id> (verified empirically on the live llama-server
+// router build, 2026-04-28).
+func TestFetchLlamaCppProps_VisionDetection(t *testing.T) {
+	tests := []struct {
+		name       string
+		propsBody  string
+		wantVision bool
+		wantAudio  bool
+	}{
+		{
+			name:       "vision enabled (live shape, gemma4-e4b)",
+			propsBody:  `{"model_alias":"gemma4-e4b","model_path":"/m.gguf","modalities":{"vision":true,"audio":true},"default_generation_settings":{"n_ctx":32768}}`,
+			wantVision: true,
+			wantAudio:  true,
+		},
+		{
+			name:       "vision disabled but audio enabled",
+			propsBody:  `{"model_alias":"audio-only","model_path":"/m.gguf","modalities":{"vision":false,"audio":true}}`,
+			wantVision: false,
+			wantAudio:  true,
+		},
+		{
+			name:       "modalities object empty",
+			propsBody:  `{"model_alias":"plain","model_path":"/m.gguf","modalities":{}}`,
+			wantVision: false,
+			wantAudio:  false,
+		},
+		{
+			name:       "modalities field missing entirely (older builds)",
+			propsBody:  `{"model_alias":"plain","model_path":"/m.gguf","default_generation_settings":{"n_ctx":2048}}`,
+			wantVision: false,
+			wantAudio:  false,
+		},
+		{
+			name:       "router-shell response without per-model fields",
+			propsBody:  `{"role":"router","model_path":"none","default_generation_settings":{"n_ctx":0}}`,
+			wantVision: false,
+			wantAudio:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /props", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tt.propsBody))
+			})
+			mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(`{"data":[]}`))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			props, err := FetchLlamaCppProps(context.Background(), srv.URL, "any", nil)
+			if err != nil {
+				t.Fatalf("FetchLlamaCppProps: %v", err)
+			}
+			if props.SupportsVision != tt.wantVision {
+				t.Errorf("SupportsVision = %v, want %v", props.SupportsVision, tt.wantVision)
+			}
+			if props.SupportsAudio != tt.wantAudio {
+				t.Errorf("SupportsAudio = %v, want %v", props.SupportsAudio, tt.wantAudio)
+			}
+		})
+	}
+}
+
 func TestFetchLlamaCppPropsUnreachable(t *testing.T) {
 	_, err := FetchLlamaCppProps(context.Background(), "http://127.0.0.1:1", "", nil)
 	if err == nil {

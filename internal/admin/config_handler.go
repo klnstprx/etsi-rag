@@ -67,6 +67,9 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Agent.ContextWindow = formInt(r, "context_window", h.config.Agent.ContextWindow)
 		h.config.Agent.MaxIterations = formInt(r, "max_iterations", h.config.Agent.MaxIterations)
 		h.config.Agent.ToolOutputMaxTokens = formInt(r, "tool_output_max_tokens", h.config.Agent.ToolOutputMaxTokens)
+		h.config.Agent.MaxImagesPerCall = formInt(r, "max_images_per_call", h.config.Agent.MaxImagesPerCall)
+		h.config.Agent.MaxImageBytesPerCall = int64(formInt(r, "max_image_bytes_per_call", int(h.config.Agent.MaxImageBytesPerCall)))
+		h.config.Agent.PublicBaseURL = strings.TrimSpace(r.FormValue("public_base_url"))
 		submitted := strings.TrimSpace(r.FormValue("system_prompt"))
 		if submitted == "" || submitted == strings.TrimSpace(prompts.Agent) {
 			h.config.Agent.SystemPrompt = ""
@@ -98,6 +101,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.config.Crawler.PDF.HeadingPatterns = nil
 		}
+		h.config.Crawler.PDF.RenderDPI = formInt(r, "pdf_render_dpi", h.config.Crawler.PDF.RenderDPI)
 		if v := r.FormValue("rejection_patterns"); v != "" {
 			h.config.Crawler.RejectionPatterns = splitTrimCSV(v)
 		} else {
@@ -176,6 +180,9 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "context_window", Label: "Context Window (auto-detected)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number"},
 				{Key: "max_iterations", Label: "Max Tool Iterations", Value: strconv.Itoa(cfg.Agent.MaxIterations), Type: "number"},
 				{Key: "tool_output_max_tokens", Label: "Tool Output Max Tokens (0 = auto, context_window/4)", Value: strconv.Itoa(cfg.Agent.ToolOutputMaxTokens), Type: "number"},
+				{Key: "max_images_per_call", Label: "Max Images Per Tool Call (vision)", Value: strconv.Itoa(cfg.Agent.MaxImagesPerCall), Type: "number"},
+				{Key: "max_image_bytes_per_call", Label: "Max Image-URL Bytes Per Call (vision)", Value: strconv.FormatInt(cfg.Agent.MaxImageBytesPerCall, 10), Type: "number"},
+				{Key: "public_base_url", Label: "Public Base URL (vision)", Value: cfg.Agent.PublicBaseURL, Type: "text", Hint: "Absolute URL the LLM uses to fetch /v1/artifacts/... e.g. http://localhost:8080. Required for image attachment."},
 				{Key: "system_prompt", Label: "System Prompt (clear to restore default)", Value: effectivePrompt(cfg), Type: "textarea", Hint: "Template variables: {{.DocumentCount}}, {{.ChunkCount}}"},
 			},
 		},
@@ -231,6 +238,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "rejection_patterns", Label: "Rejection Patterns (comma-separated, case-insensitive)", Value: strings.Join(cfg.Crawler.RejectionPatterns, ", "), Type: "text"},
 				{Key: "strip_query_params", Label: "Strip Query Params (comma-separated, case-insensitive)", Value: strings.Join(cfg.Crawler.StripQueryParams, ", "), Type: "text"},
 				{Key: "pdf_heading_patterns", Label: "PDF Heading Patterns (comma-separated)", Value: strings.Join(cfg.Crawler.PDF.HeadingPatterns, ", "), Type: "text"},
+				{Key: "pdf_render_dpi", Label: "PDF Render DPI (pdftoppm; 0 disables image rendering)", Value: strconv.Itoa(cfg.Crawler.PDF.RenderDPI), Type: "number"},
 			},
 		},
 		{

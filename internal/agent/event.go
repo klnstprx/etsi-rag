@@ -14,4 +14,17 @@ type ToolEvent struct {
 	Duration  time.Duration // wall-clock execution time (done only)
 	Error     bool          // true if tool returned an error (done only)
 	Citations []Citation    // external references produced by this call (done only)
+
+	// Images lists every image artifact the tool resolved from chunk markers,
+	// regardless of whether they were forwarded to the LLM. This is for
+	// UI/observability — the user always sees what visual context exists for
+	// the cited documents. Empty when the tool found no markers.
+	Images []ImageRef
+
+	// VisionAttached is true when the agent actually injected the images as
+	// image_url content parts in a synthetic user message (i.e. the
+	// configured backend supports vision and PublicBaseURL is set). When
+	// false with non-empty Images, the UI should show a "not attached"
+	// indicator so the misconfiguration is visible.
+	VisionAttached bool
 }

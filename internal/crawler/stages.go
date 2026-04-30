@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/markers"
 	"etsi-rag/internal/rag"
 )
 
@@ -155,6 +157,7 @@ func (c *Crawler) crawlSourceStage(
 			Body:        result.Body,
 			ObjKey:      objKey,
 			Source:      srcRef,
+			Screenshot:  result.Screenshot,
 		}
 
 		// For HTML: parse now (need links for BFS), pass result to parse stage
@@ -227,14 +230,33 @@ func (c *Crawler) parseStage(
 		}
 
 		var title, text, pageLang string
+		var artifacts []ParsedArtifact
 
 		if item.HTMLParsed != nil {
 			// HTML: already parsed in crawl stage
 			title = item.HTMLParsed.Title
 			text = item.HTMLParsed.Text
 			pageLang = item.HTMLParsed.Language
+
+			// Attach the full-page screenshot as a single "full" artifact when
+			// the browser captured one. The marker [[image:full]] is prefixed
+			// onto every non-heading content line so retrieval reliably finds
+			// at least one marker per chunk regardless of how the chunker
+			// splits the page.
+			if len(item.Screenshot) > 0 {
+				text = prefixContentLinesWithMarker(text, markers.Format("full"))
+				artifacts = append(artifacts, ParsedArtifact{
+					Ref:      "full",
+					Kind:     string(domain.ArtifactHTMLScreenshot),
+					MimeType: "image/png",
+					Data:     item.Screenshot,
+				})
+			}
 		} else {
-			// PDF: extract text with heading detection
+			// PDF: extract text with heading detection (markers emitted at
+			// page boundaries by pdfTextToMarkdown), then render each page
+			// to a PNG. Markers stay even when image rendering fails — at
+			// retrieval time, missing artifacts are silently skipped.
 			result, err := ExtractPDFText(ctx, item.Body, c.config.PDF)
 			if err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("pdf extraction failed")
@@ -247,6 +269,22 @@ func (c *Crawler) parseStage(
 				title = result.Title
 			} else {
 				title = titleFromURL(item.URL)
+			}
+
+			if c.config.PDF.RenderDPI > 0 {
+				images, err := ExtractPDFImages(ctx, item.Body, c.config.PDF.RenderDPI)
+				if err != nil {
+					c.logger.Warn().Err(err).Str("url", item.URL).Msg("pdf image render failed (continuing without images)")
+				} else {
+					for i, png := range images {
+						artifacts = append(artifacts, ParsedArtifact{
+							Ref:      fmt.Sprintf("p%d", i+1),
+							Kind:     string(domain.ArtifactPDFPage),
+							MimeType: "image/png",
+							Data:     png,
+						})
+					}
+				}
 			}
 		}
 
@@ -268,6 +306,7 @@ func (c *Crawler) parseStage(
 			Language:    pageLang,
 			ObjKey:      item.ObjKey,
 			Source:      item.Source,
+			Artifacts:   artifacts,
 		}
 
 		select {
@@ -388,6 +427,10 @@ func (c *Crawler) embedStage(
 		}
 		progress.ConsecutiveEmbedFails.Store(0)
 
+		// Persist image artifacts AFTER ingest so doc_id exists. Artifact
+		// failures don't fail the document — text retrieval still works.
+		c.storeArtifacts(ctx, item.URL, docID, item.Artifacts)
+
 		progress.Ingested.Add(1)
 		embedIngested++
 		if embedIngested%25 == 0 {
@@ -400,6 +443,60 @@ func (c *Crawler) embedStage(
 
 		if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
 			c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
+		}
+	}
+}
+
+// prefixContentLinesWithMarker prefixes every non-empty, non-heading line of
+// text with the given marker (followed by a space). Used to densely embed
+// image markers into document content so every chunk produced by the
+// structure-aware chunker carries at least one marker — necessary because
+// chunks may slice mid-page and a once-per-page marker can land outside the
+// chunked window.
+//
+// Headings (# / ## / ###) are passed through untouched so they remain valid
+// chunk boundaries. Markers strip cleanly via markers.Strip before embedding.
+func prefixContentLinesWithMarker(text, marker string) string {
+	var sb strings.Builder
+	sb.Grow(len(text) + len(marker)*8)
+	for line := range strings.SplitSeq(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			sb.WriteByte('\n')
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+			continue
+		}
+		sb.WriteString(marker)
+		sb.WriteByte(' ')
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// storeArtifacts uploads each rendered image to RustFS and records a row in
+// document_artifacts. Failures are logged but never propagate — text-only
+// retrieval remains correct without images.
+func (c *Crawler) storeArtifacts(ctx context.Context, pageURL, docID string, arts []ParsedArtifact) {
+	for _, art := range arts {
+		key := imageObjectStoreKey(pageURL, art.Ref)
+		if err := c.objStore.Put(ctx, key, art.Data, art.MimeType); err != nil {
+			c.logger.Warn().Err(err).Str("url", pageURL).Str("ref", art.Ref).Msg("artifact put failed")
+			continue
+		}
+		row := &domain.Artifact{
+			DocID:          docID,
+			Ref:            art.Ref,
+			Kind:           domain.ArtifactKind(art.Kind),
+			ObjectStoreKey: key,
+			MimeType:       art.MimeType,
+		}
+		if err := c.store.UpsertArtifact(ctx, row); err != nil {
+			c.logger.Warn().Err(err).Str("url", pageURL).Str("ref", art.Ref).Msg("artifact upsert failed")
 		}
 	}
 }

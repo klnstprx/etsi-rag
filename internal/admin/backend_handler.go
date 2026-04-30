@@ -51,11 +51,12 @@ func (h *Handler) BackendCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := config.BackendConfig{
-		Name:       r.FormValue("name"),
-		BaseURL:    r.FormValue("base_url"),
-		APIKey:     r.FormValue("api_key"),
-		Enabled:    r.FormValue("enabled") == "true",
-		IsLlamaCpp: r.FormValue("is_llama_cpp") == "true",
+		Name:           r.FormValue("name"),
+		BaseURL:        r.FormValue("base_url"),
+		APIKey:         r.FormValue("api_key"),
+		Enabled:        r.FormValue("enabled") == "true",
+		IsLlamaCpp:     r.FormValue("is_llama_cpp") == "true",
+		SupportsVision: r.FormValue("supports_vision") == "true",
 	}
 
 	h.config.Backends = append(h.config.Backends, b)
@@ -98,6 +99,7 @@ func (h *Handler) BackendUpdate(w http.ResponseWriter, r *http.Request) {
 	h.config.Backends[idx].BaseURL = r.FormValue("base_url")
 	h.config.Backends[idx].Enabled = r.FormValue("enabled") == "true"
 	h.config.Backends[idx].IsLlamaCpp = r.FormValue("is_llama_cpp") == "true"
+	h.config.Backends[idx].SupportsVision = r.FormValue("supports_vision") == "true"
 
 	// Only overwrite API key if a new value was provided
 	if key := r.FormValue("api_key"); key != "" {

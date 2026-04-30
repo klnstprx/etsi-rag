@@ -11,10 +11,18 @@ import (
 )
 
 // LlamaCppProps holds auto-detected properties from a llama.cpp server.
+//
+// All fields are populated from the per-model /props response (i.e.
+// /props?model=<id>), which on the router build returns the loaded model's
+// own properties — including a structured "modalities" object. We commit to
+// that shape rather than scanning speculative field names.
 type LlamaCppProps struct {
-	ContextSize  int    // n_ctx from /props
-	EmbeddingDim int    // n_embd from /v1/models
-	ModelPath    string // model_path from /props
+	ContextSize    int    // default_generation_settings.n_ctx
+	EmbeddingDim   int    // /v1/models data[].meta.n_embd, with /v1/embeddings probe fallback
+	ModelPath      string // model_path
+	ModelAlias     string // model_alias — echoes the ?model= query, useful for log correlation
+	SupportsVision bool   // modalities.vision
+	SupportsAudio  bool   // modalities.audio (recorded for future use; not consumed yet)
 }
 
 // FetchLlamaCppProps queries a llama.cpp server's /props and /v1/models endpoints
@@ -51,8 +59,11 @@ func FetchLlamaCppProps(ctx context.Context, baseURL, model string, client *http
 	}
 
 	props := &LlamaCppProps{
-		ContextSize: propsResult.props.DefaultGenerationSettings.NCtx,
-		ModelPath:   propsResult.props.ModelPath,
+		ContextSize:    propsResult.props.DefaultGenerationSettings.NCtx,
+		ModelPath:      propsResult.props.ModelPath,
+		ModelAlias:     propsResult.props.ModelAlias,
+		SupportsVision: propsResult.props.Modalities.Vision,
+		SupportsAudio:  propsResult.props.Modalities.Audio,
 	}
 
 	modelsResult := <-modelsCh
@@ -108,11 +119,21 @@ func FetchModelIDs(ctx context.Context, baseURL, apiKey string, client *http.Cli
 	return ids, nil
 }
 
+// propsResponse mirrors the canonical /props?model=<id> shape returned by
+// recent llama-server builds (verified empirically 2026-04-28 against the
+// router build). Only the fields the codebase consumes are decoded — the
+// response contains plenty more (chat_template, sampler params, etc.) that
+// don't belong here.
 type propsResponse struct {
 	DefaultGenerationSettings struct {
 		NCtx int `json:"n_ctx"`
 	} `json:"default_generation_settings"`
-	ModelPath string `json:"model_path"`
+	ModelPath  string `json:"model_path"`
+	ModelAlias string `json:"model_alias"`
+	Modalities struct {
+		Vision bool `json:"vision"`
+		Audio  bool `json:"audio"`
+	} `json:"modalities"`
 }
 
 type modelsResponse struct {

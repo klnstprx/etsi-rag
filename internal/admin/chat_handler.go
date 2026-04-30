@@ -28,6 +28,12 @@ func (h *Handler) SetAgent(a *agent.Agent) {
 	h.agent.Store(a)
 }
 
+// GetAgent returns the currently installed agent (or nil). Thread-safe;
+// exposed for diagnostic tests that verify rebuild wiring is preserved.
+func (h *Handler) GetAgent() *agent.Agent {
+	return h.agent.Load()
+}
+
 // ChatPage handles GET /admin/chat.
 func (h *Handler) ChatPage(w http.ResponseWriter, r *http.Request) {
 	sessionID := h.sessionStore.Create()
@@ -187,7 +193,7 @@ func renderToolEvent(w http.ResponseWriter, flusher http.Flusher, evt agent.Tool
 		templates.ToolCardLoading(evt.CallID, evt.Name).Render(context.Background(), &buf)
 		writeSSE(w, "tool_start", buf.String())
 	case "done":
-		templates.ToolCardDone(evt.CallID, evt.Name, evt.Duration, evt.Error, evt.Citations).Render(context.Background(), &buf)
+		templates.ToolCardDone(evt.CallID, evt.Name, evt.Duration, evt.Error, evt.Citations, evt.Images, evt.VisionAttached).Render(context.Background(), &buf)
 		writeSSE(w, "tool_done", buf.String())
 	}
 	flusher.Flush()

@@ -17,7 +17,14 @@ import (
 type ChatResult struct {
 	Response  string
 	Citations []Citation
+	Images    []ImageRef
 }
+
+// VisionGetter returns whether the configured chat backend supports vision
+// content blocks and the absolute public base URL prefixed onto path-only
+// artifact URLs (e.g. "http://host:port"). Wired through a getter rather
+// than cached fields so admin-UI toggles take effect without a restart.
+type VisionGetter func() (supportsVision bool, baseURL string)
 
 // Agent orchestrates LLM tool-calling loops with session management.
 // Fields are set once by NewAgent and never mutated — live config reload
@@ -32,6 +39,7 @@ type Agent struct {
 	toolOutputMaxTokens int
 	sessionStore        *session.Store
 	logger              zerolog.Logger
+	vision              VisionGetter
 }
 
 // NewAgent creates a new agent with the given configuration.
@@ -53,6 +61,22 @@ func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, 
 		sessionStore:        sessionStore,
 		logger:              logger,
 	}
+}
+
+// SetVisionGetter installs a getter for vision capability + public base URL.
+// When unset (default), no synthetic user message is injected and tool images
+// are not surfaced to the LLM. The getter is called per tool call to honour
+// admin toggles without restart.
+func (a *Agent) SetVisionGetter(g VisionGetter) { a.vision = g }
+
+// Vision returns the current vision capability state by invoking the
+// configured VisionGetter, or (false, "") if none is set. Exposed so callers
+// (and tests) can verify wiring without driving a tool call through the loop.
+func (a *Agent) Vision() (bool, string) {
+	if a.vision == nil {
+		return false, ""
+	}
+	return a.vision()
 }
 
 // Chat handles a session-managed conversation turn.
@@ -97,9 +121,10 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 	messages = append(messages, userMsg)
 
 	var citations []Citation
+	var attached []ImageRef
 
 	// Run tool loop
-	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, events, nil)
+	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, events, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +135,7 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 		sess.AddMessage(msg)
 	}
 
-	return &ChatResult{Response: response, Citations: citations}, nil
+	return &ChatResult{Response: response, Citations: citations, Images: attached}, nil
 }
 
 // ChatStreamOutcome is the terminal value emitted on ChatStream's outcome channel
@@ -171,8 +196,9 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 		messages = append(messages, userMsg)
 
 		var citations []Citation
+		var attached []ImageRef
 
-		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, events, tokens)
+		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, events, tokens)
 		if err != nil {
 			outcome <- ChatStreamOutcome{Err: err}
 			return
@@ -183,7 +209,7 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 			sess.AddMessage(msg)
 		}
 
-		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Citations: citations}}
+		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Citations: citations, Images: attached}}
 	}()
 
 	return tokens, outcome
@@ -214,13 +240,14 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 	full = append(full, messages...)
 
 	var citations []Citation
+	var attached []ImageRef
 
-	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &citations, events, nil)
+	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &citations, &attached, events, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ChatResult{Response: response, Citations: citations}, nil
+	return &ChatResult{Response: response, Citations: citations, Images: attached}, nil
 }
 
 // runToolLoop executes the tool-calling loop and returns the final text response
@@ -236,6 +263,7 @@ func (a *Agent) runToolLoop(
 	tools []Tool,
 	maxIter int,
 	citations *[]Citation,
+	images *[]ImageRef,
 	events chan<- ToolEvent,
 	tokens chan<- string,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
@@ -325,15 +353,57 @@ func (a *Agent) runToolLoop(
 
 			resultText = a.checkToolResult(ctx, tc.Function.Name, resultText)
 
+			// Image attachment is gated on the configured backend's vision
+			// flag and a non-empty public base URL. Decision is logged
+			// explicitly so a missed admin toggle or empty config doesn't
+			// silently degrade retrieval quality.
+			var attachedImages []ImageRef
+			toolImages := len(toolRes.Images)
+			if !toolErr && a.vision != nil {
+				vision, baseURL := a.vision()
+				switch {
+				case toolImages == 0:
+					// Tool didn't surface any markers — common for HTML-only
+					// hits or when no chunk in the top-K carries a marker.
+					// Log at debug only (not actionable in itself).
+					a.logger.Debug().
+						Str("tool", tc.Function.Name).
+						Bool("vision_enabled", vision && baseURL != "").
+						Msg("no images returned by tool")
+				case vision && baseURL != "":
+					attachedImages = toolRes.Images
+				case vision && baseURL == "":
+					a.logger.Warn().
+						Str("tool", tc.Function.Name).
+						Int("dropped_images", toolImages).
+						Msg("backend supports vision but [agent].public_base_url is empty — image attachment disabled")
+				default:
+					a.logger.Warn().
+						Str("tool", tc.Function.Name).
+						Int("dropped_images", toolImages).
+						Msg("tool returned images but configured agent backend has supports_vision=false — image attachment disabled")
+				}
+			} else if !toolErr && toolImages > 0 && a.vision == nil {
+				a.logger.Warn().
+					Str("tool", tc.Function.Name).
+					Int("dropped_images", toolImages).
+					Msg("tool returned images but agent has no VisionGetter installed — image attachment disabled")
+			}
+			if images != nil && len(attachedImages) > 0 {
+				*images = append(*images, attachedImages...)
+			}
+
 			if events != nil {
 				events <- ToolEvent{
-					Type:      "done",
-					CallID:    tc.ID,
-					Name:      tc.Function.Name,
-					Result:    resultText,
-					Duration:  execDuration,
-					Error:     toolErr,
-					Citations: callCitations,
+					Type:           "done",
+					CallID:         tc.ID,
+					Name:           tc.Function.Name,
+					Result:         resultText,
+					Duration:       execDuration,
+					Error:          toolErr,
+					Citations:      callCitations,
+					Images:         toolRes.Images,
+					VisionAttached: len(attachedImages) > 0,
 				}
 			}
 
@@ -342,6 +412,8 @@ func (a *Agent) runToolLoop(
 				Str("args", tc.Function.Arguments).
 				Int("result_len", len(resultText)).
 				Int("citations", len(callCitations)).
+				Int("tool_images", toolImages).
+				Int("attached_images", len(attachedImages)).
 				Dur("duration", execDuration).
 				Msg("tool executed")
 
@@ -355,6 +427,17 @@ func (a *Agent) runToolLoop(
 			}
 			messages = append(messages, toolMsg)
 			turnMessages = append(turnMessages, toolMsg)
+
+			// openai-go v1.12.0's tool-message Content union is text-only —
+			// images live in user-message content arrays. Inject a synthetic
+			// user turn carrying the image_url parts so the LLM sees them
+			// alongside the tool's text. Gating is rechecked above.
+			if len(attachedImages) > 0 {
+				_, baseURL := a.vision()
+				userImg := buildImageUserMessage(baseURL, attachedImages)
+				messages = append(messages, userImg)
+				turnMessages = append(turnMessages, userImg)
+			}
 		}
 	}
 
@@ -405,6 +488,35 @@ func (a *Agent) checkToolResult(ctx context.Context, toolName string, result str
 	}
 
 	return result
+}
+
+// buildImageUserMessage builds a {role:user, content:[text+image_url parts]}
+// message from a list of image refs, prefixing baseURL onto each path-only
+// URL so the LLM backend can fetch it. The leading text part is a brief
+// instruction so the model knows the images are tool-derived context.
+func buildImageUserMessage(baseURL string, images []ImageRef) openai.ChatCompletionMessageParamUnion {
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images)+1)
+	parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+		OfText: &openai.ChatCompletionContentPartTextParam{
+			Text: "The previous tool returned the following page images for visual context:",
+		},
+	})
+	for _, img := range images {
+		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+			OfImageURL: &openai.ChatCompletionContentPartImageParam{
+				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+					URL: baseURL + img.URL,
+				},
+			},
+		})
+	}
+	return openai.ChatCompletionMessageParamUnion{
+		OfUser: &openai.ChatCompletionUserMessageParam{
+			Content: openai.ChatCompletionUserMessageParamContentUnion{
+				OfArrayOfContentParts: parts,
+			},
+		},
+	}
 }
 
 // toolCallsToParams converts response tool calls to param tool calls.

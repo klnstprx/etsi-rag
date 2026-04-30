@@ -3,11 +3,12 @@ package templates
 import "etsi-rag/internal/config"
 
 type DashboardData struct {
-	DocCount     int
-	ChunkCount   int
-	BackendCount int
-	Backends     []config.BackendConfig
-	HasObjStore  bool
+	DocCount      int
+	ChunkCount    int
+	ArtifactCount int
+	BackendCount  int
+	Backends      []config.BackendConfig
+	HasObjStore   bool
 }
 
 type ServiceStatus struct {
@@ -24,9 +25,10 @@ templ DashboardPage(data DashboardData) {
 
 templ DashboardContent(data DashboardData) {
 	@PageHeader("Dashboard")
-	<dl class="grid grid-cols-1 gap-5 sm:grid-cols-3 mb-8">
+	<dl class="grid grid-cols-2 gap-5 sm:grid-cols-4 mb-8">
 		@StatCardInt("Documents", data.DocCount)
 		@StatCardInt("Chunks", data.ChunkCount)
+		@StatCardInt("Image Artifacts", data.ArtifactCount)
 		@StatCardInt("Backends", data.BackendCount)
 	</dl>
 	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
