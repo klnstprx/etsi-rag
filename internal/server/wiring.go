@@ -164,12 +164,14 @@ func (s *Server) probeLlamaCppBackends() {
 			Bool("supports_vision_detected", props.SupportsVision).
 			Msg("probed llama.cpp backend")
 
-		// Vision hint: never override the manual SupportsVision flag, but log
-		// a suggestion when probe disagrees with config so the user can flip
-		// the toggle in admin without re-reading the discovery output.
-		if props.SupportsVision && !b.SupportsVision {
+		// Vision hint: never override the manual agent.vision.enabled flag,
+		// but log a suggestion when the probe sees vision on the agent's
+		// model and the flag is off, so the operator can flip it in admin
+		// without re-reading the discovery output. Only meaningful for the
+		// agent stage — embedding/reranker probes also pass through here.
+		if props.SupportsVision && st.name == "agent" && !s.cfg.Agent.Vision.Enabled {
 			s.logger.Info().Str("backend", b.Name).Str("model", st.model).
-				Msg("hint: probe detected modalities.vision — consider enabling supports_vision in admin")
+				Msg("hint: probe detected modalities.vision — consider enabling agent.vision.enabled in admin")
 		}
 	}
 
@@ -208,11 +210,11 @@ func (s *Server) probeLlamaCppBackends() {
 // search-tool wiring (store, max-images) and vision getter cannot drift
 // between the two paths.
 //
-// Vision getter design: SupportsVision and PublicBaseURL are reported
-// separately. The getter returns (false, "") when SupportsVision is off or
-// the backend is missing, and (true, "") when SupportsVision is on but
-// PublicBaseURL is empty — the agent's switch distinguishes these two
-// failure modes in its diagnostic logging.
+// Vision getter design: agent.vision.enabled and public_base_url are
+// reported separately. The getter returns (false, "") when Enabled is off,
+// and (true, "") when Enabled is on but PublicBaseURL is empty — the
+// agent's switch distinguishes these two failure modes in its diagnostic
+// logging.
 func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 	searchTool := agent.NewSemanticSearchTool(s.pipeline)
 	searchTool.SetStore(s.store)
@@ -232,8 +234,7 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 		s.sessionStore, s.logger,
 	)
 	a.SetVisionGetter(func() (bool, string) {
-		b := s.cfg.GetBackend(s.cfg.Agent.Backend)
-		if b == nil || !b.SupportsVision {
+		if !s.cfg.Agent.Vision.Enabled {
 			return false, ""
 		}
 		return true, s.cfg.Agent.Vision.PublicBaseURL

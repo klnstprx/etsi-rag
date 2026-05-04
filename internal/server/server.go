@@ -161,7 +161,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		} else {
 			agentInstance = s.buildAgent(agentClient)
 			logger.Info().Str("backend", cfg.Agent.Backend).
-				Bool("supports_vision", s.cfg.GetBackend(cfg.Agent.Backend) != nil && s.cfg.GetBackend(cfg.Agent.Backend).SupportsVision).
+				Bool("vision_enabled", cfg.Agent.Vision.Enabled).
 				Str("public_base_url", cfg.Agent.Vision.PublicBaseURL).
 				Msg("agent initialized")
 		}

@@ -69,8 +69,8 @@ base_url = 'http://localhost:1337/v1'
 api_key = ''
 enabled = true
 is_llama_cpp = true           # enables llama.cpp /tokenize endpoint
-supports_vision = false       # set true when the configured model has an mmproj/vision adapter loaded;
-                              # admin UI shows a hint when /props detects --mmproj on the model
+                              # (vision capability lives on [agent.vision].enabled — backends are
+                              # transport, models are what supports vision)
 
 # ---------- Pipeline (chunk → embed → retrieve → answer) ----------
 
@@ -122,11 +122,13 @@ system_prompt = ''            # custom system prompt text/template (empty = use 
                               # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
 
 [agent.vision]
-max_images_per_call = 6           # cap on image artifacts attached per tool call (vision-capable backends only)
+enabled = false                   # operator asserts the configured agent.model accepts image_url parts;
+                                  # admin UI shows a hint when llama.cpp /props detects --mmproj on the model
+max_images_per_call = 6           # cap on image artifacts attached per tool call
 max_image_bytes_per_call = 65536  # cap on total image_url URL bytes attached per tool call
 public_base_url = ''              # absolute base URL prefixed onto /v1/artifacts/{token}.png so the LLM
                                   # backend can fetch image content blocks (e.g. 'http://localhost:8080');
-                                  # empty disables image attachment regardless of backend.supports_vision
+                                  # empty disables image attachment even when enabled = true
 
 [session]
 max_messages = 10             # max messages per session

@@ -28,12 +28,11 @@ const (
 
 // BackendConfig represents an LLM server endpoint.
 type BackendConfig struct {
-	Name           string `koanf:"name"`
-	BaseURL        string `koanf:"base_url"`
-	APIKey         string `koanf:"api_key"`
-	Enabled        bool   `koanf:"enabled"`
-	IsLlamaCpp     bool   `koanf:"is_llama_cpp"`
-	SupportsVision bool   `koanf:"supports_vision"`
+	Name       string `koanf:"name"`
+	BaseURL    string `koanf:"base_url"`
+	APIKey     string `koanf:"api_key"`
+	Enabled    bool   `koanf:"enabled"`
+	IsLlamaCpp bool   `koanf:"is_llama_cpp"`
 }
 
 // Config holds all application configuration.
@@ -124,8 +123,12 @@ type AgentConfig struct {
 	Vision              AgentVisionConfig `koanf:"vision"`
 }
 
-// AgentVisionConfig holds image-attachment settings for vision-capable backends.
+// AgentVisionConfig holds image-attachment settings for the agent stage.
+// Whether the configured agent.model actually supports vision is asserted by
+// the operator via Enabled — the runtime cannot tell across all backends
+// (llama.cpp's /props is a hint, OpenAI-compatible providers expose nothing).
 type AgentVisionConfig struct {
+	Enabled              bool   `koanf:"enabled"`                  // operator asserts the configured agent.model has vision; gates image attachment
 	MaxImagesPerCall     int    `koanf:"max_images_per_call"`      // max image artifacts attached per tool call; 0 = default 6
 	MaxImageBytesPerCall int64  `koanf:"max_image_bytes_per_call"` // max bytes of image_url URLs (text length, not image data) per tool call; 0 = default 65536
 	PublicBaseURL        string `koanf:"public_base_url"`          // absolute base URL prefixed onto /v1/artifacts/... paths so the LLM backend can fetch them; empty disables image attachment
@@ -323,6 +326,23 @@ func checkLegacyKeys(k *koanf.Koanf) error {
 	for _, l := range legacy {
 		if k.Exists(l.old) {
 			found = append(found, fmt.Sprintf("  %s → %s", l.old, l.new))
+		}
+	}
+	// Per-backend supports_vision moved to the agent stage when the design
+	// shifted from "backend can serve vision-capable models" to "the
+	// configured agent.model is vision-capable". Walk the raw backends slice
+	// rather than guessing indexes; koanf paths for repeated TOML arrays use
+	// numeric indexes (backends.0.supports_vision).
+	if rawBackends, ok := k.Raw()["backends"].([]any); ok {
+		for i, raw := range rawBackends {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, exists := m["supports_vision"]; exists {
+				found = append(found, fmt.Sprintf(
+					"  backends[%d].supports_vision → agent.vision.enabled (moved to agent stage; see ADR-006)", i))
+			}
 		}
 	}
 	if len(found) == 0 {

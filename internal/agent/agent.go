@@ -381,7 +381,7 @@ func (a *Agent) runToolLoop(
 					a.logger.Warn().
 						Str("tool", tc.Function.Name).
 						Int("dropped_images", toolImages).
-						Msg("tool returned images but configured agent backend has supports_vision=false — image attachment disabled")
+						Msg("tool returned images but agent.vision.enabled=false — image attachment disabled")
 				}
 			} else if !toolErr && toolImages > 0 && a.vision == nil {
 				a.logger.Warn().

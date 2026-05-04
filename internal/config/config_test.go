@@ -514,6 +514,11 @@ func TestLoad_RejectsLegacyKeys(t *testing.T) {
 		{"agent.public_base_url", "[agent]\npublic_base_url = \"http://x\"\n", "agent.vision.public_base_url"},
 		{"agent.max_images_per_call", "[agent]\nmax_images_per_call = 4\n", "agent.vision.max_images_per_call"},
 		{"agent.max_image_bytes_per_call", "[agent]\nmax_image_bytes_per_call = 1024\n", "agent.vision.max_image_bytes_per_call"},
+		{
+			"backends.supports_vision",
+			"[[backends]]\nname = \"x\"\nbase_url = \"http://x\"\nenabled = true\nsupports_vision = true\n",
+			"agent.vision.enabled",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -530,11 +535,16 @@ func TestLoad_RejectsLegacyKeys(t *testing.T) {
 
 // TestAgentVisionDefaults verifies the defaults applied for the new
 // [agent.vision] sub-section so a fresh config (no [agent.vision] block) still
-// produces sane runtime values for vision-capable backends.
+// produces sane runtime values for vision-capable backends. Enabled defaults
+// to false: vision is opt-in, since attaching images to a non-vision model
+// silently produces garbage.
 func TestAgentVisionDefaults(t *testing.T) {
 	cfg, err := Load(writeTempConfig(t, ``))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.Vision.Enabled {
+		t.Errorf("agent.vision.enabled = true, want false (opt-in)")
 	}
 	if cfg.Agent.Vision.MaxImagesPerCall != 6 {
 		t.Errorf("agent.vision.max_images_per_call = %d, want 6",

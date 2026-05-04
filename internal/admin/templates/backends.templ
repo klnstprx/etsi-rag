@@ -30,7 +30,6 @@ templ BackendsContent(backends []config.BackendConfig) {
 					<div class="flex items-end gap-4 flex-wrap">
 						@FormCheckbox("enabled", "Enabled", true)
 						@FormCheckbox("is_llama_cpp", "llama.cpp", false)
-						@FormCheckbox("supports_vision", "Supports Vision", false)
 					</div>
 					<div class="sm:col-span-2 flex justify-end">
 						@BtnPrimary("Create", templ.Attributes{"type": "submit"})
@@ -90,7 +89,6 @@ templ BackendEditRow(b config.BackendConfig) {
 				<div class="flex items-end gap-4 flex-wrap">
 					@FormCheckbox("enabled", "Enabled", b.Enabled)
 					@FormCheckbox("is_llama_cpp", "llama.cpp", b.IsLlamaCpp)
-					@FormCheckbox("supports_vision", "Supports Vision", b.SupportsVision)
 				</div>
 				<div class="sm:col-span-2 flex justify-end gap-3">
 					@BtnSecondary("Cancel", templ.Attributes{

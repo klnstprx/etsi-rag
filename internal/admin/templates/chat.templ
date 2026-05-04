@@ -147,8 +147,8 @@ templ ToolCardDone(callID string, name string, duration time.Duration, isError b
 
 // imageBadge surfaces whether the tool's images were actually forwarded to
 // the LLM as image_url parts. When attached=false the user can see the
-// images in the UI but knows the model couldn't read them — usually a
-// SupportsVision or public_base_url misconfiguration.
+// images in the UI but knows the model couldn't read them — usually
+// agent.vision.enabled or public_base_url misconfiguration.
 templ imageBadge(attached bool, count int) {
 	if attached {
 		<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 text-[11px] font-medium">
@@ -158,7 +158,7 @@ templ imageBadge(attached bool, count int) {
 			{ fmt.Sprintf("%d image%s attached to LLM", count, plural(count)) }
 		</span>
 	} else {
-		<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[11px] font-medium" title="Images shown for reference. Set [agent].public_base_url and tick supports_vision on the backend to attach them as visual context.">
+		<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[11px] font-medium" title="Images shown for reference. Tick [agent.vision].enabled and set public_base_url to attach them as visual context.">
 			<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>
 			</svg>

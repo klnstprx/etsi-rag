@@ -65,11 +65,19 @@ Rejected alternatives:
 - Inline data: URLs only: works against any backend, but expensive on the
   wire when artifacts are reused across turns.
 
-**Backend vision capability is a manual flag with a single canonical probe.**
-`BackendConfig.SupportsVision bool` is authoritative. For llama.cpp backends,
-`FetchLlamaCppProps` populates `LlamaCppProps.SupportsVision` from exactly
-one source: the `modalities.vision` boolean returned by `GET /props?model=<id>`
-on recent llama-server builds. We commit to that shape rather than scanning
+**Vision capability is a manual flag with a single canonical probe.**
+`AgentVisionConfig.Enabled bool` is authoritative — the operator asserts that
+the configured `agent.model` accepts `image_url` content blocks. The flag
+lives on the agent stage, not the backend, because a single llama-server
+router can serve multiple models with different multimodal capabilities;
+"backend supports vision" is a category error when only the loaded model
+matters. (Original design had this on `BackendConfig.SupportsVision`; moved
+2026-05-04 with a hard-break legacy-key migration.)
+
+For llama.cpp backends, `FetchLlamaCppProps` populates
+`LlamaCppProps.SupportsVision` from exactly one source: the
+`modalities.vision` boolean returned by `GET /props?model=<id>` on recent
+llama-server builds. We commit to that shape rather than scanning
 speculative field names like `mmproj`, `multimodal`, or CLI args of
 `/v1/models[].status.args` — the canonical response is rich and stable, and
 defensive multi-field matching just adds noise. The probe never overrides
@@ -92,10 +100,11 @@ also recorded for future use.
   free. HTML screenshots are NOT in RustFS (only the original body), so
   reprocess produces no HTML thumbnails — a fresh crawl is required for
   HTML coverage. Acceptable: the user's primary use case is PDFs.
-- **Hot-swap**: agent reads `SupportsVision` and `PublicBaseURL` through
-  a getter (`VisionGetter`) so admin toggles take effect without restart.
-  The getter reports the two flags independently — `(true, "")` when
-  `SupportsVision=true` but `PublicBaseURL` is empty — so the agent can
-  log the actual misconfiguration instead of misattributing it.
+- **Hot-swap**: agent reads `Agent.Vision.Enabled` and
+  `Agent.Vision.PublicBaseURL` through a getter (`VisionGetter`) so admin
+  toggles take effect without restart. The getter reports the two flags
+  independently — `(true, "")` when `Enabled=true` but `PublicBaseURL` is
+  empty — so the agent can log the actual misconfiguration instead of
+  misattributing it.
 - **Backwards compatibility**: every chunk with a marker that has no
   matching artifact row is silently text-only. No errors propagate.

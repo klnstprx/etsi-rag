@@ -128,7 +128,7 @@ func TestRebuildClients_PropagatesNonLLMConfig(t *testing.T) {
 func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Backends = []config.BackendConfig{
-		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true, SupportsVision: true},
+		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true},
 	}
 	cfg.Embedding.Backend = "test"
 	cfg.Embedding.Model = "test-model"
@@ -137,6 +137,7 @@ func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
 	cfg.Agent.MaxTokens = 1024
 	cfg.Agent.Temperature = 0.7
 	cfg.Agent.MaxIterations = 5
+	cfg.Agent.Vision.Enabled = true
 	cfg.Agent.Vision.MaxImagesPerCall = 4
 	cfg.Agent.Vision.PublicBaseURL = "http://localhost:3000"
 
@@ -168,23 +169,23 @@ func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
 		t.Errorf("after rebuild: Vision()=(%v,%q), want (true,%q) — VisionGetter dropped on rebuild", enabled, baseURL, "http://localhost:3000")
 	}
 
-	// Toggling SupportsVision off via the live cfg pointer must take effect
-	// without a further rebuild — the getter reads cfg per call.
-	cfg.Backends[0].SupportsVision = false
+	// Toggling agent.vision.enabled off via the live cfg pointer must take
+	// effect without a further rebuild — the getter reads cfg per call.
+	cfg.Agent.Vision.Enabled = false
 	if enabled, _ := a.Vision(); enabled {
-		t.Error("Vision() should observe SupportsVision=false through live cfg")
+		t.Error("Vision() should observe agent.vision.enabled=false through live cfg")
 	}
 }
 
 // TestRebuildClients_VisionReportsBaseURLEmpty asserts the diagnostic
-// distinction between "supports_vision off" and "public_base_url empty":
-// when SupportsVision=true but PublicBaseURL is empty, the getter must
-// return (true, "") so the agent can log the actual misconfiguration
-// instead of misattributing it to supports_vision.
+// distinction between "agent.vision.enabled off" and "public_base_url empty":
+// when Enabled=true but PublicBaseURL is empty, the getter must return
+// (true, "") so the agent can log the actual misconfiguration instead of
+// misattributing it to the enabled toggle.
 func TestRebuildClients_VisionReportsBaseURLEmpty(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Backends = []config.BackendConfig{
-		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true, SupportsVision: true},
+		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true},
 	}
 	cfg.Embedding.Backend = "test"
 	cfg.Embedding.Model = "test-model"
@@ -192,6 +193,7 @@ func TestRebuildClients_VisionReportsBaseURLEmpty(t *testing.T) {
 	cfg.Agent.Model = "test-model"
 	cfg.Agent.MaxTokens = 1024
 	cfg.Agent.MaxIterations = 5
+	cfg.Agent.Vision.Enabled = true
 	// PublicBaseURL intentionally left empty.
 
 	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
@@ -207,7 +209,7 @@ func TestRebuildClients_VisionReportsBaseURLEmpty(t *testing.T) {
 	}
 	enabled, baseURL := a.Vision()
 	if !enabled {
-		t.Error("Vision().enabled should be true when SupportsVision=true even with empty PublicBaseURL — distinguishes the two failure modes for diagnostic logging")
+		t.Error("Vision().enabled should be true when agent.vision.enabled=true even with empty PublicBaseURL — distinguishes the two failure modes for diagnostic logging")
 	}
 	if baseURL != "" {
 		t.Errorf("Vision().baseURL = %q, want empty", baseURL)

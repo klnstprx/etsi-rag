@@ -309,7 +309,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		cat := domain.Category(d.Category)
 		if !cat.Valid() {
-			ErrBadRequest("invalid category: " + d.Category).WriteJSON(w, r)
+			ErrBadRequest("invalid category: "+d.Category).WriteJSON(w, r)
 			return
 		}
 		docs[i] = domain.Document{
