@@ -1,9 +1,14 @@
 package templates
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type ConfigSection struct {
-	Name   string
+	Name   string // raw TOML key, used for the form action URL ("agent.vision")
+	Title  string // pretty label shown in the card header ("Agent Vision")
+	Group  string // "Infrastructure" | "Pipeline" | "Ingest"
 	Fields []ConfigField
 }
 
@@ -11,57 +16,288 @@ type ConfigField struct {
 	Key         string
 	Label       string
 	Value       string
-	Type        string // "text", "number", "select", "textarea", "model"
+	Type        string // "text" | "number" | "textarea" | "checkbox" | "enum" | "select" | "model"
 	Placeholder string
-	Hint        string   // optional help text below the field
-	Options     []string // for Type == "select" or "model" (backend names)
+	Hint        string   // optional help text rendered below the field
+	Options     []string // populated for Type "enum" / "select" / "model"
 }
 
-templ ConfigPageTempl(sections []ConfigSection) {
+// sectionSlug turns a section name into a valid HTML id segment. The dotted
+// names (e.g. "agent.vision") become hyphenated so they can be referenced as
+// hx-target ids without quoting.
+func sectionSlug(name string) string {
+	return strings.ReplaceAll(name, ".", "-")
+}
+
+// configGroupOrder is the order role groups appear on the config page.
+var configGroupOrder = []string{"Infrastructure", "Pipeline", "Ingest"}
+
+// groupedConfigSections splits the section list into the configured groups in
+// order, with anything that doesn't match a known group falling through to a
+// trailing "Other" bucket so nothing silently disappears.
+type configGroupBlock struct {
+	Group    string
+	Sections []ConfigSection
+}
+
+func groupedConfigSections(sections []ConfigSection) []configGroupBlock {
+	known := map[string]bool{}
+	for _, g := range configGroupOrder {
+		known[g] = true
+	}
+	blocks := make([]configGroupBlock, 0, len(configGroupOrder)+1)
+	for _, g := range configGroupOrder {
+		var bucket []ConfigSection
+		for _, s := range sections {
+			if s.Group == g {
+				bucket = append(bucket, s)
+			}
+		}
+		if len(bucket) > 0 {
+			blocks = append(blocks, configGroupBlock{Group: g, Sections: bucket})
+		}
+	}
+	var other []ConfigSection
+	for _, s := range sections {
+		if !known[s.Group] {
+			other = append(other, s)
+		}
+	}
+	if len(other) > 0 {
+		blocks = append(blocks, configGroupBlock{Group: "Other", Sections: other})
+	}
+	return blocks
+}
+
+// sectionTitleOrName falls back to the raw key when no pretty title is set, so
+// new sections still render something rather than blank-headered cards.
+func sectionTitleOrName(s ConfigSection) string {
+	if s.Title != "" {
+		return s.Title
+	}
+	return s.Name
+}
+
+// submenuItem pairs a top-level section with its child sections (those whose
+// names share its prefix, e.g. "agent.vision" is a child of "agent"). The
+// submenu uses this to render children indented under their parent.
+type submenuItem struct {
+	Section  ConfigSection
+	Children []ConfigSection
+}
+
+// submenuItemsForGroup turns a flat list of sections into a parent/child tree.
+// Sections with a dot in their name (e.g. "agent.vision") attach to the parent
+// matching the prefix; orphans (a child whose parent isn't in the same group)
+// are promoted back to top level so nothing silently disappears.
+func submenuItemsForGroup(sections []ConfigSection) []submenuItem {
+	parentIdx := map[string]int{}
+	items := make([]submenuItem, 0, len(sections))
+	for _, s := range sections {
+		if !strings.Contains(s.Name, ".") {
+			parentIdx[s.Name] = len(items)
+			items = append(items, submenuItem{Section: s})
+		}
+	}
+	for _, s := range sections {
+		i := strings.IndexByte(s.Name, '.')
+		if i <= 0 {
+			continue
+		}
+		parent := s.Name[:i]
+		if idx, ok := parentIdx[parent]; ok {
+			items[idx].Children = append(items[idx].Children, s)
+			continue
+		}
+		items = append(items, submenuItem{Section: s})
+	}
+	return items
+}
+
+// childSubmenuLabel renders the suffix of a dotted section name with a leading
+// uppercase letter, so "agent.vision" → "Vision" when nested under "Agent".
+// Falls back to the section's own Title when there's no dot.
+func childSubmenuLabel(s ConfigSection) string {
+	if i := strings.IndexByte(s.Name, '.'); i > 0 && i+1 < len(s.Name) {
+		suffix := s.Name[i+1:]
+		return strings.ToUpper(suffix[:1]) + suffix[1:]
+	}
+	return sectionTitleOrName(s)
+}
+
+// fieldInputType normalises unknown Type values to "text" so an empty or stray
+// Type still produces a working input rather than `<input type="">`.
+func fieldInputType(t string) string {
+	if t == "number" {
+		return "number"
+	}
+	return "text"
+}
+
+templ ConfigPageTempl(sections []ConfigSection, active ConfigSection) {
 	@Layout("Config", "config") {
-		@ConfigContent(sections)
+		@ConfigShell(sections, active)
 	}
 }
 
-templ ConfigContent(sections []ConfigSection) {
-	@PageHeader("Configuration")
-	<div class="space-y-6">
-		for _, section := range sections {
-			@ConfigSectionForm(section)
+// ConfigShell wraps the page content inside an addressable container so the
+// submenu can swap itself on each navigation, refreshing the active-link state
+// alongside the form. The whole shell is the HTMX swap target — the sidebar
+// re-renders with the correct highlight on every section change.
+templ ConfigShell(sections []ConfigSection, active ConfigSection) {
+	<div id="config-shell">
+		@PageHeader("Configuration")
+		<div class="flex flex-col lg:flex-row lg:gap-8 gap-6">
+			@configSubmenu(sections, active.Name)
+			<div id="config-content" class="flex-1 min-w-0">
+				@ConfigSectionForm(active)
+			</div>
+		</div>
+	</div>
+}
+
+templ configSubmenu(sections []ConfigSection, activeName string) {
+	<aside class="lg:w-56 lg:shrink-0">
+		<nav class="lg:sticky lg:top-4 space-y-6" aria-label="Config sections">
+			for _, block := range groupedConfigSections(sections) {
+				<div>
+					<h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2 px-3">
+						{ block.Group }
+					</h4>
+					<ul class="space-y-1">
+						for _, item := range submenuItemsForGroup(block.Sections) {
+							<li>
+								@configSubmenuLink(item.Section, sectionTitleOrName(item.Section), item.Section.Name == activeName)
+								if len(item.Children) > 0 {
+									<ul class="ml-3 mt-1 space-y-1 border-l border-gray-200 pl-2">
+										for _, child := range item.Children {
+											<li>
+												@configSubmenuLink(child, childSubmenuLabel(child), child.Name == activeName)
+											</li>
+										}
+									</ul>
+								}
+							</li>
+						}
+					</ul>
+				</div>
+			}
+		</nav>
+	</aside>
+}
+
+templ configSubmenuLink(s ConfigSection, label string, active bool) {
+	<a
+		href={ templ.SafeURL("/admin/config/" + s.Name) }
+		hx-get={ "/admin/config/" + s.Name }
+		hx-target="#config-shell"
+		hx-swap="outerHTML"
+		hx-push-url="true"
+		if active {
+			class="block px-3 py-1.5 rounded-md text-sm font-medium bg-blue-50 text-blue-700"
+			aria-current="page"
+		} else {
+			class="block px-3 py-1.5 rounded-md text-sm text-gray-700 hover:bg-gray-100"
+		}
+	>
+		{ label }
+	</a>
+}
+
+templ ConfigSectionForm(section ConfigSection) {
+	<div id={ "config-section-" + sectionSlug(section.Name) }>
+		@CardWithHeader(sectionTitleOrName(section)) {
+			<form
+				hx-post={ fmt.Sprintf("/admin/config/%s", section.Name) }
+				hx-target={ "#config-section-" + sectionSlug(section.Name) }
+				hx-swap="outerHTML"
+				class="p-6"
+			>
+				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+					for _, field := range section.Fields {
+						@configInputCell(section.Name, field)
+					}
+				</div>
+				<div class="mt-4 flex justify-end">
+					@BtnPrimary(fmt.Sprintf("Save %s", sectionTitleOrName(section)), templ.Attributes{"type": "submit"})
+				</div>
+			</form>
 		}
 	</div>
 }
 
-templ ConfigSectionForm(section ConfigSection) {
-	@CardWithHeader(section.Name) {
-		<form
-			hx-post={ fmt.Sprintf("/admin/config/%s", section.Name) }
-			hx-target="#main"
-			hx-swap="innerHTML"
-			class="p-6"
-		>
-			<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-				for _, field := range section.Fields {
-					if field.Type == "select" {
-						@ConfigBackendSelect(section.Name, field)
-					} else if field.Type == "model" {
-						@FormModelSelect(field.Key, field.Label, field.Value, section.Name, field.Options)
-					} else if field.Type == "textarea" {
-						@FormTextarea(field.Key, field.Label, field.Value, field.Placeholder, field.Hint, 4)
-					} else {
-						@FormField(field.Key, field.Label, field.Type, field.Value, field.Placeholder, false)
-					}
-				}
-			</div>
-			<div class="mt-4 flex justify-end">
-				@BtnPrimary(fmt.Sprintf("Save %s", section.Name), templ.Attributes{"type": "submit"})
-			</div>
-		</form>
+// configInputCell renders one field as a single grid cell. Each cell owns its
+// label, input, and optional hint so the hint stays directly under its input
+// rather than overflowing into the next grid column.
+templ configInputCell(section string, field ConfigField) {
+	switch field.Type {
+		case "select":
+			@configBackendSelectCell(section, field)
+		case "model":
+			@FormModelSelect(field.Key, field.Label, field.Value, section, field.Options)
+		case "textarea":
+			@FormTextarea(field.Key, field.Label, field.Value, field.Placeholder, field.Hint, 4)
+		case "checkbox":
+			@configCheckboxCell(field)
+		case "enum":
+			@configEnumCell(field)
+		default:
+			@configTextCell(field)
 	}
 }
 
-// ConfigBackendSelect renders a backend <select>.
-templ ConfigBackendSelect(section string, field ConfigField) {
+templ configTextCell(field ConfigField) {
+	<div>
+		<label class="block text-sm font-medium text-gray-700">{ field.Label }</label>
+		<input
+			type={ fieldInputType(field.Type) }
+			name={ field.Key }
+			value={ field.Value }
+			placeholder={ field.Placeholder }
+			class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
+		/>
+		if field.Hint != "" {
+			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
+		}
+	</div>
+}
+
+templ configCheckboxCell(field ConfigField) {
+	<div>
+		<label class="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+			<input
+				type="checkbox"
+				name={ field.Key }
+				value="true"
+				checked?={ field.Value == "true" }
+				class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+			/>
+			<span>{ field.Label }</span>
+		</label>
+		if field.Hint != "" {
+			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
+		}
+	</div>
+}
+
+templ configEnumCell(field ConfigField) {
+	<div>
+		<label class="block text-sm font-medium text-gray-700">{ field.Label }</label>
+		<select
+			name={ field.Key }
+			class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
+		>
+			for _, opt := range field.Options {
+				<option value={ opt } selected?={ opt == field.Value }>{ opt }</option>
+			}
+		</select>
+		if field.Hint != "" {
+			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
+		}
+	</div>
+}
+
+templ configBackendSelectCell(section string, field ConfigField) {
 	<div>
 		<label class="block text-sm font-medium text-gray-700">{ field.Label }</label>
 		<select
@@ -74,5 +310,14 @@ templ ConfigBackendSelect(section string, field ConfigField) {
 				<option value={ opt } selected?={ opt == field.Value }>{ opt }</option>
 			}
 		</select>
+		if field.Hint != "" {
+			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
+		}
 	</div>
+}
+
+// ConfigBackendSelect retained for legacy callers — the page itself now uses
+// configBackendSelectCell which carries Hint support.
+templ ConfigBackendSelect(section string, field ConfigField) {
+	@configBackendSelectCell(section, field)
 }

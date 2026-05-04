@@ -40,6 +40,10 @@ func setupTestAdminHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	cfg := &config.Config{}
 	cfg.Server.Host = "localhost"
 	cfg.Server.Port = 8080
+	// Validate-on-save needs cross-section invariants to hold, so seed
+	// defaults that match Load()'s applyDefaults output.
+	cfg.Retrieval.MaxContextTokens = 4096
+	cfg.Retrieval.RetrievalMode = "dense"
 
 	sessionStore := session.NewStore(config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600})
 	t.Cleanup(sessionStore.Close)
@@ -153,6 +157,68 @@ func TestIsHTMX(t *testing.T) {
 	}
 }
 
+// --- ConfigPage (GET) ---
+
+func TestConfigPage_DefaultsToFirstSection(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+	w := httptest.NewRecorder()
+
+	h.ConfigPage(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	// First section in configToSections is "server" — its slug should appear
+	// as the active section's wrapping div id.
+	if !strings.Contains(body, `id="config-section-server"`) {
+		t.Errorf("default render should include the server section; body did not contain its id")
+	}
+	// Submenu should render group headings.
+	if !strings.Contains(body, "Infrastructure") {
+		t.Error("submenu should show the Infrastructure group heading")
+	}
+}
+
+func TestConfigPage_ShowsSelectedSection(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/config/retrieval", nil)
+	req = withChiParam(req, "section", "retrieval")
+	w := httptest.NewRecorder()
+
+	h.ConfigPage(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `id="config-section-retrieval"`) {
+		t.Errorf("expected retrieval section to render; body missing the id")
+	}
+	// The retrieval submenu link should carry aria-current="page" on its
+	// active state.
+	if !strings.Contains(body, `aria-current="page"`) {
+		t.Error("active submenu link should carry aria-current=page")
+	}
+}
+
+func TestConfigPage_UnknownSection404(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/config/bogus", nil)
+	req = withChiParam(req, "section", "bogus")
+	w := httptest.NewRecorder()
+
+	h.ConfigPage(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for unknown section", w.Code)
+	}
+}
+
 // --- ConfigSave ---
 
 func TestConfigSave_Server(t *testing.T) {
@@ -184,24 +250,24 @@ func TestConfigSave_Server(t *testing.T) {
 	}
 }
 
-func TestConfigSave_RAG(t *testing.T) {
+func TestConfigSave_Retrieval(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
 	form := url.Values{
 		"top_k":              {"10"},
 		"max_context_tokens": {"4096"},
 	}
-	req := postForm("/admin/config/rag", form)
-	req = withChiParam(req, "section", "rag")
+	req := postForm("/admin/config/retrieval", form)
+	req = withChiParam(req, "section", "retrieval")
 	w := httptest.NewRecorder()
 
 	h.ConfigSave(w, req)
 
-	if h.config.RAG.TopK != 10 {
-		t.Errorf("TopK = %d, want 10", h.config.RAG.TopK)
+	if h.config.Retrieval.TopK != 10 {
+		t.Errorf("TopK = %d, want 10", h.config.Retrieval.TopK)
 	}
-	if h.config.RAG.MaxContextTokens != 4096 {
-		t.Errorf("MaxContextTokens = %d, want 4096", h.config.RAG.MaxContextTokens)
+	if h.config.Retrieval.MaxContextTokens != 4096 {
+		t.Errorf("MaxContextTokens = %d, want 4096", h.config.Retrieval.MaxContextTokens)
 	}
 }
 
@@ -227,6 +293,45 @@ func TestConfigSave_Chunking(t *testing.T) {
 	}
 	if h.config.Chunking.MinChunkSize != 128 {
 		t.Errorf("MinChunkSize = %d, want 128", h.config.Chunking.MinChunkSize)
+	}
+}
+
+// TestConfigSave_RejectsInvalidConfig posts a chunking section with
+// max_chunk_size larger than retrieval.max_context_tokens. Validate should
+// reject the save: the in-memory config reverts, no callback fires, and the
+// HTML response includes an error toast.
+func TestConfigSave_RejectsInvalidConfig(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Retrieval.MaxContextTokens = 1024
+	originalChunkSize := h.config.Chunking.MaxChunkSize
+
+	fired := false
+	h.SetOnConfigSave(func() { fired = true })
+
+	form := url.Values{
+		"max_chunk_size": {"99999"}, // larger than retrieval.max_context_tokens
+		"chunk_overlap":  {"32"},
+		"min_chunk_size": {"64"},
+	}
+	req := postForm("/admin/config/chunking", form)
+	req = withChiParam(req, "section", "chunking")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Chunking.MaxChunkSize != originalChunkSize {
+		t.Errorf("MaxChunkSize = %d, want %d (revert on validation failure)",
+			h.config.Chunking.MaxChunkSize, originalChunkSize)
+	}
+	if fired {
+		t.Error("onConfigSave fired despite validation failure")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "Invalid config") {
+		t.Errorf("response body missing error toast; got:\n%s", body)
+	}
+	if !strings.Contains(body, "max_context_tokens") {
+		t.Errorf("error toast should mention the violated invariant; got:\n%s", body)
 	}
 }
 

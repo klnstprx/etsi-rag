@@ -100,6 +100,7 @@ func (h *Handler) Routes() chi.Router {
 	// Pages
 	r.Get("/", h.Dashboard)
 	r.Get("/config", h.ConfigPage)
+	r.Get("/config/{section}", h.ConfigPage)
 	r.Post("/config/{section}", h.ConfigSave)
 
 	r.Get("/backends", h.BackendList)
