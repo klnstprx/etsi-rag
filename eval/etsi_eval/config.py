@@ -21,6 +21,28 @@ class BackendConfig:
 
 
 @dataclass(frozen=True)
+class JudgePricing:
+    """USD per 1,000,000 tokens for the judge model. Optional.
+
+    Only used to print a live spend estimate as the run progresses. Set
+    both fields to 0 (or omit the keys) to disable cost reporting.
+    """
+
+    input_per_mtok: float = 0.0
+    output_per_mtok: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.input_per_mtok > 0 or self.output_per_mtok > 0
+
+    def cost_usd(self, prompt_tokens: int, completion_tokens: int) -> float:
+        return (
+            prompt_tokens * self.input_per_mtok / 1_000_000
+            + completion_tokens * self.output_per_mtok / 1_000_000
+        )
+
+
+@dataclass(frozen=True)
 class Runtime:
     """Everything the eval tool needs pulled out of config.toml."""
 
@@ -28,6 +50,7 @@ class Runtime:
     agent_model: str
     judge_backend: BackendConfig
     judge_model: str
+    judge_pricing: JudgePricing
     db_path: Path
     server_base_url: str  # where etsi-rag serves /v1/chat/completions
 
@@ -45,7 +68,7 @@ def _resolve_backend(cfg: dict, name: str) -> BackendConfig:
     )
 
 
-def _require_eval(cfg: dict) -> tuple[str, str]:
+def _require_eval(cfg: dict) -> tuple[str, str, JudgePricing]:
     eval_cfg = cfg.get("eval")
     if eval_cfg is None:
         raise ValueError(
@@ -61,7 +84,11 @@ def _require_eval(cfg: dict) -> tuple[str, str]:
         raise ValueError(
             f"[eval] section is missing required key(s): {', '.join(missing)}"
         )
-    return backend, model
+    pricing = JudgePricing(
+        input_per_mtok=float(eval_cfg.get("judge_input_price_per_mtok", 0) or 0),
+        output_per_mtok=float(eval_cfg.get("judge_output_price_per_mtok", 0) or 0),
+    )
+    return backend, model, pricing
 
 
 def load(project_root: Path) -> Runtime:
@@ -77,7 +104,7 @@ def load(project_root: Path) -> Runtime:
 
     agent_backend = _resolve_backend(cfg, agent["backend"])
 
-    judge_backend_name, judge_model = _require_eval(cfg)
+    judge_backend_name, judge_model, judge_pricing = _require_eval(cfg)
     judge_backend = _resolve_backend(cfg, judge_backend_name)
 
     db_rel = Path(cfg.get("database", {}).get("path", "data/etsi-rag.db"))
@@ -91,6 +118,7 @@ def load(project_root: Path) -> Runtime:
         agent_model=agent["model"],
         judge_backend=judge_backend,
         judge_model=judge_model,
+        judge_pricing=judge_pricing,
         db_path=db_path,
         server_base_url=f"http://{host}:{port}",
     )

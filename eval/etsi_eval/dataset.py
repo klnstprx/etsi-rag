@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .url_norm import canonicalize
+
 _ALLOWED_BEHAVIOR = {"answer", "refuse"}
 
 
@@ -39,13 +41,14 @@ def _coerce_row(raw: dict, lineno: int) -> Question:
             f"{sorted(_ALLOWED_BEHAVIOR)}"
         )
 
+    golden_urls = [canonicalize(u) for u in (raw.get("golden_urls") or [])]
     return Question(
         id=raw["id"],
         category=raw["category"],
         difficulty=raw["difficulty"],
         question=raw["question"],
         key_facts=list(raw.get("key_facts") or []),
-        golden_urls=list(raw.get("golden_urls") or []),
+        golden_urls=golden_urls,
         expected_behavior=behavior,
         notes=str(raw.get("notes", "")),
     )

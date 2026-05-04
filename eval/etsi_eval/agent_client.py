@@ -1,8 +1,9 @@
 """Thin OpenAI-compatible client that calls the etsi-rag agent.
 
-We post to etsi-rag's own /v1/chat/completions (passthrough mode) so the agent
-runs its tool-calling loop and semantic_search pipeline — this is the "system
-under test".
+We post to etsi-rag's own /v1/chat/completions so the agent runs its
+tool-calling loop and semantic_search pipeline — this is the "system under
+test". The caller supplies an explicit session_id so each eval row is
+isolated when the server is in session mode.
 """
 
 from __future__ import annotations
@@ -23,31 +24,40 @@ def ask(
     model: str,
     question: str,
     *,
+    session_id: str,
     timeout: float = 120.0,
-    passthrough: bool = True,
+    client: httpx.Client | None = None,
 ) -> AgentReply:
     """Send a single user turn to the agent and return its text reply.
 
-    passthrough=True stops the agent from attaching any session state, so eval
-    rows don't contaminate each other.
+    session_id is sent as X-Session-ID. Callers MUST pass a value that is
+    unique per row (and ideally per run) so chat history from one question
+    doesn't bleed into the next when the server is in session mode.
     """
-    headers = {"Content-Type": "application/json"}
-    if passthrough:
-        # Passthrough mode is controlled by config (API.Passthrough). When the
-        # server is in session mode, we still want each question standalone;
-        # we set a unique session header so history never bleeds.
-        headers["X-Session-ID"] = "eval-transient"
+    if not session_id:
+        raise ValueError("session_id is required")
 
+    headers = {
+        "Content-Type": "application/json",
+        "X-Session-ID": session_id,
+    }
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": question}],
         "stream": False,
     }
     url = f"{server_base_url.rstrip('/')}/v1/chat/completions"
-    with httpx.Client(timeout=timeout) as client:
+
+    owns_client = client is None
+    if owns_client:
+        client = httpx.Client(timeout=timeout)
+    try:
         r = client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         body = r.json()
+    finally:
+        if owns_client:
+            client.close()
 
     choices = body.get("choices") or []
     if not choices:

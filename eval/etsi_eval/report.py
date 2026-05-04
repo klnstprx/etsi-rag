@@ -34,7 +34,14 @@ class Row:
     recall_at_10: float | None = None
     mrr: float | None = None
     retrieved_urls: list[str] = field(default_factory=list)
-    error: str = ""
+    # token usage reported by the judge backend (OpenAI-compatible `usage` block)
+    judge_prompt_tokens: int = 0
+    judge_completion_tokens: int = 0
+    judge_total_tokens: int = 0
+    # Per-stage failures accumulated during the run. Each entry is prefixed
+    # with the stage name (e.g. "retrieval: ...", "agent: ...", "judge: ...")
+    # so a row that hit two failures retains both.
+    errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,7 +70,7 @@ def _retrieval_stats(values: list[float]) -> dict[str, float | int]:
 
 def aggregate(rows: list[Row]) -> dict[str, Any]:
     scored = [r for r in rows if r.overall is not None]
-    errored = [r for r in rows if r.error]
+    errored = [r for r in rows if r.errors]
 
     by_dim: dict[str, dict[str, float | int] | None] = {}
     for dim in _DIMS:
@@ -82,6 +89,13 @@ def aggregate(rows: list[Row]) -> dict[str, Any]:
         vals = [getattr(r, metric) for r in rows if getattr(r, metric) is not None]
         retrieval[metric] = _retrieval_stats(vals) if vals else None
 
+    judge_usage = {
+        "prompt_tokens": sum(r.judge_prompt_tokens for r in rows),
+        "completion_tokens": sum(r.judge_completion_tokens for r in rows),
+        "total_tokens": sum(r.judge_total_tokens for r in rows),
+        "rows_with_usage": sum(1 for r in rows if r.judge_total_tokens > 0),
+    }
+
     return {
         "total": len(rows),
         "scored": len(scored),
@@ -90,6 +104,7 @@ def aggregate(rows: list[Row]) -> dict[str, Any]:
         "retrieval": retrieval,
         "by_category": breakdown("category"),
         "by_difficulty": breakdown("difficulty"),
+        "judge_usage": judge_usage,
     }
 
 
@@ -112,8 +127,9 @@ def print_summary(rows: list[Row], agg: dict[str, Any]) -> None:
     print(f"{'id':<4}{'cat':<11}{'diff':<8}{'F':>4}{'C':>4}{'Cm':>4}{'O':>4}  rationale (faithfulness)")
     print("-" * 92)
     for r in rows:
-        if r.error:
-            print(f"{r.id:<4}{r.category:<11}{r.difficulty:<8}{'ERR':>16}  {r.error[:60]}")
+        if r.errors and r.overall is None:
+            joined = "; ".join(r.errors)[:60]
+            print(f"{r.id:<4}{r.category:<11}{r.difficulty:<8}{'ERR':>16}  {joined}")
             continue
         rat = r.faithfulness_rationale.replace("\n", " ")[:60]
         print(
@@ -135,4 +151,20 @@ def print_summary(rows: list[Row], agg: dict[str, Any]) -> None:
             if stats is None:
                 continue
             print(f"  {metric:<14} mean={stats['mean']:>5}  (n={stats['count']})")
+    usage = agg.get("judge_usage") or {}
+    total = usage.get("total_tokens", 0)
+    if total:
+        n = usage["rows_with_usage"]
+        avg_prompt = usage["prompt_tokens"] // n if n else 0
+        avg_completion = usage["completion_tokens"] // n if n else 0
+        line = (
+            f"Judge tokens: prompt={usage['prompt_tokens']:,}  "
+            f"completion={usage['completion_tokens']:,}  "
+            f"total={total:,}  "
+            f"(avg per row: {avg_prompt:,} in / {avg_completion:,} out, n={n})"
+        )
+        cost = usage.get("estimated_cost_usd")
+        if cost is not None:
+            line += f"  estimated cost: ${cost:.4f}"
+        print(line)
     print("=" * 92)

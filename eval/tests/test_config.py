@@ -98,3 +98,29 @@ judge_model = "agent-model"
     rt = load(_write(tmp_path, body))
     assert rt.judge_backend.name == rt.agent_backend.name
     assert rt.judge_model == rt.agent_model
+
+
+def test_pricing_defaults_to_zero(tmp_path: Path):
+    body = _BACKENDS + """
+[eval]
+judge_backend = "remote-claude"
+judge_model = "claude-sonnet-4-6"
+"""
+    rt = load(_write(tmp_path, body))
+    assert rt.judge_pricing.input_per_mtok == 0.0
+    assert rt.judge_pricing.output_per_mtok == 0.0
+    assert not rt.judge_pricing.enabled
+
+
+def test_pricing_loaded_when_set(tmp_path: Path):
+    body = _BACKENDS + """
+[eval]
+judge_backend = "remote-claude"
+judge_model = "claude-sonnet-4-6"
+judge_input_price_per_mtok = 3.0
+judge_output_price_per_mtok = 15.0
+"""
+    rt = load(_write(tmp_path, body))
+    assert rt.judge_pricing.input_per_mtok == 3.0
+    assert rt.judge_pricing.output_per_mtok == 15.0
+    assert rt.judge_pricing.enabled

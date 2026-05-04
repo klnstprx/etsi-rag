@@ -62,7 +62,7 @@ func (*SemanticSearchTool) Parameters() openai.FunctionParameters {
 			},
 			"top_k": map[string]any{
 				"type":        "integer",
-				"description": "Number of results to return (default: 5)",
+				"description": "Number of results to return (optional; server default is used when omitted).",
 			},
 		},
 		"required": []string{"query"},

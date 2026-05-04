@@ -6,12 +6,12 @@ LLM-as-judge evaluation harness for the etsi-rag agent.
 
 For each question in `dataset.jsonl`:
 
-1. Look up the reference document(s) in `data/etsi-rag.db` by each entry in `golden_urls` (read-only). Skipped for `expected_behavior == "refuse"` rows.
+1. Look up the reference document(s) in `data/etsi-rag.db` by each entry in `golden_urls` (read-only). URLs are canonicalised on both sides (see "URL canonicalisation" below) so cosmetic differences don't cause silent misses. Skipped for `expected_behavior == "refuse"` rows.
 2. Probe the retrieval layer via `POST /v1/rag/query` to compute Recall@k / MRR against `golden_urls` (URL-level, k = 5 and 10). Skipped for refuse rows where the metric is undefined.
-3. Ask the agent via `POST /v1/chat/completions` — single user turn.
-4. Feed `(question, agent answer, reference docs, expected_behavior)` to the **judge LLM** (configured separately in `[eval]` — see "Configuring the judge" below; called directly at its `/chat/completions` endpoint so the judge never goes through the agent's tool loop).
+3. Ask the agent via `POST /v1/chat/completions` — single user turn. Each row gets a unique `X-Session-ID` of the form `eval-<run_id>-<question_id>` so chat history never bleeds between questions even when the server is in session mode.
+4. Feed `(question, agent answer, reference docs, expected_behavior)` to the **judge LLM** (configured separately in `[eval]` — see "Configuring the judge" below; called directly at its `/chat/completions` endpoint so the judge never goes through the agent's tool loop). Transient failures (429 rate-limits, 5xx, timeouts) are retried with exponential backoff; 4xx auth/request errors fail fast.
 5. The judge returns three independent sub-scores (see "Rubric" below). For refuse rows, the rubric scores how well the model declined to answer.
-6. Results are aggregated per dimension, retrieval metric, category, and difficulty and written to `results/TIMESTAMP.json`.
+6. Results are aggregated per dimension, retrieval metric, category, and difficulty and written to `results/TIMESTAMP.json` (schema_version 2).
 
 ## Rubric
 
@@ -38,6 +38,14 @@ Computed against the `golden_urls` field on each row (URL-level, not chunk-id, s
 
 The retrieval probe (`POST /v1/rag/query`) runs separately from the agent and reflects the raw retrieval layer, not what the agent's reformulated tool query produced. This separation is intentional: it lets us ablate the retriever (chunking, embedding model, top_k) independently of the agent's tool-use behaviour. Refuse rows are excluded from retrieval aggregates (golden_urls is empty → metric undefined).
 
+**Single- vs multi-golden caveat:** The vast majority of rows have a single `golden_urls` entry, so for those rows Recall@k is binary (0 or 1) and the aggregate mean is effectively a hit-rate. True recall (a value strictly between 0 and 1) is only meaningful on the cross-doc subset, where two or more URLs need to surface together. Numbers should be interpreted accordingly in any write-up.
+
+## URL canonicalisation
+
+Ground-truth matching applies a small set of conservative normalisations on both the dataset's `golden_urls` and the URLs returned by `/v1/rag/query`, so cosmetic differences (trailing slash, scheme/host case, default ports `:80`/`:443`, fragments) never cause a silent miss. Query strings are left untouched. The DB lookup tries an exact match first and falls back to a one-shot canonical-form scan over the `documents` table, cached per process.
+
+Run with `--validate-urls` to fail fast before any agent calls if a `golden_urls` entry can't be resolved against the indexed corpus — useful after a fresh crawl.
+
 ## Configuring the judge
 
 A `[eval]` section is **required** in `config/config.toml`. The judge_backend must reference an enabled `[[backends]]` entry. The eval tool will refuse to start if the section is missing or malformed.
@@ -52,9 +60,25 @@ enabled = true
 [eval]
 judge_backend = "remote-claude"
 judge_model = "claude-sonnet-4-6"
+
+# Optional — USD per million tokens. When set, the runner prints a running
+# cost estimate per row and a final total. Both default to 0 (disabled).
+judge_input_price_per_mtok  = 3.0
+judge_output_price_per_mtok = 15.0
 ```
 
 Using the same backend/model for both the agent and the judge is allowed but discouraged — it's the canonical setup for self-preference bias and the runner will print a warning. For thesis-grade results, the judge should be a different model family from the agent (e.g. agent = local Gemma, judge = remote Claude).
+
+## Token usage and cost
+
+Every judge call returns an OpenAI-compatible `usage` block (`prompt_tokens`, `completion_tokens`, `total_tokens`). The runner:
+
+- stores each row's tokens on `Row.judge_prompt_tokens` / `judge_completion_tokens` / `judge_total_tokens`;
+- shows per-row tokens in the live status line (`toks=1234+45`) plus a cumulative count (`cum=8923`);
+- aggregates totals into `aggregate.judge_usage` in the output JSON;
+- if `judge_input_price_per_mtok` / `judge_output_price_per_mtok` are set in `[eval]`, also displays per-row running cost (`cost=$0.0234`) and a final estimate.
+
+If a backend strips the `usage` block (rare, but happens behind some proxies), the runner falls back to zero — totals will under-report rather than crash.
 
 ## Prerequisites
 
@@ -64,13 +88,24 @@ Using the same backend/model for both the agent and the judge is allowed but dis
 - A populated `data/etsi-rag.db` (crawl has been run at least once).
 - The backend referenced by `[agent].backend` in `config/config.toml` must be up.
 
+## Archived runs
+
+`results/` keeps a few human-named runs as reference points:
+
+| File | Config | Overall | Notes |
+|---|---|---|---|
+| `baseline_topk10_ctx4092.json` | `[rag] top_k=10, max_context_tokens=4092` | **76.1** | Reference baseline (2026-05-04). |
+| `regression_topk20_ctx8192.json` | `top_k=20, max_context_tokens=8192` | 45.5 | Negative control: wider context regresses gemma4-e4b by 31 points. See `docs/decisions/007-rag-context-budget.md`. |
+
+Per-run timestamped files (`YYYYMMDD_HHMMSS.json`) are working artifacts; rename to a descriptive name once a run is worth keeping.
+
 ## Run
 
 ```fish
 cd etsi-rag/eval
 uv sync
 
-# full 20-question run
+# full run over the entire dataset
 uv run python -m etsi_eval.runner
 
 # filters
@@ -81,9 +116,23 @@ uv run python -m etsi_eval.runner --ids 1,7,12
 # retrieval probe top_k (default 10)
 uv run python -m etsi_eval.runner --retrieval-top-k 20
 
+# pre-flight: fail fast if any golden_urls entry isn't in the DB
+uv run python -m etsi_eval.runner --validate-urls
+
+# parallel execution (requires llama-server -np N on the agent side)
+uv run python -m etsi_eval.runner --concurrency 4
+
 # explicit output path
 uv run python -m etsi_eval.runner --out /tmp/run1.json
 ```
+
+## Parallel execution
+
+By default the runner is single-flight (`--concurrency 1`) — one row at a time. With `--concurrency N` it runs N rows in parallel via a thread pool, which is useful because each row is dominated by network I/O on the agent (local llama-server) and the judge (remote LLM).
+
+Important caveat: a local llama-server only delivers parallelism when started with `--parallel N` (server slots) — otherwise extra concurrent requests just queue inside the server and you get no speedup. Continuous batching is enabled by default in llama-server, so once the slots are there the GPU schedules requests automatically. Set `N` to match (or exceed) the eval `--concurrency`. The remote judge backends used in this repo (Anthropic) handle concurrent requests natively without extra setup.
+
+Row order in the output JSON is always sorted by `id`, regardless of completion order.
 
 ## Output
 
@@ -93,25 +142,28 @@ JSON file (default `results/YYYYMMDD_HHMMSS.json`):
 
 ```json
 {
+  "schema_version": 2,
   "timestamp": "...",
+  "run_id": "a1b2c3d4",
   "server_base_url": "http://127.0.0.1:3000",
   "agent_backend": "local-llama",
   "agent_model": "agent-model",
   "judge_backend": "remote-claude",
   "judge_model": "claude-sonnet-4-6",
   "aggregate": {
-    "total": 20,
-    "scored": 20,
+    "total": 85,
+    "scored": 83,
+    "errored": 2,
     "by_dimension": {
-      "faithfulness": {"count": 20, "mean": 82.1, "min": 30, "max": 100},
-      "correctness":  {"count": 20, "mean": 78.4, "min": 20, "max": 100},
-      "completeness": {"count": 20, "mean": 70.5, "min": 0,  "max": 100},
-      "overall":      {"count": 20, "mean": 65.2, "min": 0,  "max": 95}
+      "faithfulness": {"count": 83, "mean": 82.1, "min": 30, "max": 100},
+      "correctness":  {"count": 83, "mean": 78.4, "min": 20, "max": 100},
+      "completeness": {"count": 83, "mean": 70.5, "min": 0,  "max": 100},
+      "overall":      {"count": 83, "mean": 65.2, "min": 0,  "max": 95}
     },
     "retrieval": {
-      "recall_at_5":  {"count": 18, "mean": 0.722, "min": 0.0, "max": 1.0},
-      "recall_at_10": {"count": 18, "mean": 0.833, "min": 0.0, "max": 1.0},
-      "mrr":          {"count": 18, "mean": 0.611, "min": 0.0, "max": 1.0}
+      "recall_at_5":  {"count": 75, "mean": 0.722, "min": 0.0, "max": 1.0},
+      "recall_at_10": {"count": 75, "mean": 0.833, "min": 0.0, "max": 1.0},
+      "mrr":          {"count": 75, "mean": 0.611, "min": 0.0, "max": 1.0}
     },
     "by_category":   { "course": {...}, ... },
     "by_difficulty": { "easy": {...}, ... }
@@ -122,11 +174,14 @@ JSON file (default `results/YYYYMMDD_HHMMSS.json`):
       "faithfulness": 95, "correctness": 90, "completeness": 80, "overall": 80,
       "faithfulness_rationale": "...",
       "agent_answer": "...",
+      "errors": [],
       ...
     }
   ]
 }
 ```
+
+The `errors` field on each row is a list (not a single string) so a row that hits both a transient retrieval failure and a judge failure retains both messages, each prefixed with its stage (`"retrieval: ..."`, `"agent: ..."`, `"judge: ..."`).
 
 ## Dataset format
 

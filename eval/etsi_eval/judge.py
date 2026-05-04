@@ -15,7 +15,9 @@ weakest dimension caps quality.
 from __future__ import annotations
 
 import json
+import random
 import re
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -103,11 +105,26 @@ class DimScore:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Token counts reported by the judge backend on a single call.
+
+    Mirrors the OpenAI-compatible `usage` block. Backends that don't return
+    usage (rare, but possible if the model is wrapped behind a proxy that
+    strips it) leave all fields at zero.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class Verdict:
     faithfulness: DimScore
     correctness: DimScore
     completeness: DimScore
     raw: str  # full judge response for debugging malformed JSON
+    usage: Usage = Usage()
 
     @property
     def overall(self) -> int:
@@ -184,7 +201,7 @@ def _parse_dim(name: str, obj: dict) -> DimScore:
     return DimScore(score=score, rationale=rationale)
 
 
-def _parse_verdict(raw: str) -> Verdict:
+def _parse_verdict(raw: str, usage: Usage = Usage()) -> Verdict:
     """Extract three-dim verdict even when the model wraps it in prose or fences."""
     text = raw.strip()
     # Strip ``` fences if present
@@ -207,7 +224,68 @@ def _parse_verdict(raw: str) -> Verdict:
         correctness=dims["correctness"],
         completeness=dims["completeness"],
         raw=raw,
+        usage=usage,
     )
+
+
+def _parse_usage(body: dict) -> Usage:
+    """Extract OpenAI-compatible token usage from a chat-completion body.
+
+    Missing/unknown shape → zeros. The aggregate is robust to that: a few
+    rows missing usage just under-report the total, never crash."""
+    u = body.get("usage") or {}
+    try:
+        return Usage(
+            prompt_tokens=int(u.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(u.get("completion_tokens", 0) or 0),
+            total_tokens=int(u.get("total_tokens", 0) or 0),
+        )
+    except (TypeError, ValueError):
+        return Usage()
+
+
+_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 4.0, 8.0)
+
+
+def _is_retriable(exc: Exception) -> bool:
+    """Transient failures that may resolve on retry: timeouts, connection
+    blips, 429 rate-limit, and 5xx server errors. 4xx other than 429 are
+    permanent (auth, malformed request) and re-raise immediately.
+    """
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or 500 <= status < 600
+    return False
+
+
+def _post_with_retry(
+    client: httpx.Client,
+    url: str,
+    *,
+    json_body: dict,
+    headers: dict[str, str],
+    backoff: tuple[float, ...] | None = None,
+    sleep: callable = time.sleep,
+) -> httpx.Response:
+    if backoff is None:
+        backoff = _RETRY_BACKOFF_SECONDS
+    last_exc: Exception | None = None
+    attempts = len(backoff) + 1
+    for attempt in range(attempts):
+        try:
+            r = client.post(url, json=json_body, headers=headers)
+            r.raise_for_status()
+            return r
+        except Exception as e:  # noqa: BLE001 — _is_retriable narrows it
+            if not _is_retriable(e) or attempt == attempts - 1:
+                raise
+            last_exc = e
+            wait = backoff[attempt] * (0.5 + random.random())
+            sleep(wait)
+    # Unreachable: the loop either returns or raises.
+    raise RuntimeError("retry loop exited without return") from last_exc
 
 
 def grade(
@@ -220,6 +298,7 @@ def grade(
     expected_behavior: str = "answer",
     timeout: float = 120.0,
     temperature: float = 0.0,
+    client: httpx.Client | None = None,
 ) -> Verdict:
     if expected_behavior == "refuse":
         system_prompt = JUDGE_SYSTEM_REFUSE
@@ -242,13 +321,18 @@ def grade(
         headers["Authorization"] = f"Bearer {backend.api_key}"
 
     url = f"{backend.base_url}/chat/completions"
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(url, json=payload, headers=headers)
-        r.raise_for_status()
+    owns_client = client is None
+    if owns_client:
+        client = httpx.Client(timeout=timeout)
+    try:
+        r = _post_with_retry(client, url, json_body=payload, headers=headers)
         body = r.json()
+    finally:
+        if owns_client:
+            client.close()
 
     choices = body.get("choices") or []
     if not choices:
         raise JudgeError(f"judge returned no choices: {body}")
     content = choices[0].get("message", {}).get("content", "") or ""
-    return _parse_verdict(content)
+    return _parse_verdict(content, usage=_parse_usage(body))
