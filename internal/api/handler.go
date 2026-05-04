@@ -125,7 +125,7 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ag := h.getAgent()
 	if ag == nil {
-		ErrServiceUnavailable("agent not configured").WriteJSON(w)
+		ErrServiceUnavailable("agent not configured").WriteJSON(w, r)
 		return
 	}
 
@@ -140,14 +140,14 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.Agent) {
 	var req ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w)
+		ErrBadRequest("invalid request body").WriteJSON(w, r)
 		return
 	}
 
 	// Validate: exactly 1 user message, no system/assistant
 	userMsg, err := extractSingleUserMessage(req.Messages)
 	if err != nil {
-		ErrBadRequest(err.Error()).WriteJSON(w)
+		ErrBadRequest(err.Error()).WriteJSON(w, r)
 		return
 	}
 
@@ -162,7 +162,7 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 	// Run agent
 	result, err := ag.Chat(r.Context(), sessionID, userMsg, nil)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 
@@ -195,18 +195,18 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 func (h *Handler) chatPassthrough(w http.ResponseWriter, r *http.Request, ag *agent.Agent) {
 	var req ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w)
+		ErrBadRequest("invalid request body").WriteJSON(w, r)
 		return
 	}
 
 	if len(req.Messages) == 0 {
-		ErrBadRequest("messages cannot be empty").WriteJSON(w)
+		ErrBadRequest("messages cannot be empty").WriteJSON(w, r)
 		return
 	}
 
 	result, err := ag.ChatPassthrough(r.Context(), req.Messages, nil)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 
@@ -231,7 +231,7 @@ func (h *Handler) chatPassthrough(w http.ResponseWriter, r *http.Request, ag *ag
 func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	var req EmbeddingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w)
+		ErrBadRequest("invalid request body").WriteJSON(w, r)
 		return
 	}
 
@@ -242,13 +242,13 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	} else if len(req.Input.OfArrayOfStrings) > 0 {
 		texts = req.Input.OfArrayOfStrings
 	} else {
-		ErrBadRequest("input must be a string or array of strings").WriteJSON(w)
+		ErrBadRequest("input must be a string or array of strings").WriteJSON(w, r)
 		return
 	}
 
 	embeddings, err := h.getEmbeddingClient().EmbedBatch(r.Context(), texts)
 	if err != nil {
-		ErrBadGateway(err).WriteJSON(w)
+		ErrBadGateway(err).WriteJSON(w, r)
 		return
 	}
 
@@ -268,7 +268,7 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		if counter != nil {
 			n, err := counter.Count(r.Context(), texts[i])
 			if err != nil {
-				ErrInternal(err).WriteJSON(w)
+				ErrInternal(err).WriteJSON(w, r)
 				return
 			}
 			totalTokens += int64(n)
@@ -290,12 +290,12 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	var req IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w)
+		ErrBadRequest("invalid request body").WriteJSON(w, r)
 		return
 	}
 
 	if len(req.Documents) == 0 {
-		ErrBadRequest("documents cannot be empty").WriteJSON(w)
+		ErrBadRequest("documents cannot be empty").WriteJSON(w, r)
 		return
 	}
 
@@ -304,12 +304,12 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	for i, d := range req.Documents {
 		lang := domain.Language(d.Language)
 		if !lang.Valid() {
-			ErrInvalidLanguage(d.Language).WriteJSON(w)
+			ErrInvalidLanguage(d.Language).WriteJSON(w, r)
 			return
 		}
 		cat := domain.Category(d.Category)
 		if !cat.Valid() {
-			ErrBadRequest("invalid category: " + d.Category).WriteJSON(w)
+			ErrBadRequest("invalid category: " + d.Category).WriteJSON(w, r)
 			return
 		}
 		docs[i] = domain.Document{
@@ -324,7 +324,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 
 	ingested, chunks, err := h.pipeline.Ingest(r.Context(), docs)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 
@@ -346,17 +346,17 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
 	var req RAGQueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w)
+		ErrBadRequest("invalid request body").WriteJSON(w, r)
 		return
 	}
 	if req.Query == "" {
-		ErrBadRequest("query cannot be empty").WriteJSON(w)
+		ErrBadRequest("query cannot be empty").WriteJSON(w, r)
 		return
 	}
 
 	result, err := h.pipeline.Retrieve(r.Context(), req.Query, req.TopK)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 
@@ -390,7 +390,7 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("language"); l != "" {
 		dl := domain.Language(l)
 		if !dl.Valid() {
-			ErrInvalidLanguage(l).WriteJSON(w)
+			ErrInvalidLanguage(l).WriteJSON(w, r)
 			return
 		}
 		lang = &dl
@@ -398,7 +398,7 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 
 	docs, err := h.store.ListDocuments(r.Context(), lang)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 
@@ -413,7 +413,7 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 // with the artifact's stored MIME type.
 func (h *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
 	if h.objStore == nil {
-		ErrInternal(errors.New("object store not configured")).WriteJSON(w)
+		ErrInternal(errors.New("object store not configured")).WriteJSON(w, r)
 		return
 	}
 	token := chi.URLParam(r, "token")
@@ -424,23 +424,23 @@ func (h *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
 		token = token[:dot]
 	}
 	if token == "" {
-		ErrBadRequest("missing artifact token").WriteJSON(w)
+		ErrBadRequest("missing artifact token").WriteJSON(w, r)
 		return
 	}
 
 	a, err := h.store.GetArtifactByToken(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			ErrNotFound("artifact not found").WriteJSON(w)
+			ErrNotFound("artifact not found").WriteJSON(w, r)
 			return
 		}
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 
 	data, err := h.objStore.Get(r.Context(), a.ObjectStoreKey)
 	if err != nil {
-		ErrInternal(fmt.Errorf("fetching artifact bytes: %w", err)).WriteJSON(w)
+		ErrInternal(fmt.Errorf("fetching artifact bytes: %w", err)).WriteJSON(w, r)
 		return
 	}
 
@@ -458,17 +458,17 @@ func (h *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteDocument(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		ErrBadRequest("missing document id").WriteJSON(w)
+		ErrBadRequest("missing document id").WriteJSON(w, r)
 		return
 	}
 
 	err := h.store.DeleteDocument(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			ErrNotFound("document not found").WriteJSON(w)
+			ErrNotFound("document not found").WriteJSON(w, r)
 			return
 		}
-		ErrInternal(err).WriteJSON(w)
+		ErrInternal(err).WriteJSON(w, r)
 		return
 	}
 

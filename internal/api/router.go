@@ -13,6 +13,7 @@ import (
 // NewRouter creates a new Chi router with middleware and routes.
 // The API follows OpenAI conventions where applicable.
 func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
+	SetLogger(logger)
 	r := chi.NewRouter()
 
 	// Middleware stack

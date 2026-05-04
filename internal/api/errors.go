@@ -4,7 +4,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/rs/zerolog"
 )
+
+// logger is the package-level logger used by AppError.WriteJSON to surface
+// server-side error causes (the wrapped Err that's stripped from the client
+// response). Defaults to a no-op so tests that don't care about logs work
+// without setup; main wires the real logger via SetLogger.
+var logger = zerolog.Nop()
+
+// SetLogger configures the package-level logger. Call once during server setup.
+func SetLogger(l zerolog.Logger) {
+	logger = l
+}
 
 // AppError represents an application error with an HTTP status code.
 type AppError struct {
@@ -26,8 +40,19 @@ func (e *AppError) Unwrap() error {
 	return e.Err
 }
 
-// WriteJSON writes the error as JSON to the response.
-func (e *AppError) WriteJSON(w http.ResponseWriter) {
+// WriteJSON writes the error as JSON to the response. For 5xx errors with a
+// wrapped cause, also emits a log line — Err is json:"-" so the client never
+// sees it, and without this hook the underlying failure would be invisible.
+func (e *AppError) WriteJSON(w http.ResponseWriter, r *http.Request) {
+	if e.Code >= 500 && e.Err != nil {
+		logger.Error().
+			Err(e.Err).
+			Int("status", e.Code).
+			Str("method", r.Method).
+			Str("path", r.URL.Path).
+			Str("request_id", middleware.GetReqID(r.Context())).
+			Msg("request error")
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Code)
 	json.NewEncoder(w).Encode(e)
