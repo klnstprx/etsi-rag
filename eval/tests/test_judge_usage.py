@@ -6,99 +6,84 @@ import json
 
 import httpx
 import pytest
+from openai import OpenAI
 
-from etsi_eval.config import JudgePricing
+from etsi_eval.config import BackendConfig, JudgePricing
 from etsi_eval.db import ReferenceDocument
-from etsi_eval.judge import Usage, _parse_usage, grade
+from etsi_eval.judge import Usage, grade
 from etsi_eval.report import Row, aggregate
 
 
-_OK_VERDICT = json.dumps(
-    {
-        "faithfulness": {"score": 90, "rationale": "ok"},
-        "correctness": {"score": 85, "rationale": "ok"},
-        "completeness": {"score": 80, "rationale": "ok"},
+_GOOD_CONTENT = {
+    "faithfulness": {"score": 90, "rationale": "ok"},
+    "correctness": {"score": 85, "rationale": "ok"},
+    "completeness": {"score": 80, "rationale": "ok"},
+}
+
+
+def _completion_body(content: dict, *, usage: dict | None) -> dict:
+    body = {
+        "id": "cmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "judge",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": json.dumps(content)},
+            }
+        ],
     }
-)
+    if usage is not None:
+        body["usage"] = usage
+    return body
 
 
-def _ok_body(prompt: int, completion: int) -> dict:
-    return {
-        "choices": [{"message": {"role": "assistant", "content": _OK_VERDICT}}],
-        "usage": {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": prompt + completion,
-        },
-    }
-
-
-# ---- _parse_usage --------------------------------------------------------
-
-
-def test_parse_usage_happy_path():
-    body = _ok_body(123, 45)
-    u = _parse_usage(body)
-    assert u == Usage(prompt_tokens=123, completion_tokens=45, total_tokens=168)
-
-
-def test_parse_usage_missing_block_returns_zeros():
-    """Some proxies strip the usage block — never crash, just zero-fill."""
-    u = _parse_usage({"choices": []})
-    assert u == Usage()
-
-
-def test_parse_usage_handles_string_numbers():
-    """Some non-conformant proxies wrap numeric fields as strings."""
-    body = {"usage": {"prompt_tokens": "10", "completion_tokens": "5", "total_tokens": "15"}}
-    u = _parse_usage(body)
-    assert u.prompt_tokens == 10
-    assert u.total_tokens == 15
-
-
-def test_parse_usage_handles_garbage_gracefully():
-    body = {"usage": {"prompt_tokens": "not-a-number"}}
-    u = _parse_usage(body)
-    assert u == Usage()
-
-
-# ---- end-to-end via grade() ---------------------------------------------
+def _make_client(handler) -> OpenAI:
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    return OpenAI(base_url="http://judge/v1", api_key="dummy", http_client=http)
 
 
 def test_grade_returns_usage_from_response():
-    transport = httpx.MockTransport(lambda _r: httpx.Response(200, json=_ok_body(200, 30)))
-    from etsi_eval.config import BackendConfig
+    body = _completion_body(
+        _GOOD_CONTENT,
+        usage={"prompt_tokens": 200, "completion_tokens": 30, "total_tokens": 230},
+    )
 
-    backend = BackendConfig(name="b", base_url="http://x", api_key="")
-    with httpx.Client(transport=transport) as client:
-        v = grade(
-            backend,
-            "judge-model",
-            "q",
-            "a",
-            [ReferenceDocument(url="u", title="t", content="c")],
-            client=client,
-        )
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    backend = BackendConfig(name="b", base_url="http://judge/v1", api_key="")
+    v = grade(
+        backend,
+        "judge-model",
+        "q",
+        "a",
+        [ReferenceDocument(url="u", title="t", content="c")],
+        client=_make_client(handler),
+    )
     assert v.usage.prompt_tokens == 200
     assert v.usage.completion_tokens == 30
     assert v.usage.total_tokens == 230
 
 
 def test_grade_works_when_usage_missing():
-    body = {"choices": [{"message": {"role": "assistant", "content": _OK_VERDICT}}]}
-    transport = httpx.MockTransport(lambda _r: httpx.Response(200, json=body))
-    from etsi_eval.config import BackendConfig
+    """Some proxies strip the usage block — never crash, just zero-fill."""
+    body = _completion_body(_GOOD_CONTENT, usage=None)
 
-    backend = BackendConfig(name="b", base_url="http://x", api_key="")
-    with httpx.Client(transport=transport) as client:
-        v = grade(
-            backend,
-            "judge-model",
-            "q",
-            "a",
-            [ReferenceDocument(url="u", title="t", content="c")],
-            client=client,
-        )
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    backend = BackendConfig(name="b", base_url="http://judge/v1", api_key="")
+    v = grade(
+        backend,
+        "judge-model",
+        "q",
+        "a",
+        [ReferenceDocument(url="u", title="t", content="c")],
+        client=_make_client(handler),
+    )
     assert v.usage == Usage()
     assert v.faithfulness.score == 90  # parsing still works
 

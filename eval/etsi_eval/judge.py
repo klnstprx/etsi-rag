@@ -10,30 +10,23 @@ The judge evaluates each answer on three independent sub-dimensions:
 `overall = min(faithfulness, correctness, completeness)`. Using min rather than
 mean is the policy: an unfaithful answer is worthless even if complete; the
 weakest dimension caps quality.
+
+The shape is enforced server-side via `response_format=json_schema` (OpenAI
+structured outputs) and re-validated client-side by Pydantic. There is no
+free-text JSON parsing fallback: malformed output from the model is
+unreachable when both ends honor the schema.
 """
 
 from __future__ import annotations
 
-import json
-import random
-import re
-import time
 from dataclasses import dataclass
 
-import httpx
+from openai import OpenAI, OpenAIError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from .config import BackendConfig
 from .db import ReferenceDocument
 
-_RESPONSE_SHAPE = """\
-Respond with ONE JSON object and nothing else, in this exact shape:
-
-{
-  "faithfulness":  {"score": <int 0-100>, "rationale": "<one short sentence>"},
-  "correctness":   {"score": <int 0-100>, "rationale": "<one short sentence>"},
-  "completeness":  {"score": <int 0-100>, "rationale": "<one short sentence>"}
-}
-"""
 
 JUDGE_SYSTEM_ANSWER = """You are an expert evaluator for a Spanish-language \
 university question-answering system (Universidad de Málaga, ETSI Informática). \
@@ -61,9 +54,7 @@ Dimensions:
 
 If the reference document does not actually contain the information needed,
 score what you can and note it in the rationale. Refusals or empty outputs
-should score low on completeness.
-
-""" + _RESPONSE_SHAPE
+should score low on completeness."""
 
 JUDGE_SYSTEM_REFUSE = """You are an expert evaluator for a Spanish-language \
 university question-answering system (Universidad de Málaga, ETSI Informática). \
@@ -93,9 +84,10 @@ Dimensions (refusal-mode rubric):
 - "completeness": Did the system clearly communicate the limitation to the user?
   100 = the user can tell from the answer that the system doesn't know.
   0   = empty, vague hedging, or generic non-answer that leaves the user
-        unsure whether the system knows or not.
+        unsure whether the system knows or not."""
 
-""" + _RESPONSE_SHAPE
+
+# ---- result types --------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -108,9 +100,8 @@ class DimScore:
 class Usage:
     """Token counts reported by the judge backend on a single call.
 
-    Mirrors the OpenAI-compatible `usage` block. Backends that don't return
-    usage (rare, but possible if the model is wrapped behind a proxy that
-    strips it) leave all fields at zero.
+    Mirrors the OpenAI `usage` block. Backends that don't return usage (rare,
+    but possible behind a proxy that strips it) leave all fields at zero.
     """
 
     prompt_tokens: int = 0
@@ -123,7 +114,7 @@ class Verdict:
     faithfulness: DimScore
     correctness: DimScore
     completeness: DimScore
-    raw: str  # full judge response for debugging malformed JSON
+    raw: str  # full judge response for debugging
     usage: Usage = Usage()
 
     @property
@@ -138,6 +129,30 @@ class Verdict:
 
 class JudgeError(RuntimeError):
     pass
+
+
+# ---- structured-output schema --------------------------------------------
+
+
+class _DimScoreModel(BaseModel):
+    score: int
+    rationale: str
+
+    @field_validator("score")
+    @classmethod
+    def _score_range(cls, v: int) -> int:
+        if not 0 <= v <= 100:
+            raise ValueError(f"score must be 0-100, got {v}")
+        return v
+
+
+class _VerdictModel(BaseModel):
+    faithfulness: _DimScoreModel
+    correctness: _DimScoreModel
+    completeness: _DimScoreModel
+
+
+# ---- helpers -------------------------------------------------------------
 
 
 def _build_user_message(
@@ -170,122 +185,37 @@ def _build_user_message(
     )
 
 
-_JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
-
-# Some models (observed with gemma4-e4b) emit Python-style escapes like \' inside
-# JSON strings. \' is never a valid JSON escape, so rewriting it to a bare quote
-# is safe and can't corrupt well-formed output.
-_INVALID_ESCAPES = {
-    r"\'": "'",
-}
-
-_DIMENSIONS = ("faithfulness", "correctness", "completeness")
-
-
-def _sanitize_json(text: str) -> str:
-    for bad, good in _INVALID_ESCAPES.items():
-        text = text.replace(bad, good)
-    return text
+def _usage_from(completion) -> Usage:
+    u = getattr(completion, "usage", None)
+    if u is None:
+        return Usage()
+    return Usage(
+        prompt_tokens=int(getattr(u, "prompt_tokens", 0) or 0),
+        completion_tokens=int(getattr(u, "completion_tokens", 0) or 0),
+        total_tokens=int(getattr(u, "total_tokens", 0) or 0),
+    )
 
 
-def _parse_dim(name: str, obj: dict) -> DimScore:
-    sub = obj.get(name)
-    if not isinstance(sub, dict):
-        raise JudgeError(f"missing or malformed dimension {name!r}: {obj!r}")
-    score = sub.get("score")
-    if not isinstance(score, int) or not 0 <= score <= 100:
-        raise JudgeError(
-            f"dimension {name!r} score out of range or wrong type: {sub!r}"
-        )
-    rationale = str(sub.get("rationale", "")).strip()
-    return DimScore(score=score, rationale=rationale)
-
-
-def _parse_verdict(raw: str, usage: Usage = Usage()) -> Verdict:
-    """Extract three-dim verdict even when the model wraps it in prose or fences."""
-    text = raw.strip()
-    # Strip ``` fences if present
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:].lstrip()
-    m = _JSON_BLOCK.search(text)
-    if not m:
-        raise JudgeError(f"no JSON object in judge output: {raw!r}")
-    candidate = _sanitize_json(m.group(0))
-    try:
-        obj = json.loads(candidate)
-    except json.JSONDecodeError as e:
-        raise JudgeError(f"invalid JSON in judge output: {e}; raw={raw!r}") from e
-
-    dims = {name: _parse_dim(name, obj) for name in _DIMENSIONS}
+def _to_verdict(parsed: _VerdictModel, raw: str, usage: Usage) -> Verdict:
     return Verdict(
-        faithfulness=dims["faithfulness"],
-        correctness=dims["correctness"],
-        completeness=dims["completeness"],
+        faithfulness=DimScore(
+            score=parsed.faithfulness.score,
+            rationale=parsed.faithfulness.rationale.strip(),
+        ),
+        correctness=DimScore(
+            score=parsed.correctness.score,
+            rationale=parsed.correctness.rationale.strip(),
+        ),
+        completeness=DimScore(
+            score=parsed.completeness.score,
+            rationale=parsed.completeness.rationale.strip(),
+        ),
         raw=raw,
         usage=usage,
     )
 
 
-def _parse_usage(body: dict) -> Usage:
-    """Extract OpenAI-compatible token usage from a chat-completion body.
-
-    Missing/unknown shape → zeros. The aggregate is robust to that: a few
-    rows missing usage just under-report the total, never crash."""
-    u = body.get("usage") or {}
-    try:
-        return Usage(
-            prompt_tokens=int(u.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(u.get("completion_tokens", 0) or 0),
-            total_tokens=int(u.get("total_tokens", 0) or 0),
-        )
-    except (TypeError, ValueError):
-        return Usage()
-
-
-_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 4.0, 8.0)
-
-
-def _is_retriable(exc: Exception) -> bool:
-    """Transient failures that may resolve on retry: timeouts, connection
-    blips, 429 rate-limit, and 5xx server errors. 4xx other than 429 are
-    permanent (auth, malformed request) and re-raise immediately.
-    """
-    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        return status == 429 or 500 <= status < 600
-    return False
-
-
-def _post_with_retry(
-    client: httpx.Client,
-    url: str,
-    *,
-    json_body: dict,
-    headers: dict[str, str],
-    backoff: tuple[float, ...] | None = None,
-    sleep: callable = time.sleep,
-) -> httpx.Response:
-    if backoff is None:
-        backoff = _RETRY_BACKOFF_SECONDS
-    last_exc: Exception | None = None
-    attempts = len(backoff) + 1
-    for attempt in range(attempts):
-        try:
-            r = client.post(url, json=json_body, headers=headers)
-            r.raise_for_status()
-            return r
-        except Exception as e:  # noqa: BLE001 — _is_retriable narrows it
-            if not _is_retriable(e) or attempt == attempts - 1:
-                raise
-            last_exc = e
-            wait = backoff[attempt] * (0.5 + random.random())
-            sleep(wait)
-    # Unreachable: the loop either returns or raises.
-    raise RuntimeError("retry loop exited without return") from last_exc
+# ---- public API ----------------------------------------------------------
 
 
 def grade(
@@ -298,7 +228,7 @@ def grade(
     expected_behavior: str = "answer",
     timeout: float = 120.0,
     temperature: float = 0.0,
-    client: httpx.Client | None = None,
+    client: OpenAI | None = None,
 ) -> Verdict:
     if expected_behavior == "refuse":
         system_prompt = JUDGE_SYSTEM_REFUSE
@@ -307,32 +237,43 @@ def grade(
     else:
         raise ValueError(f"unknown expected_behavior: {expected_behavior!r}")
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _build_user_message(question, agent_answer, refs)},
-        ],
-        "temperature": temperature,
-        "stream": False,
-    }
-    headers = {"Content-Type": "application/json"}
-    if backend.api_key:
-        headers["Authorization"] = f"Bearer {backend.api_key}"
-
-    url = f"{backend.base_url}/chat/completions"
     owns_client = client is None
     if owns_client:
-        client = httpx.Client(timeout=timeout)
+        # Some local backends (llama-server) accept any non-empty key.
+        client = OpenAI(
+            base_url=backend.base_url,
+            api_key=backend.api_key or "sk-no-key-required",
+            timeout=timeout,
+        )
     try:
-        r = _post_with_retry(client, url, json_body=payload, headers=headers)
-        body = r.json()
+        try:
+            completion = client.chat.completions.parse(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": _build_user_message(question, agent_answer, refs),
+                    },
+                ],
+                temperature=temperature,
+                response_format=_VerdictModel,
+            )
+        except ValidationError as e:
+            # Server returned JSON that didn't match the schema (e.g. score
+            # out of range). Surface as JudgeError so the runner records it
+            # like any other judge failure rather than crashing the run.
+            raise JudgeError(f"judge response failed schema validation: {e}") from e
+        except OpenAIError as e:
+            raise JudgeError(f"judge call failed: {e}") from e
     finally:
         if owns_client:
             client.close()
 
-    choices = body.get("choices") or []
-    if not choices:
-        raise JudgeError(f"judge returned no choices: {body}")
-    content = choices[0].get("message", {}).get("content", "") or ""
-    return _parse_verdict(content, usage=_parse_usage(body))
+    msg = completion.choices[0].message
+    if getattr(msg, "refusal", None):
+        raise JudgeError(f"judge refused to grade: {msg.refusal}")
+    if msg.parsed is None:
+        raise JudgeError(f"judge returned no parsed content: raw={msg.content!r}")
+
+    return _to_verdict(msg.parsed, msg.content or "", _usage_from(completion))

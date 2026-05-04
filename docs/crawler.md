@@ -108,6 +108,17 @@ Rejected pages increment the `Skipped` progress counter and are logged at debug 
 2. **After crawl**: unvisited pages marked `status='stale'`
 3. **Admin purge**: remove stale docs from RAG index via admin UI
 
+## Reprocess
+
+`POST /admin/crawler/reprocess` re-runs the parse and embed stages over every `crawl_pages` row in `fetched` status, replaying the bytes archived in RustFS — no network fetch. Use it when chunking, parsing, or embedding code/config changes but the crawled HTML/PDF is still fresh.
+
+Reprocess sets the embed stage's `force` flag, which changes two things vs. a regular crawl:
+
+- The "content hash unchanged" early-out is skipped, so identical bytes still flow through chunking and embedding.
+- When the content-addressed `doc_id` already exists in `documents`, the stale row is dropped via `DeleteDocument` (chunks and embeddings cascade) and the document is re-ingested with the current embedder/chunker. Without this delete, `pipeline.Ingest` would hit the `documents.id` PK and reprocess would silently skip everything.
+
+This is the supported path after switching embedding model or dimension: save the new model/dimension in the admin config editor, then click **Reprocess**. The admin UI shows a warning toast on the embedding-section save when either field changed.
+
 ## Per-Page Language Detection
 
 Document language is determined per page, not per source:

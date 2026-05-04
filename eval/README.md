@@ -9,8 +9,8 @@ For each question in `dataset.jsonl`:
 1. Look up the reference document(s) in `data/etsi-rag.db` by each entry in `golden_urls` (read-only). URLs are canonicalised on both sides (see "URL canonicalisation" below) so cosmetic differences don't cause silent misses. Skipped for `expected_behavior == "refuse"` rows.
 2. Probe the retrieval layer via `POST /v1/rag/query` to compute Recall@k / MRR against `golden_urls` (URL-level, k = 5 and 10). Skipped for refuse rows where the metric is undefined.
 3. Ask the agent via `POST /v1/chat/completions` — single user turn. Each row gets a unique `X-Session-ID` of the form `eval-<run_id>-<question_id>` so chat history never bleeds between questions even when the server is in session mode.
-4. Feed `(question, agent answer, reference docs, expected_behavior)` to the **judge LLM** (configured separately in `[eval]` — see "Configuring the judge" below; called directly at its `/chat/completions` endpoint so the judge never goes through the agent's tool loop). Transient failures (429 rate-limits, 5xx, timeouts) are retried with exponential backoff; 4xx auth/request errors fail fast.
-5. The judge returns three independent sub-scores (see "Rubric" below). For refuse rows, the rubric scores how well the model declined to answer.
+4. Feed `(question, agent answer, reference docs, expected_behavior)` to the **judge LLM** (configured separately in `[eval]` — see "Configuring the judge" below; called via the OpenAI Python SDK so the judge never goes through the agent's tool loop). Transient failures are handled by the SDK's built-in retry layer.
+5. The judge returns three independent sub-scores (see "Rubric" below) constrained by an OpenAI structured-output JSON schema, so the response is always parseable. For refuse rows, the rubric scores how well the model declined to answer.
 6. Results are aggregated per dimension, retrieval metric, category, and difficulty and written to `results/TIMESTAMP.json` (schema_version 2).
 
 ## Rubric
@@ -48,7 +48,7 @@ Run with `--validate-urls` to fail fast before any agent calls if a `golden_urls
 
 ## Configuring the judge
 
-A `[eval]` section is **required** in `config/config.toml`. The judge_backend must reference an enabled `[[backends]]` entry. The eval tool will refuse to start if the section is missing or malformed.
+A `[eval]` section is **required** in `config/config.toml`. The judge_backend must reference an enabled `[[backends]]` entry. The eval tool will refuse to start if the section is missing or malformed. The backend must be OpenAI-compatible — the judge is invoked via the OpenAI Python SDK with `response_format=json_schema` so the verdict shape is enforced at decode time. llama-server, Anthropic's OpenAI-compat endpoint, and OpenAI itself all qualify.
 
 ```toml
 [[backends]]
