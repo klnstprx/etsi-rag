@@ -41,7 +41,7 @@ type Pipeline struct {
 	embedder llm.Embedder
 	chunker  chunking.Chunker
 	counter  tokencount.Counter
-	config   config.RAGConfig
+	config   config.RetrievalConfig
 }
 
 // SetEmbedder swaps the embedding client (thread-safe).
@@ -66,7 +66,7 @@ func (p *Pipeline) SetCounter(c tokencount.Counter) {
 }
 
 // SetConfig swaps the RAG config (thread-safe).
-func (p *Pipeline) SetConfig(cfg config.RAGConfig) {
+func (p *Pipeline) SetConfig(cfg config.RetrievalConfig) {
 	p.mu.Lock()
 	p.config = cfg
 	p.mu.Unlock()
@@ -90,7 +90,7 @@ func (p *Pipeline) getCounter() tokencount.Counter {
 	return p.counter
 }
 
-func (p *Pipeline) getConfig() config.RAGConfig {
+func (p *Pipeline) getConfig() config.RetrievalConfig {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.config
@@ -99,7 +99,7 @@ func (p *Pipeline) getConfig() config.RAGConfig {
 // NewPipeline creates a new RAG pipeline.
 // Counter may be nil at startup (misconfigured backend); operations requiring
 // token counting will return errors until a valid counter is set via SetCounter.
-func NewPipeline(s *store.SQLiteStore, embedder llm.Embedder, ch chunking.Chunker, counter tokencount.Counter, cfg config.RAGConfig) *Pipeline {
+func NewPipeline(s *store.SQLiteStore, embedder llm.Embedder, ch chunking.Chunker, counter tokencount.Counter, cfg config.RetrievalConfig) *Pipeline {
 	return &Pipeline{
 		store:    s,
 		embedder: embedder,
@@ -123,6 +123,10 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 }
 
 // Retrieve finds relevant chunks for a query.
+//
+// In "dense" mode, scores chunks by cosine similarity over query embeddings
+// (the long-standing default). In "hybrid" mode, combines dense and BM25
+// keyword retrieval via reciprocal-rank fusion (see rrf.go and ADR-008).
 func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*RetrievalResult, error) {
 	embedder := p.getEmbedder()
 	if embedder == nil {
@@ -130,23 +134,53 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 	}
 	cfg := p.getConfig()
 
-	embedding, err := embedder.Embed(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("embedding query: %w", err)
-	}
-
 	k := cfg.TopK
 	if topK != nil {
 		k = *topK
 	}
 
-	results, err := p.store.SearchSimilar(ctx, embedding, k)
-	if err != nil {
-		return nil, fmt.Errorf("searching: %w", err)
-	}
+	switch cfg.RetrievalMode {
+	case "", "dense":
+		embedding, err := embedder.Embed(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("embedding query: %w", err)
+		}
+		results, err := p.store.SearchSimilar(ctx, embedding, k)
+		if err != nil {
+			return nil, fmt.Errorf("searching: %w", err)
+		}
+		return buildRetrievalResult(results), nil
 
-	// Build result
-	var chunks []ScoredChunk
+	case "hybrid":
+		// Each leg gets a wider net; RRF picks the top-k of the union.
+		// max(k*3, 30) is a defensible floor — the eval-D1 finding showed
+		// most missed gold chunks rank at positions 7–12 in dense, so a
+		// 30-deep candidate pool comfortably covers them.
+		kEach := max(k*3, 30)
+		embedding, err := embedder.Embed(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("embedding query: %w", err)
+		}
+		dense, err := p.store.SearchSimilar(ctx, embedding, kEach)
+		if err != nil {
+			return nil, fmt.Errorf("dense search: %w", err)
+		}
+		sparse, err := p.store.SearchKeyword(ctx, query, kEach)
+		if err != nil {
+			return nil, fmt.Errorf("keyword search: %w", err)
+		}
+		merged := FuseRRF(dense, sparse, k, 60.0)
+		return buildRetrievalResult(merged), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported retrieval_mode: %q", cfg.RetrievalMode)
+	}
+}
+
+// buildRetrievalResult collapses a list of SearchResults into a
+// RetrievalResult, deduping documents while preserving chunk order.
+func buildRetrievalResult(results []store.SearchResult) *RetrievalResult {
+	chunks := make([]ScoredChunk, 0, len(results))
 	seen := map[string]bool{}
 	var docs []domain.Document
 
@@ -160,8 +194,7 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 			docs = append(docs, r.Document)
 		}
 	}
-
-	return &RetrievalResult{Chunks: chunks, Documents: docs}, nil
+	return &RetrievalResult{Chunks: chunks, Documents: docs}
 }
 
 // BuildContext constructs the context string from retrieval results.

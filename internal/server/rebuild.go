@@ -12,8 +12,8 @@ func (s *Server) rebuildClients() {
 	s.logger.Info().Msg("rebuilding clients after config change")
 
 	// Propagate non-LLM config changes
-	s.pipeline.SetConfig(s.cfg.RAG)
-	s.apiHandler.SetPassthrough(s.cfg.API.Passthrough)
+	s.pipeline.SetConfig(s.cfg.Retrieval)
+	s.apiHandler.SetPassthrough(s.cfg.Agent.Passthrough)
 	if s.crawler != nil {
 		s.crawler.SetConfig(s.cfg.Crawler)
 	}

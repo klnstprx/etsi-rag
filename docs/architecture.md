@@ -66,14 +66,19 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 ```
 User query
     |
-    v
-[Embed query] --> [Vector search (cosine similarity)] --> [Top-K chunks]
+    +-- [retrieval_mode = "dense"]   --> [Embed] --> [Cosine top-K]
+    |
+    +-- [retrieval_mode = "hybrid"]  --> [Embed] --> [Cosine top-K_each]  -+
+    |                                                                     |
+    |                                       [BM25 top-K_each] (FTS5) -----+--> [RRF merge] --> [Top-K]
     |
     v
 [Build context] --> [Formatted chunk text with token budget]
 ```
 
 The pipeline is a pure retrieval service — it takes an `embedder` only. Chat generation is handled by the agent, which calls `semantic_search` as a tool.
+
+`retrieval_mode` is selected via `[retrieval]` in `config.toml`. Default is `"dense"`. `"hybrid"` adds a BM25 leg over an SQLite FTS5 index of `chunks.content` and merges with cosine via reciprocal-rank fusion (`k=60`). For formulas, parameter choices, and citations see [retrieval.md](retrieval.md); for the decision rationale and eval results see [ADR-008](decisions/008-hybrid-retrieval.md). The agent's `semantic_search` tool sees the same `Retrieve` contract regardless of mode.
 
 ### Crawl Pipeline
 

@@ -142,7 +142,7 @@ func (s *Server) probeLlamaCppBackends() {
 func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 	searchTool := agent.NewSemanticSearchTool(s.pipeline)
 	searchTool.SetStore(s.store)
-	searchTool.SetMaxImages(s.cfg.Agent.MaxImagesPerCall)
+	searchTool.SetMaxImages(s.cfg.Agent.Vision.MaxImagesPerCall)
 	tools := []agent.Tool{searchTool}
 
 	systemPrompt := s.agentSystemPrompt()
@@ -162,7 +162,7 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 		if b == nil || !b.SupportsVision {
 			return false, ""
 		}
-		return true, s.cfg.Agent.PublicBaseURL
+		return true, s.cfg.Agent.Vision.PublicBaseURL
 	})
 	return a
 }

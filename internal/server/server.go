@@ -118,7 +118,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
 
 	// Initialize RAG pipeline (may have nil embedder — guarded in pipeline methods)
-	s.pipeline = rag.NewPipeline(sqliteStore, embeddingClient, chunker, embeddingCounter, cfg.RAG)
+	s.pipeline = rag.NewPipeline(sqliteStore, embeddingClient, chunker, embeddingCounter, cfg.Retrieval)
 
 	// Initialize object store (graceful: nil on failure)
 	objStore, err := objectstore.New(cfg.ObjectStore)
@@ -158,7 +158,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 			agentInstance = s.buildAgent(agentClient)
 			logger.Info().Str("backend", cfg.Agent.Backend).
 				Bool("supports_vision", s.cfg.GetBackend(cfg.Agent.Backend) != nil && s.cfg.GetBackend(cfg.Agent.Backend).SupportsVision).
-				Str("public_base_url", cfg.Agent.PublicBaseURL).
+				Str("public_base_url", cfg.Agent.Vision.PublicBaseURL).
 				Msg("agent initialized")
 		}
 	} else {
@@ -174,7 +174,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Store:           sqliteStore,
 		SessionStore:    s.sessionStore,
 		ObjStore:        objStore,
-		Passthrough:     cfg.API.Passthrough,
+		Passthrough:     cfg.Agent.Passthrough,
 	})
 	router := api.NewRouter(s.apiHandler, logger)
 

@@ -1,15 +1,29 @@
+# ============================================================
+# Infrastructure
+# ============================================================
+
 [server]
 host = '127.0.0.1'
 port = 3000
-read_timeout = 15
-write_timeout = 120
-idle_timeout = 60000000000       # 60s keep-alive idle
-shutdown_timeout = 30000000000   # 30s graceful shutdown grace
+read_timeout = 15                # seconds
+write_timeout = 120              # seconds
+idle_timeout = '60s'             # keep-alive idle
+shutdown_timeout = '30s'         # graceful shutdown grace
 
 [admin]
-backend_probe_timeout = 3000000000    # 3s
-backend_models_timeout = 5000000000   # 5s
-chat_stream_timeout = 300000000000    # 5min — orphaned-goroutine safety net
+backend_probe_timeout = '3s'     # per-request timeout for backend health checks
+backend_models_timeout = '5s'    # per-request timeout for /models listing
+chat_stream_timeout = '5m'       # max lifetime of a chat-stream goroutine (orphaned-goroutine safety net)
+
+[database]
+path = 'data/etsi-rag.db'
+
+[object_store]
+endpoint = 'http://localhost:9000'
+bucket = 'etsi-rag'
+access_key = 'minioadmin'
+secret_key = 'minioadmin'
+region = 'us-east-1'
 
 [[backends]]
 name = 'local-llama'
@@ -18,6 +32,16 @@ api_key = ''
 enabled = true
 is_llama_cpp = true
 
+# ============================================================
+# Pipeline (chunk → embed → retrieve → answer)
+# ============================================================
+
+[chunking]
+max_chunk_size = 256
+chunk_overlap = 32
+min_chunk_size = 64
+separators = ["\n\n", "\n", '. ', ' ', '']
+
 [embedding]
 backend = 'local-llama'
 model = 'Qwen3-Embedding-4B-Q8_0.gguf'
@@ -25,39 +49,41 @@ dimension = 2560
 max_tokens = 512
 batch_size = 2
 
+[retrieval]
+top_k = 10
+max_context_tokens = 2048
+# "dense"  — cosine similarity over query embedding (default).
+# "hybrid" — dense + BM25 merged via reciprocal-rank fusion. See ADR-008.
+retrieval_mode = 'dense'
+
 [agent]
 backend = 'local-llama'
 model = 'Qwen3-Embedding-8B-Q8_0.gguf'
 max_tokens = 1024
 temperature = 0.7
-context_window = 0
+context_window = 0                # 0 = auto-detect (llama.cpp /props)
 max_iterations = 5
-system_prompt = ''
-tool_output_max_tokens = 0  # 0 = auto (context_window / 4, floor 256)
+tool_output_max_tokens = 0        # 0 = auto (context_window / 4, floor 256)
+passthrough = false               # true = accept client messages directly, no session management
+system_prompt = ''                # empty = use prompts/agent.md
 
-[database]
-path = 'data/etsi-rag.db'
-
-[rag]
-top_k = 10
-max_context_tokens = 2048
-
-[api]
-passthrough = false
-
-[chunking]
-max_chunk_size = 256
-chunk_overlap = 32
-separators = ["\n\n", "\n", '. ', ' ', '']
+[agent.vision]
+max_images_per_call = 6           # cap on image artifacts attached per tool call
+max_image_bytes_per_call = 65536  # cap on image_url byte length per tool call
+public_base_url = ''              # absolute URL prefix for /v1/artifacts/{token}.png; empty disables image attachment
 
 [session]
 max_messages = 10
 ttl_seconds = 3600
 
+# ============================================================
+# Ingest (crawler)
+# ============================================================
+
 [crawler]
-request_delay = 500000000
-request_timeout = 30000000000
-progress_log_interval = 30000000000  # 30s — how often to log crawl progress
+request_delay = '500ms'
+request_timeout = '30s'
+progress_log_interval = '30s'
 max_depth = 10
 max_pages = 5000
 concurrency = 4
@@ -87,15 +113,11 @@ heading_patterns = [
     'RESULTADOS DE APRENDIZAJE', 'EQUIPO DOCENTE',
     'RECOMENDACIONES', 'DISTRIBUCION DEL TRABAJO',
 ]
+render_dpi = 120
 
-[object_store]
-endpoint = 'http://localhost:9000'
-bucket = 'etsi-rag'
-access_key = 'minioadmin'
-secret_key = 'minioadmin'
-region = 'us-east-1'
-
-# [eval] is consumed by the eval/ harness only; the Go server ignores it.
+# ============================================================
+# Eval harness (consumed by eval/ only; the Go server ignores)
+# ============================================================
 # Required when running the eval tool. judge_backend must reference an enabled
 # [[backends]] entry. Pick a different backend from [agent] to avoid
 # self-preference bias.

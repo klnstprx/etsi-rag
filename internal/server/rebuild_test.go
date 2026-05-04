@@ -103,8 +103,8 @@ func TestRebuildClients_RemoveBackend(t *testing.T) {
 
 func TestRebuildClients_PropagatesNonLLMConfig(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.RAG.TopK = 5
-	cfg.API.Passthrough = false
+	cfg.Retrieval.TopK = 5
+	cfg.Agent.Passthrough = false
 
 	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
 	srv, err := New(cfg, t.TempDir()+"/config.toml", logger)
@@ -114,8 +114,8 @@ func TestRebuildClients_PropagatesNonLLMConfig(t *testing.T) {
 	t.Cleanup(func() { srv.store.Close(); srv.sessionStore.Close() })
 
 	// Change non-LLM config
-	cfg.RAG.TopK = 20
-	cfg.API.Passthrough = true
+	cfg.Retrieval.TopK = 20
+	cfg.Agent.Passthrough = true
 
 	// Should not panic and should propagate changes
 	srv.rebuildClients()
@@ -137,8 +137,8 @@ func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
 	cfg.Agent.MaxTokens = 1024
 	cfg.Agent.Temperature = 0.7
 	cfg.Agent.MaxIterations = 5
-	cfg.Agent.MaxImagesPerCall = 4
-	cfg.Agent.PublicBaseURL = "http://localhost:3000"
+	cfg.Agent.Vision.MaxImagesPerCall = 4
+	cfg.Agent.Vision.PublicBaseURL = "http://localhost:3000"
 
 	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
 	srv, err := New(cfg, t.TempDir()+"/config.toml", logger)

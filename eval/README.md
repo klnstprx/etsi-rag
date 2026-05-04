@@ -94,8 +94,9 @@ If a backend strips the `usage` block (rare, but happens behind some proxies), t
 
 | File | Config | Overall | Notes |
 |---|---|---|---|
-| `baseline_topk10_ctx4092.json` | `[rag] top_k=10, max_context_tokens=4092` | **76.1** | Reference baseline (2026-05-04). |
-| `regression_topk20_ctx8192.json` | `top_k=20, max_context_tokens=8192` | 45.5 | Negative control: wider context regresses gemma4-e4b by 31 points. See `docs/decisions/007-rag-context-budget.md`. |
+| `baseline_topk10_ctx4092.json` | `[retrieval] top_k=10, max_context_tokens=4092, retrieval_mode="dense"` | 76.1 | Reference baseline (2026-05-04). |
+| `regression_topk20_ctx8192.json` | `[retrieval] top_k=20, max_context_tokens=8192, retrieval_mode="dense"` | 45.5 | Negative control: wider context regresses gemma4-e4b by 31 points. See `docs/decisions/007-rag-context-budget.md`. |
+| `hybrid_topk10_ctx4092.json` | `[retrieval] top_k=10, max_context_tokens=4092, retrieval_mode="hybrid"` | **80.2** | BM25 + dense via RRF. +4.1 pts Overall, +12.8 on `general` category. See `docs/decisions/008-hybrid-retrieval.md`. |
 
 Per-run timestamped files (`YYYYMMDD_HHMMSS.json`) are working artifacts; rename to a descriptive name once a run is worth keeping.
 

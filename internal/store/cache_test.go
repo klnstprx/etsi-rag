@@ -284,13 +284,19 @@ func TestPurgeStaleDocuments_InvalidatesCache(t *testing.T) {
 // Uses a file-backed DB instead of :memory: because modernc.org/sqlite gives
 // each connection its own private database for `:memory:`, which would make
 // the writer's inserts invisible to the readers (a fixture problem unrelated
-// to concurrency). The cache mutex is still exercised across goroutines.
+// to concurrency).
+//
+// SetMaxOpenConns(1) serializes DB access so the test focuses on the cache
+// mutex (the actual unit under test), not on SQLite's own write-lock
+// behaviour. Production callers serialise CreateChunks per document anyway
+// (see rag.Pipeline.Ingest); this fixture matches that reality.
 func TestConcurrent_SearchAndCreateChunks(t *testing.T) {
 	dbPath := t.TempDir() + "/race.db"
 	db, err := OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("opening DB: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrating: %v", err)
@@ -338,9 +344,9 @@ func TestConcurrent_SearchAndCreateChunks(t *testing.T) {
 	}
 
 	const (
-		readers       = 8
-		opsPerReader  = 200
-		opsPerWriter  = 100
+		readers      = 8
+		opsPerReader = 200
+		opsPerWriter = 100
 	)
 	query := []float32{1.0, 0.0, 0.0, 0.0}
 

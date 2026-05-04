@@ -12,9 +12,22 @@ config/config.default.toml  ->  config/{RUN_MODE}.toml  ->  APP__* env vars
 
 Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` loads `config/test.toml`). Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__AGENT__TEMPERATURE=0.5`).
 
+## Sections at a glance
+
+Sections are grouped by role:
+
+| Role               | Sections                                                   |
+| ------------------ | ---------------------------------------------------------- |
+| **Infrastructure** | `[server]`, `[admin]`, `[database]`, `[object_store]`, `[[backends]]` |
+| **Pipeline**       | `[chunking]`, `[embedding]`, `[retrieval]`, `[agent]`, `[agent.vision]`, `[session]` |
+| **Ingest**         | `[crawler]`, `[crawler.pdf]`                               |
+| **Eval (Python)**  | `[eval]` — consumed by `eval/` only; the Go server ignores it |
+
 ## TOML Reference
 
 ```toml
+# ---------- Infrastructure ----------
+
 [server]
 host = '127.0.0.1'
 port = 3000
@@ -28,6 +41,16 @@ backend_probe_timeout = '3s'     # per-request timeout for backend health check
 backend_models_timeout = '5s'    # per-request timeout for backend /models listing
 chat_stream_timeout = '5m'       # max lifetime of an admin chat turn goroutine (orphaned-goroutine safety net)
 
+[database]
+path = 'data/etsi-rag.db'
+
+[object_store]
+endpoint = 'http://localhost:9000'
+bucket = 'etsi-rag'
+access_key = 'minioadmin'
+secret_key = 'minioadmin'
+region = 'us-east-1'
+
 [[backends]]
 name = 'local-llama'
 base_url = 'http://localhost:1337/v1'
@@ -37,12 +60,31 @@ is_llama_cpp = true           # enables llama.cpp /tokenize endpoint
 supports_vision = false       # set true when the configured model has an mmproj/vision adapter loaded;
                               # admin UI shows a hint when /props detects --mmproj on the model
 
+# ---------- Pipeline (chunk → embed → retrieve → answer) ----------
+
+[chunking]
+max_chunk_size = 256          # in tokens (not characters)
+chunk_overlap = 32            # in tokens
+min_chunk_size = 64           # minimum chunk size in tokens
+separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators for RecursiveTokenChunker
+
 [embedding]
 backend = 'local-llama'       # references backend by name
 model = 'embedding-model'
 dimension = 2560
 max_tokens = 512              # embedding context window
 batch_size = 2                # texts per embedding API call
+
+[retrieval]
+top_k = 10                   # number of chunks to retrieve
+max_context_tokens = 2048    # token budget for retrieved context
+                             # invariant: chunking.max_chunk_size must be <= max_context_tokens
+                             # (validated at load time; otherwise a single chunk can starve
+                             # the retrieval budget)
+retrieval_mode = "dense"     # "dense"  — cosine similarity over query embeddings (default).
+                             # "hybrid" — dense + BM25 keyword search merged via reciprocal-
+                             #            rank fusion. See docs/decisions/008-hybrid-retrieval.md.
+                             # Validated at load time; unknown values reject.
 
 [agent]
 backend = 'local-llama'
@@ -51,37 +93,23 @@ max_tokens = 1024             # output token limit
 temperature = 0.7
 context_window = 0            # total context window (auto-detected for llama.cpp, 0 = unknown)
 max_iterations = 5            # max tool-calling iterations per turn
+tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto (context_window/4, min 256)
+passthrough = false           # true = accept client messages directly, no session management
 system_prompt = ''            # custom system prompt text/template (empty = use embedded prompts/agent.tmpl)
                               # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
-tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto (context_window/4, min 256)
-max_images_per_call = 6       # cap on image artifacts attached per tool call (vision-capable backends only)
+
+[agent.vision]
+max_images_per_call = 6           # cap on image artifacts attached per tool call (vision-capable backends only)
 max_image_bytes_per_call = 65536  # cap on total image_url URL bytes attached per tool call
-public_base_url = ''          # absolute base URL prefixed onto /v1/artifacts/{token}.png so the LLM
-                              # backend can fetch image content blocks (e.g. 'http://localhost:8080');
-                              # empty disables image attachment regardless of backend.supports_vision
-
-[database]
-path = 'data/etsi-rag.db'
-
-[rag]
-top_k = 10                   # number of chunks to retrieve
-max_context_tokens = 2048    # token budget for retrieved context
-                             # invariant: chunking.max_chunk_size must be <= max_context_tokens
-                             # (validated at load time; otherwise a single chunk can starve
-                             # the retrieval budget)
-
-[api]
-passthrough = false           # true = accept client messages directly, no session management
-
-[chunking]
-max_chunk_size = 256          # in tokens (not characters)
-chunk_overlap = 32            # in tokens
-min_chunk_size = 64           # minimum chunk size in tokens
-separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators for RecursiveTokenChunker
+public_base_url = ''              # absolute base URL prefixed onto /v1/artifacts/{token}.png so the LLM
+                                  # backend can fetch image content blocks (e.g. 'http://localhost:8080');
+                                  # empty disables image attachment regardless of backend.supports_vision
 
 [session]
 max_messages = 10             # max messages per session
 ttl_seconds = 3600            # session expiry (1 hour)
+
+# ---------- Ingest ----------
 
 [crawler]
 request_delay = '500ms'
@@ -118,13 +146,7 @@ heading_patterns = [          # substring patterns for known PDF section headers
 ]
 render_dpi = 120              # pdftoppm -r DPI for PDF page-image renders; 0 disables image rendering
 
-[object_store]
-endpoint = 'http://localhost:9000'
-bucket = 'etsi-rag'
-access_key = 'minioadmin'
-secret_key = 'minioadmin'
-region = 'us-east-1'
-
+# ---------- Eval ----------
 # [eval] is consumed only by the eval/ harness (Python). The Go server ignores it.
 # The harness refuses to start if [eval] is missing or malformed.
 # judge_backend must reference an enabled [[backends]] entry; pick a different
@@ -158,3 +180,17 @@ judge_model   = 'claude-sonnet-4-6'
 ## Persistence
 
 `config.WriteTo()` serializes the current config back to TOML. Used by the admin UI's config editor to persist changes.
+
+## Legacy keys (post-restructure)
+
+The TOML layout was reorganized to group infrastructure / pipeline / ingest sections. `Load()` rejects pre-restructure keys with a rename hint instead of silently zero-defaulting them. If startup fails with `config uses legacy keys`, rename:
+
+| Old                                  | New                                    |
+| ------------------------------------ | -------------------------------------- |
+| `[rag] top_k`                        | `[retrieval] top_k`                    |
+| `[rag] max_context_tokens`           | `[retrieval] max_context_tokens`       |
+| `[rag] retrieval_mode`               | `[retrieval] retrieval_mode`           |
+| `[api] passthrough`                  | `[agent] passthrough`                  |
+| `[agent] public_base_url`            | `[agent.vision] public_base_url`       |
+| `[agent] max_images_per_call`        | `[agent.vision] max_images_per_call`   |
+| `[agent] max_image_bytes_per_call`   | `[agent.vision] max_image_bytes_per_call` |

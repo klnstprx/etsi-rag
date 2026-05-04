@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
 
 	"etsi-rag/internal/domain"
 )
@@ -223,6 +224,93 @@ func (s *SQLiteStore) fetchSearchResults(ctx context.Context, scored []cacheScor
 	})
 
 	return results, nil
+}
+
+// sanitizeFTS5Query turns user-supplied free text into a safe FTS5 MATCH
+// expression. Every non-alphanumeric Unicode rune is replaced with a space
+// (so tokens like "unique-token-xyz" split the same way the unicode61
+// tokenizer indexes chunk content), then the resulting tokens are joined
+// with " OR " for recall-friendly matching — BM25 handles ranking. This
+// also defuses any FTS5 operator characters (parens, quotes, *, :, ^, etc.)
+// that the user might pass intentionally or otherwise. Returns "" when
+// the cleaned input has no usable tokens; callers treat that as an empty
+// result rather than an error.
+func sanitizeFTS5Query(q string) string {
+	var b strings.Builder
+	b.Grow(len(q))
+	for _, r := range q {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune(' ')
+		}
+	}
+	tokens := strings.Fields(b.String())
+	return strings.Join(tokens, " OR ")
+}
+
+// SearchKeyword runs a BM25 query against the chunks_fts virtual table.
+// Returns the top-K results ordered by relevance (best first). The caller's
+// query is split on whitespace and joined with " OR " — recall-friendly,
+// BM25 handles ranking. Empty / whitespace-only input returns no results.
+//
+// Score on the returned results is the negated FTS5 bm25 value, so the
+// "higher is better" invariant matches SearchSimilar and the rest of the
+// codebase.
+//
+// FTS5's bm25() implements the BM25F generalisation; for a single-column
+// table this reduces to standard BM25 with k1=1.2 and b=0.75 (Robertson's
+// canonical defaults).
+//
+// Sources:
+//
+//	Robertson, S. E., et al. (1995). Okapi at TREC-3. NIST SP 500-225.
+//	Robertson, S., & Zaragoza, H. (2009). The probabilistic relevance
+//	framework: BM25 and beyond. Foundations and Trends in IR, 3(4),
+//	333–389. doi:10.1561/1500000019
+//	SQLite FTS5 bm25() docs: https://www.sqlite.org/fts5.html#the_bm25_function
+//
+// See docs/retrieval.md for the formula and project-specific parameters.
+func (s *SQLiteStore) SearchKeyword(ctx context.Context, query string, topK int) ([]SearchResult, error) {
+	if topK <= 0 {
+		return nil, nil
+	}
+	cleaned := sanitizeFTS5Query(query)
+	if cleaned == "" {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rowid, bm25(chunks_fts) AS score
+		FROM chunks_fts
+		WHERE chunks_fts MATCH ?
+		ORDER BY score
+		LIMIT ?
+	`, cleaned, topK)
+	if err != nil {
+		return nil, fmt.Errorf("bm25 search: %w", err)
+	}
+	defer rows.Close()
+
+	var scored []cacheScored
+	for rows.Next() {
+		var chunkID int64
+		var bm25Value float64
+		if err := rows.Scan(&chunkID, &bm25Value); err != nil {
+			return nil, fmt.Errorf("scanning bm25 row: %w", err)
+		}
+		// FTS5 bm25 returns lower = better. Negate so downstream code can
+		// keep the "higher is better" invariant uniformly across retrievers.
+		scored = append(scored, cacheScored{ChunkID: chunkID, Score: float32(-bm25Value)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating bm25 rows: %w", err)
+	}
+
+	if len(scored) == 0 {
+		return nil, nil
+	}
+	return s.fetchSearchResults(ctx, scored)
 }
 
 // searchSimilarSQL is the legacy full-scan path. Used when the cache hasn't

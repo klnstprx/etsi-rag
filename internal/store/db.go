@@ -115,6 +115,33 @@ func Migrate(db *sql.DB) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_artifacts_doc ON document_artifacts(doc_id);
+
+		-- FTS5 keyword index over chunks.content. External-content table
+		-- (content='chunks', content_rowid='id') so the index references rows
+		-- in the chunks table without duplicating bytes. unicode61 with
+		-- remove_diacritics=2 folds Spanish accents (María ↔ maria).
+		CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+			content,
+			content='chunks',
+			content_rowid='id',
+			tokenize='unicode61 remove_diacritics 2'
+		);
+
+		-- Triggers keep chunks_fts in sync with chunks.
+		CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+		END;
+		CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+		END;
+		CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+		END;
+
+		-- Chunks created before the chunks_fts table existed are not
+		-- retroactively indexed. To populate the FTS5 index over a
+		-- pre-existing corpus, re-crawl the affected sources.
 	`
 
 	_, err := db.Exec(schema)

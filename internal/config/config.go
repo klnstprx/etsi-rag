@@ -37,19 +37,29 @@ type BackendConfig struct {
 }
 
 // Config holds all application configuration.
+//
+// Sections are grouped by role:
+//   - Infrastructure: server, admin, database, object_store, backends.
+//   - Pipeline (chunk → embed → retrieve → answer): chunking, embedding,
+//     retrieval, agent, session.
+//   - Ingest: crawler.
 type Config struct {
+	// Infrastructure.
 	Server      ServerConfig      `koanf:"server"`
 	Admin       AdminConfig       `koanf:"admin"`
-	Backends    []BackendConfig   `koanf:"backends"`
-	Embedding   EmbeddingConfig   `koanf:"embedding"`
-	Agent       AgentConfig       `koanf:"agent"`
 	Database    DatabaseConfig    `koanf:"database"`
-	RAG         RAGConfig         `koanf:"rag"`
-	API         APIConfig         `koanf:"api"`
-	Chunking    ChunkingConfig    `koanf:"chunking"`
-	Session     SessionConfig     `koanf:"session"`
-	Crawler     CrawlerConfig     `koanf:"crawler"`
 	ObjectStore ObjectStoreConfig `koanf:"object_store"`
+	Backends    []BackendConfig   `koanf:"backends"`
+
+	// Pipeline.
+	Chunking  ChunkingConfig  `koanf:"chunking"`
+	Embedding EmbeddingConfig `koanf:"embedding"`
+	Retrieval RetrievalConfig `koanf:"retrieval"`
+	Agent     AgentConfig     `koanf:"agent"`
+	Session   SessionConfig   `koanf:"session"`
+
+	// Ingest.
+	Crawler CrawlerConfig `koanf:"crawler"`
 }
 
 // GetBackend returns the first enabled backend with the given name, or nil.
@@ -101,22 +111,23 @@ type EmbeddingConfig struct {
 
 // AgentConfig holds agent/chat stage settings.
 type AgentConfig struct {
-	Backend              string  `koanf:"backend"`
-	Model                string  `koanf:"model"`
-	MaxTokens            int     `koanf:"max_tokens"`
-	Temperature          float64 `koanf:"temperature"`
-	ContextWindow        int     `koanf:"context_window"`           // total context window (auto-detected for llama.cpp)
-	MaxIterations        int     `koanf:"max_iterations"`           // max tool-calling iterations
-	SystemPrompt         string  `koanf:"system_prompt"`            // empty = use prompts/agent.md
-	ToolOutputMaxTokens  int     `koanf:"tool_output_max_tokens"`   // max tokens allowed per tool result; 0 = auto (context_window/4)
-	MaxImagesPerCall     int     `koanf:"max_images_per_call"`      // max image artifacts attached per tool call; 0 = default 6
-	MaxImageBytesPerCall int64   `koanf:"max_image_bytes_per_call"` // max bytes of image_url URLs (text length, not image data) per tool call; 0 = default 65536
-	PublicBaseURL        string  `koanf:"public_base_url"`          // absolute base URL prefixed onto /v1/artifacts/... paths so the LLM backend can fetch them; empty disables image attachment
+	Backend             string            `koanf:"backend"`
+	Model               string            `koanf:"model"`
+	MaxTokens           int               `koanf:"max_tokens"`
+	Temperature         float64           `koanf:"temperature"`
+	ContextWindow       int               `koanf:"context_window"`         // total context window (auto-detected for llama.cpp)
+	MaxIterations       int               `koanf:"max_iterations"`         // max tool-calling iterations
+	ToolOutputMaxTokens int               `koanf:"tool_output_max_tokens"` // max tokens allowed per tool result; 0 = auto (context_window/4)
+	Passthrough         bool              `koanf:"passthrough"`            // true = accept client messages directly, no session management
+	SystemPrompt        string            `koanf:"system_prompt"`          // empty = use prompts/agent.md
+	Vision              AgentVisionConfig `koanf:"vision"`
 }
 
-// APIConfig holds API endpoint settings.
-type APIConfig struct {
-	Passthrough bool `koanf:"passthrough"` // true = accept client messages, no sessions
+// AgentVisionConfig holds image-attachment settings for vision-capable backends.
+type AgentVisionConfig struct {
+	MaxImagesPerCall     int    `koanf:"max_images_per_call"`      // max image artifacts attached per tool call; 0 = default 6
+	MaxImageBytesPerCall int64  `koanf:"max_image_bytes_per_call"` // max bytes of image_url URLs (text length, not image data) per tool call; 0 = default 65536
+	PublicBaseURL        string `koanf:"public_base_url"`          // absolute base URL prefixed onto /v1/artifacts/... paths so the LLM backend can fetch them; empty disables image attachment
 }
 
 // DatabaseConfig holds SQLite database settings.
@@ -124,10 +135,15 @@ type DatabaseConfig struct {
 	Path string `koanf:"path"`
 }
 
-// RAGConfig holds RAG pipeline settings.
-type RAGConfig struct {
+// RetrievalConfig holds retrieval-pipeline settings (top-k, context budget, mode).
+type RetrievalConfig struct {
 	TopK             int `koanf:"top_k"`
 	MaxContextTokens int `koanf:"max_context_tokens"`
+	// RetrievalMode selects how chunks are scored:
+	//   "dense"  — cosine similarity over query embedding (default).
+	//   "hybrid" — dense + BM25 keyword search merged via reciprocal-rank
+	//              fusion. See ADR-008.
+	RetrievalMode string `koanf:"retrieval_mode"`
 }
 
 // ChunkingConfig holds document chunking settings.
@@ -253,6 +269,10 @@ func Load(configDir string) (*Config, error) {
 		return nil, fmt.Errorf("loading env vars: %w", err)
 	}
 
+	if err := checkLegacyKeys(k); err != nil {
+		return nil, err
+	}
+
 	var cfg Config
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return nil, err
@@ -261,20 +281,62 @@ func Load(configDir string) (*Config, error) {
 	// Apply defaults for optional fields
 	cfg.applyDefaults()
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
 }
 
-// validate enforces cross-section invariants that applyDefaults can't express.
-func (c *Config) validate() error {
-	if c.Chunking.MaxChunkSize > c.RAG.MaxContextTokens {
+// checkLegacyKeys returns a friendly error if the loaded config still uses keys
+// from the pre-restructure layout. The migration is a hard break: rather than
+// silently producing zero defaults via koanf when a [rag] or [api] section is
+// present, fail loud and tell the operator exactly what to rename.
+func checkLegacyKeys(k *koanf.Koanf) error {
+	legacy := []struct {
+		old, new string
+	}{
+		{"rag.top_k", "retrieval.top_k"},
+		{"rag.max_context_tokens", "retrieval.max_context_tokens"},
+		{"rag.retrieval_mode", "retrieval.retrieval_mode"},
+		{"api.passthrough", "agent.passthrough"},
+		{"agent.public_base_url", "agent.vision.public_base_url"},
+		{"agent.max_images_per_call", "agent.vision.max_images_per_call"},
+		{"agent.max_image_bytes_per_call", "agent.vision.max_image_bytes_per_call"},
+	}
+	var found []string
+	for _, l := range legacy {
+		if k.Exists(l.old) {
+			found = append(found, fmt.Sprintf("  %s → %s", l.old, l.new))
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"config uses legacy keys; rename the following in your %s and retry:\n%s",
+		ConfigFileName, strings.Join(found, "\n"),
+	)
+}
+
+// Validate enforces cross-section invariants that applyDefaults can't express.
+// Called by Load after defaults are applied; also called by the admin UI before
+// persisting a section edit, so a bad submission rejects without touching disk.
+func (c *Config) Validate() error {
+	if c.Chunking.MaxChunkSize > c.Retrieval.MaxContextTokens {
 		return fmt.Errorf(
-			"chunking.max_chunk_size (%d) must not exceed rag.max_context_tokens (%d): "+
+			"chunking.max_chunk_size (%d) must not exceed retrieval.max_context_tokens (%d): "+
 				"a single chunk that doesn't fit the retrieval budget would starve the agent",
-			c.Chunking.MaxChunkSize, c.RAG.MaxContextTokens,
+			c.Chunking.MaxChunkSize, c.Retrieval.MaxContextTokens,
+		)
+	}
+	switch c.Retrieval.RetrievalMode {
+	case "dense", "hybrid":
+		// ok
+	default:
+		return fmt.Errorf(
+			"retrieval.retrieval_mode = %q is not supported; use \"dense\" or \"hybrid\"",
+			c.Retrieval.RetrievalMode,
 		)
 	}
 	return nil
@@ -314,18 +376,21 @@ func (c *Config) applyDefaults() {
 	if c.Agent.MaxIterations == 0 {
 		c.Agent.MaxIterations = 5
 	}
-	if c.Agent.MaxImagesPerCall == 0 {
-		c.Agent.MaxImagesPerCall = 6
+	if c.Agent.Vision.MaxImagesPerCall == 0 {
+		c.Agent.Vision.MaxImagesPerCall = 6
 	}
-	if c.Agent.MaxImageBytesPerCall == 0 {
-		c.Agent.MaxImageBytesPerCall = 65536
+	if c.Agent.Vision.MaxImageBytesPerCall == 0 {
+		c.Agent.Vision.MaxImageBytesPerCall = 65536
 	}
 
-	if c.RAG.TopK == 0 {
-		c.RAG.TopK = 10
+	if c.Retrieval.TopK == 0 {
+		c.Retrieval.TopK = 10
 	}
-	if c.RAG.MaxContextTokens == 0 {
-		c.RAG.MaxContextTokens = 2048
+	if c.Retrieval.MaxContextTokens == 0 {
+		c.Retrieval.MaxContextTokens = 2048
+	}
+	if c.Retrieval.RetrievalMode == "" {
+		c.Retrieval.RetrievalMode = "dense"
 	}
 
 	if c.Session.MaxMessages == 0 {

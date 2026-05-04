@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,13 +42,13 @@ port = 8080
 
 func TestLoad_RejectsChunkSizeLargerThanContextBudget(t *testing.T) {
 	// Invariant: no single chunk should be able to starve the retrieval budget.
-	// If max_chunk_size > rag.max_context_tokens, BuildContext would either drop
-	// the chunk entirely or need lossy truncation — both bad. Fail loudly at load.
+	// If max_chunk_size > retrieval.max_context_tokens, BuildContext would either
+	// drop the chunk entirely or need lossy truncation — both bad. Fail loudly at load.
 	_, err := Load(writeTempConfig(t, `
 [chunking]
 max_chunk_size = 4096
 
-[rag]
+[retrieval]
 max_context_tokens = 2048
 `))
 	if err == nil {
@@ -71,8 +72,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 1024},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 512},
-		{"rag.top_k", cfg.RAG.TopK, 10},
-		{"rag.max_context_tokens", cfg.RAG.MaxContextTokens, 2048},
+		{"retrieval.top_k", cfg.Retrieval.TopK, 10},
+		{"retrieval.max_context_tokens", cfg.Retrieval.MaxContextTokens, 2048},
 		{"chunking.max_chunk_size", cfg.Chunking.MaxChunkSize, 256},
 		{"chunking.chunk_overlap", cfg.Chunking.ChunkOverlap, 32},
 		{"chunking.min_chunk_size", cfg.Chunking.MinChunkSize, 64},
@@ -170,13 +171,13 @@ concurrency = 8
 
 func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("APP__SERVER__PORT", "9000")
-	t.Setenv("APP__RAG__TOP_K", "10")
+	t.Setenv("APP__RETRIEVAL__TOP_K", "10")
 
 	cfg, err := Load(writeTempConfig(t, `
 [server]
 port = 3000
 
-[rag]
+[retrieval]
 top_k = 5
 `))
 	if err != nil {
@@ -186,8 +187,55 @@ top_k = 5
 	if cfg.Server.Port != 9000 {
 		t.Errorf("port = %d, want 9000 (env override)", cfg.Server.Port)
 	}
-	if cfg.RAG.TopK != 10 {
-		t.Errorf("top_k = %d, want 10 (env override)", cfg.RAG.TopK)
+	if cfg.Retrieval.TopK != 10 {
+		t.Errorf("top_k = %d, want 10 (env override)", cfg.Retrieval.TopK)
+	}
+}
+
+func TestRetrievalModeDefaultsToDense(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, ``))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retrieval.RetrievalMode != "dense" {
+		t.Errorf("retrieval_mode = %q, want %q", cfg.Retrieval.RetrievalMode, "dense")
+	}
+}
+
+func TestRetrievalModeFromTOML(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, `
+[retrieval]
+retrieval_mode = "hybrid"
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retrieval.RetrievalMode != "hybrid" {
+		t.Errorf("retrieval_mode = %q, want %q", cfg.Retrieval.RetrievalMode, "hybrid")
+	}
+}
+
+func TestRetrievalModeFromEnv(t *testing.T) {
+	t.Setenv("APP__RETRIEVAL__RETRIEVAL_MODE", "hybrid")
+	cfg, err := Load(writeTempConfig(t, ``))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retrieval.RetrievalMode != "hybrid" {
+		t.Errorf("retrieval_mode = %q, want %q (env override)", cfg.Retrieval.RetrievalMode, "hybrid")
+	}
+}
+
+func TestRetrievalModeRejectsUnknown(t *testing.T) {
+	_, err := Load(writeTempConfig(t, `
+[retrieval]
+retrieval_mode = "wat"
+`))
+	if err == nil {
+		t.Fatal("expected error for unknown retrieval_mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "wat") {
+		t.Errorf("error should mention bad value, got: %v", err)
 	}
 }
 
@@ -310,8 +358,8 @@ port = 7777
 
 func TestWriteTo(t *testing.T) {
 	cfg := &Config{
-		Server: ServerConfig{Host: "0.0.0.0", Port: 9090},
-		RAG:    RAGConfig{TopK: 3},
+		Server:    ServerConfig{Host: "0.0.0.0", Port: 9090},
+		Retrieval: RetrievalConfig{TopK: 3},
 	}
 
 	path := filepath.Join(t.TempDir(), "out.toml")
@@ -342,8 +390,61 @@ func TestWriteTo(t *testing.T) {
 	if loaded.Server.Port != 9090 {
 		t.Errorf("port = %d, want 9090", loaded.Server.Port)
 	}
-	if loaded.RAG.TopK != 3 {
-		t.Errorf("top_k = %d, want 3", loaded.RAG.TopK)
+	if loaded.Retrieval.TopK != 3 {
+		t.Errorf("top_k = %d, want 3", loaded.Retrieval.TopK)
+	}
+}
+
+// TestLoad_RejectsLegacyKeys locks the hard-break migration: any config still
+// using pre-restructure keys ([rag], [api], or pre-vision agent fields) must
+// fail loudly with a rename hint instead of silently producing zero defaults
+// from koanf.
+func TestLoad_RejectsLegacyKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		toml     string
+		mustHint string
+	}{
+		{"rag.top_k", "[rag]\ntop_k = 5\n", "retrieval.top_k"},
+		{"rag.max_context_tokens", "[rag]\nmax_context_tokens = 2048\n", "retrieval.max_context_tokens"},
+		{"rag.retrieval_mode", "[rag]\nretrieval_mode = \"dense\"\n", "retrieval.retrieval_mode"},
+		{"api.passthrough", "[api]\npassthrough = true\n", "agent.passthrough"},
+		{"agent.public_base_url", "[agent]\npublic_base_url = \"http://x\"\n", "agent.vision.public_base_url"},
+		{"agent.max_images_per_call", "[agent]\nmax_images_per_call = 4\n", "agent.vision.max_images_per_call"},
+		{"agent.max_image_bytes_per_call", "[agent]\nmax_image_bytes_per_call = 1024\n", "agent.vision.max_image_bytes_per_call"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeTempConfig(t, tt.toml))
+			if err == nil {
+				t.Fatalf("expected error for legacy key %q, got nil", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.mustHint) {
+				t.Errorf("error should hint at new key %q, got: %v", tt.mustHint, err)
+			}
+		})
+	}
+}
+
+// TestAgentVisionDefaults verifies the defaults applied for the new
+// [agent.vision] sub-section so a fresh config (no [agent.vision] block) still
+// produces sane runtime values for vision-capable backends.
+func TestAgentVisionDefaults(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, ``))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.Vision.MaxImagesPerCall != 6 {
+		t.Errorf("agent.vision.max_images_per_call = %d, want 6",
+			cfg.Agent.Vision.MaxImagesPerCall)
+	}
+	if cfg.Agent.Vision.MaxImageBytesPerCall != 65536 {
+		t.Errorf("agent.vision.max_image_bytes_per_call = %d, want 65536",
+			cfg.Agent.Vision.MaxImageBytesPerCall)
+	}
+	if cfg.Agent.Vision.PublicBaseURL != "" {
+		t.Errorf("agent.vision.public_base_url = %q, want empty",
+			cfg.Agent.Vision.PublicBaseURL)
 	}
 }
 

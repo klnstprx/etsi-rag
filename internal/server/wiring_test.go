@@ -53,9 +53,9 @@ func defaultConfig() *config.Config {
 			MaxTokens: 512,
 			BatchSize: 32,
 		},
-		RAG:      config.RAGConfig{TopK: 5, MaxContextTokens: 2048},
-		Session:  config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600},
-		Chunking: config.ChunkingConfig{MaxChunkSize: 256, ChunkOverlap: 32, MinChunkSize: 64},
+		Retrieval: config.RetrievalConfig{TopK: 5, MaxContextTokens: 2048},
+		Session:   config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600},
+		Chunking:  config.ChunkingConfig{MaxChunkSize: 256, ChunkOverlap: 32, MinChunkSize: 64},
 	}
 }
 
