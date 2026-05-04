@@ -12,6 +12,18 @@ config/config.default.toml  ->  config/{RUN_MODE}.toml  ->  APP__* env vars
 
 Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` loads `config/test.toml`). Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__AGENT__TEMPERATURE=0.5`).
 
+On first run, if `config/config.toml` does not exist, `config.default.toml` is copied into place; from then on `config.toml` is the user-editable file (gitignored).
+
+## Pre-provisioning (no UI access)
+
+For headless installs (remote box, container, CI) where you can't reach the admin UI, you have three paths in increasing precedence — the later one always wins:
+
+1. **Drop a complete `config/config.toml`** into the project before first launch. Include every section the deployment needs, including `[eval]` if the Python harness will run there. This is the simplest path and is what `ensureConfigFile` will pick up on first boot (no template copy).
+2. **Use a `RUN_MODE` overlay**: ship the baseline as `config.toml` and put environment-specific deltas in `config/<mode>.toml`, then start the server with `RUN_MODE=<mode>`. Useful for keeping secrets and host-specific endpoints out of the baseline.
+3. **`APP__*` env vars** for last-mile injection (secrets, port pinning, etc.). Example: `APP__AGENT__TEMPERATURE=0.3`, `APP__OBJECT_STORE__SECRET_KEY=...`.
+
+Admin-UI saves only rewrite the sections the Go config struct owns; foreign top-level sections (notably `[eval]`) round-trip unchanged. So a pre-provisioned `[eval]` block survives any later edit performed through the UI. See [Persistence](#persistence).
+
 ## Sections at a glance
 
 Sections are grouped by role:
@@ -19,7 +31,7 @@ Sections are grouped by role:
 | Role               | Sections                                                   |
 | ------------------ | ---------------------------------------------------------- |
 | **Infrastructure** | `[server]`, `[admin]`, `[database]`, `[object_store]`, `[[backends]]` |
-| **Pipeline**       | `[chunking]`, `[embedding]`, `[retrieval]`, `[agent]`, `[agent.vision]`, `[session]` |
+| **Pipeline**       | `[chunking]`, `[embedding]`, `[retrieval]`, `[reranker]`, `[agent]`, `[agent.vision]`, `[session]` |
 | **Ingest**         | `[crawler]`, `[crawler.pdf]`                               |
 | **Eval (Python)**  | `[eval]` — consumed by `eval/` only; the Go server ignores it |
 
@@ -85,6 +97,17 @@ retrieval_mode = "dense"     # "dense"  — cosine similarity over query embeddi
                              # "hybrid" — dense + BM25 keyword search merged via reciprocal-
                              #            rank fusion. See docs/decisions/008-hybrid-retrieval.md.
                              # Validated at load time; unknown values reject.
+
+[reranker]                    # cross-encoder reranker (default-on; ADR-009)
+enabled = true                # toggle on/off without restart (admin UI live-rebuilds)
+backend = 'local-llama'       # MUST have is_llama_cpp = true; /rerank is a llama.cpp/Jina extension
+model = 'bge-reranker-v2-m3'  # BAAI 568M multilingual cross-encoder; selected after eval sweep
+top_n = 30                    # candidate pool size; must be >= retrieval.top_k
+                              # (validated at load time and at admin save)
+max_tokens = 0                # 0 = auto-detect via /props (n_ctx); used as the per-doc truncation budget
+reserved_tokens = 16          # BOS/EOS/separator budget held back from per-doc truncation
+timeout = '30s'               # per-request deadline; the default is cold-load forgiving
+                              # because router-loaded reranker models load lazily
 
 [agent]
 backend = 'local-llama'
@@ -174,12 +197,15 @@ judge_model   = 'claude-sonnet-4-6'
 `probeLlamaCppBackends()` probes each unique llama.cpp backend once at startup and after config changes:
 - **Embedding**: auto-detects `max_tokens` (n_ctx) and `dimension` (n_embd)
 - **Agent**: auto-detects `context_window` (n_ctx)
+- **Reranker**: auto-detects `max_tokens` (n_ctx); also has the side-effect of asking the router to load the reranker model so the first `/rerank` request avoids cold-load latency
 - Logs a warning if `max_tokens` exceeds the probed `context_window`
 - Non-llama.cpp backends are skipped; set `context_window` manually if needed
 
 ## Persistence
 
 `config.WriteTo()` serializes the current config back to TOML. Used by the admin UI's config editor to persist changes.
+
+It treats `config.toml` as a shared file: it loads what's on disk, drops the top-level keys that `Config` owns (so a removed `[[backends]]` entry actually disappears instead of surviving koanf's path-merge), then overlays the typed struct. Top-level sections not declared on `Config` — `[eval]` and anything else a sidecar tool may add — pass through untouched.
 
 ## Legacy keys (post-restructure)
 

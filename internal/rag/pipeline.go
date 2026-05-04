@@ -36,12 +36,14 @@ type ScoredChunk struct {
 
 // Pipeline orchestrates the RAG process: retrieval, context building, and ingestion.
 type Pipeline struct {
-	mu       sync.RWMutex
-	store    *store.SQLiteStore
-	embedder llm.Embedder
-	chunker  chunking.Chunker
-	counter  tokencount.Counter
-	config   config.RetrievalConfig
+	mu           sync.RWMutex
+	store        *store.SQLiteStore
+	embedder     llm.Embedder
+	chunker      chunking.Chunker
+	counter      tokencount.Counter
+	config       config.RetrievalConfig
+	reranker     llm.Reranker
+	rerankerPool int // candidate pool size for the rerank input; 0 = no over-fetch
 }
 
 // SetEmbedder swaps the embedding client (thread-safe).
@@ -72,6 +74,17 @@ func (p *Pipeline) SetConfig(cfg config.RetrievalConfig) {
 	p.mu.Unlock()
 }
 
+// SetReranker swaps the reranker (thread-safe). Pass r=nil to disable rerank
+// entirely, in which case poolSize is ignored. poolSize is the candidate-pool
+// depth fed into the rerank input — Retrieve over-fetches up to this many
+// candidates from each retriever (dense or hybrid) before reranking.
+func (p *Pipeline) SetReranker(r llm.Reranker, poolSize int) {
+	p.mu.Lock()
+	p.reranker = r
+	p.rerankerPool = poolSize
+	p.mu.Unlock()
+}
+
 func (p *Pipeline) getEmbedder() llm.Embedder {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -94,6 +107,15 @@ func (p *Pipeline) getConfig() config.RetrievalConfig {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.config
+}
+
+// getReranker returns the current reranker (may be nil) and its candidate-pool
+// depth. Holding the read lock briefly is enough — callers should not retain
+// the returned Reranker across config-rebuild boundaries.
+func (p *Pipeline) getReranker() (llm.Reranker, int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reranker, p.rerankerPool
 }
 
 // NewPipeline creates a new RAG pipeline.
@@ -127,6 +149,12 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 // In "dense" mode, scores chunks by cosine similarity over query embeddings
 // (the long-standing default). In "hybrid" mode, combines dense and BM25
 // keyword retrieval via reciprocal-rank fusion (see rrf.go and ADR-008).
+//
+// When a reranker is set on the pipeline (see SetReranker), Retrieve
+// over-fetches a wider candidate pool, asks the reranker to re-score it, and
+// trims the result to top-k. Reranker failures (network, timeout, tokenization
+// trouble) fall through silently to the un-reranked ordering — chats must not
+// fail because a reranker is offline. See ADR-009.
 func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*RetrievalResult, error) {
 	embedder := p.getEmbedder()
 	if embedder == nil {
@@ -139,24 +167,38 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 		k = *topK
 	}
 
+	reranker, rerankerPool := p.getReranker()
+
+	var candidates []store.SearchResult
 	switch cfg.RetrievalMode {
 	case "", "dense":
+		// When reranking is on, over-fetch so the cross-encoder has more than k
+		// candidates to choose from. The candidate pool is at least the
+		// reranker's configured TopN (typically 30).
+		fetch := k
+		if reranker != nil && rerankerPool > fetch {
+			fetch = rerankerPool
+		}
 		embedding, err := embedder.Embed(ctx, query)
 		if err != nil {
 			return nil, fmt.Errorf("embedding query: %w", err)
 		}
-		results, err := p.store.SearchSimilar(ctx, embedding, k)
+		results, err := p.store.SearchSimilar(ctx, embedding, fetch)
 		if err != nil {
 			return nil, fmt.Errorf("searching: %w", err)
 		}
-		return buildRetrievalResult(results), nil
+		candidates = results
 
 	case "hybrid":
 		// Each leg gets a wider net; RRF picks the top-k of the union.
 		// max(k*3, 30) is a defensible floor — the eval-D1 finding showed
 		// most missed gold chunks rank at positions 7–12 in dense, so a
-		// 30-deep candidate pool comfortably covers them.
+		// 30-deep candidate pool comfortably covers them. The reranker pool
+		// raises the floor further when reranking is on.
 		kEach := max(k*3, 30)
+		if reranker != nil && rerankerPool > kEach {
+			kEach = rerankerPool
+		}
 		embedding, err := embedder.Embed(ctx, query)
 		if err != nil {
 			return nil, fmt.Errorf("embedding query: %w", err)
@@ -169,12 +211,64 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 		if err != nil {
 			return nil, fmt.Errorf("keyword search: %w", err)
 		}
-		merged := FuseRRF(dense, sparse, k, 60.0)
-		return buildRetrievalResult(merged), nil
+		// Hybrid keeps a wider fused list when reranking; the reranker decides
+		// what makes the cut. Without rerank, FuseRRF trims to k directly.
+		fuseTo := k
+		if reranker != nil && rerankerPool > fuseTo {
+			fuseTo = rerankerPool
+		}
+		candidates = FuseRRF(dense, sparse, fuseTo, 60.0)
 
 	default:
 		return nil, fmt.Errorf("unsupported retrieval_mode: %q", cfg.RetrievalMode)
 	}
+
+	if reranker != nil && len(candidates) > 1 {
+		candidates = applyRerank(ctx, reranker, query, candidates, k)
+	}
+	return buildRetrievalResult(candidates), nil
+}
+
+// applyRerank re-scores candidates using the supplied reranker and trims to
+// topK. On any failure (network, timeout, malformed response, partial result)
+// the original ordering is returned trimmed to topK. We never bubble a
+// reranker error up to the caller — chats must not fail because the
+// reranker is offline.
+func applyRerank(ctx context.Context, r llm.Reranker, query string, candidates []store.SearchResult, topK int) []store.SearchResult {
+	docs := make([]string, len(candidates))
+	for i, c := range candidates {
+		// Strip image markers — same hygiene the embed-time path uses
+		// (Pipeline.Ingest), since they're metadata pointers, not content
+		// the cross-encoder should score.
+		docs[i] = markers.Strip(c.Chunk.Content)
+	}
+	results, err := r.Rerank(ctx, query, docs, topK)
+	if err != nil || len(results) == 0 {
+		return trimTo(candidates, topK)
+	}
+	out := make([]store.SearchResult, 0, len(results))
+	for _, rr := range results {
+		if rr.Index < 0 || rr.Index >= len(candidates) {
+			continue
+		}
+		sr := candidates[rr.Index]
+		// Replace with the cross-encoder's relevance score so SourceReference
+		// surfaces it directly. The score is a raw logit (very small for
+		// Qwen-style rerankers); ordering is the load-bearing property.
+		sr.Score = rr.Score
+		out = append(out, sr)
+	}
+	if len(out) == 0 {
+		return trimTo(candidates, topK)
+	}
+	return trimTo(out, topK)
+}
+
+func trimTo(s []store.SearchResult, n int) []store.SearchResult {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // buildRetrievalResult collapses a list of SearchResults into a

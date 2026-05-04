@@ -379,18 +379,46 @@ func (c *Crawler) embedStage(
 
 		// Content-addressed dedup: if a document with this ID already exists
 		// (same content reached via another URL, or an earlier crawl of this
-		// URL), skip the embed and just record the URL.
+		// URL), skip the embed and just record the URL — unless force is set,
+		// in which case delete the stale doc (chunks/embeddings cascade) so
+		// pipeline.Ingest can re-embed with the current model. This is the
+		// reprocess-after-model-change path: without the delete, CreateDocument
+		// would hit the PK and stale embeddings would linger.
 		docExists, err := c.store.DocumentExists(ctx, docID)
 		if err != nil {
 			c.logger.Warn().Err(err).Str("url", item.URL).Msg("document existence check failed")
 		}
 		if docExists {
-			if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
-				c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
+			if !force {
+				if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
+					c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
+				}
+				// UMA's CMS serves identical content at the bare program URL and at
+				// one of its /cms/menu/... sub-pages. Whoever hits the embed worker
+				// first stamps documents.url, so on re-crawl the canonical bare URL
+				// can lose the race to a sub-page and disappear from eval/lookup.
+				// Swap to the more canonical URL when this happens — see
+				// preferCanonical in crawler.go.
+				if existingURL, err := c.store.GetDocumentURL(ctx, docID); err == nil {
+					if preferCanonical(item.URL, existingURL) {
+						if err := c.store.UpdateDocumentURL(ctx, docID, item.URL); err != nil {
+							c.logger.Warn().Err(err).Str("doc_id", docID).Str("url", item.URL).Msg("canonical url swap failed")
+						} else {
+							c.logger.Debug().Str("doc_id", docID).Str("from", existingURL).Str("to", item.URL).Msg("documents.url swapped to more canonical")
+						}
+					}
+				}
+				progress.Skipped.Add(1)
+				embedSkipped++
+				continue
 			}
-			progress.Skipped.Add(1)
-			embedSkipped++
-			continue
+			if err := c.store.DeleteDocument(ctx, docID); err != nil {
+				c.logger.Warn().Err(err).Str("url", item.URL).Str("doc_id", docID).Msg("delete stale document failed")
+				progress.EmbedFail.Add(1)
+				embedFailed++
+				c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
+				continue
+			}
 		}
 
 		doc := domain.Document{

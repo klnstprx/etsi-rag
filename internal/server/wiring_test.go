@@ -9,10 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/prompts"
+	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
 
 	"github.com/rs/zerolog"
@@ -126,6 +128,50 @@ func TestResolveChatClient_NotFound(t *testing.T) {
 	}
 }
 
+// --- resolveRerankClient ---
+
+func TestResolveRerankClient_Found(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: "http://localhost:1337/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	s := testServer(t, cfg)
+
+	client, err := s.resolveRerankClient("llama", llm.RerankClientConfig{Model: "qwen-reranker"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestResolveRerankClient_NotFound(t *testing.T) {
+	s := testServer(t, defaultConfig())
+	_, err := s.resolveRerankClient("ghost", llm.RerankClientConfig{})
+	if err == nil {
+		t.Fatal("expected error for missing backend")
+	}
+}
+
+func TestResolveRerankClient_RejectsNonLlamaCpp(t *testing.T) {
+	// Defense in depth: even if config.Validate is bypassed, the resolver
+	// must refuse to build a client against a non-llama-cpp backend.
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "openai", BaseURL: "https://api.openai.com/v1", Enabled: true, IsLlamaCpp: false},
+	}
+	s := testServer(t, cfg)
+
+	_, err := s.resolveRerankClient("openai", llm.RerankClientConfig{})
+	if err == nil {
+		t.Fatal("expected error for non-llama-cpp backend")
+	}
+	if !strings.Contains(err.Error(), "llama") {
+		t.Errorf("error should explain llama-cpp constraint, got: %v", err)
+	}
+}
+
 // --- resolveCounter ---
 
 func TestResolveCounter_Tiktoken(t *testing.T) {
@@ -210,6 +256,40 @@ func TestProbeLlamaCppBackends_AppliesValues(t *testing.T) {
 	}
 	if cfg.Agent.ContextWindow != 4096 {
 		t.Errorf("Agent.ContextWindow = %d, want 4096", cfg.Agent.ContextWindow)
+	}
+}
+
+func TestProbeLlamaCppBackends_AppliesRerankerContext(t *testing.T) {
+	// /props returns n_ctx=4096 — verify the probe writes that into
+	// cfg.Reranker.MaxTokens so RerankClient.fitToContext has a real budget.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"default_generation_settings": map[string]any{"n_ctx": 4096},
+			"model_path":                  "/models/qwen-reranker.gguf",
+			"model_alias":                 "qwen-reranker",
+		})
+	})
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"id": "qwen-reranker"}},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: ts.URL + "/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	cfg.Reranker.Backend = "llama"
+	cfg.Reranker.Model = "qwen-reranker"
+
+	s := testServer(t, cfg)
+	s.probeLlamaCppBackends()
+
+	if cfg.Reranker.MaxTokens != 4096 {
+		t.Errorf("Reranker.MaxTokens = %d, want 4096", cfg.Reranker.MaxTokens)
 	}
 }
 
@@ -314,6 +394,54 @@ func TestConfigDimensionChange_SeenByStore(t *testing.T) {
 	); err != nil {
 		t.Errorf("128-dim embedding rejected after config change: %v", err)
 	}
+}
+
+// --- attachReranker ---
+
+// testServerWithPipeline builds a Server with a real Pipeline so attachReranker
+// has somewhere to write SetReranker calls.
+func testServerWithPipeline(t *testing.T, cfg *config.Config) *Server {
+	t.Helper()
+	s := testServer(t, cfg)
+	chunker := chunking.NewRecursiveCharacterChunker(cfg.Chunking)
+	s.pipeline = rag.NewPipeline(s.store, nil, chunker, nil, cfg.Retrieval)
+	return s
+}
+
+func TestAttachReranker_DisabledIsNoop(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Reranker.Enabled = false
+	s := testServerWithPipeline(t, cfg)
+
+	s.attachReranker() // must not panic, must not error
+}
+
+func TestAttachReranker_BadBackendDegradesGracefully(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Reranker.Enabled = true
+	cfg.Reranker.Backend = "ghost"
+	cfg.Reranker.Model = "qwen-reranker"
+	s := testServerWithPipeline(t, cfg)
+
+	// Must not panic — the safeguards in attachReranker should swallow the
+	// resolution failure and disable the reranker on the pipeline.
+	s.attachReranker()
+}
+
+func TestAttachReranker_LlamaCppBackendInstalls(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: "http://localhost:1337/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	cfg.Reranker.Enabled = true
+	cfg.Reranker.Backend = "llama"
+	cfg.Reranker.Model = "qwen-reranker"
+	cfg.Reranker.TopN = 30
+	cfg.Reranker.MaxTokens = 4096
+	cfg.Reranker.ReservedTokens = 16
+	s := testServerWithPipeline(t, cfg)
+
+	s.attachReranker() // success path — installs on the pipeline
 }
 
 // --- agentSystemPrompt ---

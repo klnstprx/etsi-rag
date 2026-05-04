@@ -50,6 +50,13 @@ func (c *embeddingCache) warm(vecs []cachedVec, dim int) {
 // appendChunks adds entries after a successful CreateChunks commit. No-op when
 // the cache is unloaded (the SQL fallback covers it; a later Warm rebuilds
 // from authoritative DB state).
+//
+// A dim mismatch is treated as a signal that the embedding model changed under
+// us — typically the reprocess-after-model-change path. The DB row was already
+// committed at the new dim, so the cache invalidates itself (drop entries,
+// mark unloaded) and lets SearchSimilar fall back to SQL until a later Warm
+// rebuilds the cache. Returning an error here would fail every reprocessed
+// page, which is exactly what the operator runs reprocess to fix.
 func (c *embeddingCache) appendChunks(entries []cachedVec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -58,7 +65,10 @@ func (c *embeddingCache) appendChunks(entries []cachedVec) error {
 	}
 	for _, e := range entries {
 		if len(e.Vec) != c.dim {
-			return fmt.Errorf("cache dim mismatch for chunk %d: expected %d, got %d", e.ChunkID, c.dim, len(e.Vec))
+			c.vecs = nil
+			c.dim = 0
+			c.loaded = false
+			return nil
 		}
 	}
 	c.vecs = append(c.vecs, entries...)

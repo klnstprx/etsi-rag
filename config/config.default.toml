@@ -56,6 +56,20 @@ max_context_tokens = 2048
 # "hybrid" — dense + BM25 merged via reciprocal-rank fusion. See ADR-008.
 retrieval_mode = 'dense'
 
+# Cross-encoder reranker (opt-in). When enabled, retrieval over-fetches a
+# wider candidate pool and re-scores it with a llama.cpp /rerank model before
+# trimming to retrieval.top_k. Backend MUST have is_llama_cpp = true; the
+# /rerank endpoint is a llama.cpp/Jina extension, not an OpenAI endpoint.
+# See ADR-009.
+[reranker]
+enabled = true
+backend = 'local-llama'
+model = 'bge-reranker-v2-m3'  # BAAI 568M multilingual cross-encoder; selected after eval sweep (ADR-009)
+top_n = 30                    # candidate pool size; must be >= retrieval.top_k
+max_tokens = 0                # 0 = auto-detect via /props (n_ctx)
+reserved_tokens = 16          # BOS/EOS/separator budget held back from per-doc truncation
+timeout = '30s'               # per-request deadline; cold-load forgiving
+
 [agent]
 backend = 'local-llama'
 model = 'Qwen3-Embedding-8B-Q8_0.gguf'

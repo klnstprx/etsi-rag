@@ -11,6 +11,25 @@ import (
 	"etsi-rag/internal/domain"
 )
 
+// newStoreWithMutableDim builds a store whose expected embedding dimension is
+// driven by a returned setter, so a single test can simulate the
+// embedding-model-change flow that mutates Embedding.Dimension at runtime.
+func newStoreWithMutableDim(t *testing.T, initial int) (*SQLiteStore, func(int)) {
+	t.Helper()
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("opening test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := Migrate(db); err != nil {
+		t.Fatalf("running migrations: %v", err)
+	}
+	var dim atomic.Int32
+	dim.Store(int32(initial))
+	s := NewSQLiteStore(db, func() int { return int(dim.Load()) })
+	return s, func(v int) { dim.Store(int32(v)) }
+}
+
 // seedSearchCorpus creates a small corpus suitable for parity / write-through
 // tests. Returns the ordered chunk content strings that match the embeddings
 // inserted, so callers can assert ranking by text rather than by chunk ID.
@@ -447,6 +466,81 @@ func TestCreateChunks_DimensionMismatchDoesNotPoisonCache(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("got %d results after good insert, want 1", len(results))
+	}
+}
+
+// TestCreateChunks_DimChangeReprocess simulates the
+// embedding-model-change-then-reprocess flow that produced
+// "appending to cache: cache dim mismatch". The cache is warmed at dim=4,
+// then the configured dim is bumped to dim=8 (as if the operator switched
+// embedding models), and CreateChunks runs at the new dim. Before the fix,
+// appendChunks compared the new vector against the stale cache.dim and
+// returned an error — failing every page in reprocess. After the fix, the
+// cache invalidates itself and CreateChunks succeeds; the SQL fallback
+// covers SearchSimilar until a re-Warm rebuilds the cache.
+func TestCreateChunks_DimChangeReprocess(t *testing.T) {
+	s, setDim := newStoreWithMutableDim(t, 4)
+	ctx := context.Background()
+
+	doc := &domain.Document{
+		ID: "doc-old", Title: "Old", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateChunks(ctx, "doc-old",
+		[]domain.Chunk{{Content: "old", ChunkIndex: 0}},
+		[][]float32{{1, 0, 0, 0}},
+	); err != nil {
+		t.Fatalf("seed insert: %v", err)
+	}
+	if _, err := s.Warm(ctx); err != nil {
+		t.Fatalf("warming: %v", err)
+	}
+
+	// Operator changes embedding model — new dim is 8.
+	setDim(8)
+
+	// Reprocess: delete the stale doc, then re-ingest at the new dim.
+	if err := s.DeleteDocument(ctx, "doc-old"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	doc2 := &domain.Document{
+		ID: "doc-new", Title: "New", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateChunks(ctx, "doc-new",
+		[]domain.Chunk{{Content: "new", ChunkIndex: 0}},
+		[][]float32{{1, 0, 0, 0, 0, 0, 0, 0}},
+	); err != nil {
+		t.Fatalf("post-model-change insert: %v", err)
+	}
+
+	// Cache should have invalidated itself (loaded=false) so SearchSimilar
+	// falls back to the SQL path, which reads authoritative DB state at the
+	// new dim.
+	results, err := s.SearchSimilar(ctx, []float32{1, 0, 0, 0, 0, 0, 0, 0}, 5)
+	if err != nil {
+		t.Fatalf("search after model change: %v", err)
+	}
+	if len(results) != 1 || results[0].Chunk.DocID != "doc-new" {
+		t.Fatalf("got %d results, want 1 from doc-new", len(results))
+	}
+
+	// Re-warm should restore the cache at the new dim and keep working.
+	if _, err := s.Warm(ctx); err != nil {
+		t.Fatalf("re-warm: %v", err)
+	}
+	results, err = s.SearchSimilar(ctx, []float32{1, 0, 0, 0, 0, 0, 0, 0}, 5)
+	if err != nil {
+		t.Fatalf("search after re-warm: %v", err)
+	}
+	if len(results) != 1 || results[0].Chunk.DocID != "doc-new" {
+		t.Fatalf("post-warm: got %d results, want 1 from doc-new", len(results))
 	}
 }
 

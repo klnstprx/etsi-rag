@@ -38,6 +38,71 @@ func (s *Server) resolveChatClient(backendName string, partialCfg llm.ChatClient
 	return llm.NewChatClient(partialCfg), nil
 }
 
+// resolveRerankClient resolves a backend by name and builds a reranker client.
+// The reranker is llama.cpp-only because /rerank is a llama.cpp/Jina extension
+// not part of the OpenAI surface — config.Validate enforces this at load time
+// but we re-check here so a TOML edited on disk can't bypass the safeguard.
+func (s *Server) resolveRerankClient(backendName string, partialCfg llm.RerankClientConfig) (*llm.RerankClient, error) {
+	b := s.cfg.GetBackend(backendName)
+	if b == nil {
+		return nil, fmt.Errorf("no enabled backend named %q for reranker", backendName)
+	}
+	if !b.IsLlamaCpp {
+		return nil, fmt.Errorf("reranker backend %q must be is_llama_cpp=true (/rerank is not an OpenAI endpoint)", b.Name)
+	}
+
+	partialCfg.BaseURL = b.BaseURL
+	partialCfg.APIKey = b.APIKey
+	s.logger.Info().Str("stage", "reranker").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
+	return llm.NewRerankClient(partialCfg), nil
+}
+
+// attachReranker (re)builds the reranker client from the live config and
+// installs it on the pipeline. Called both at startup and after every admin
+// config save so toggling [reranker] enabled takes effect without a restart.
+//
+// Failure modes (disabled, missing backend, non-llama-cpp backend, missing
+// counter) all degrade gracefully: the pipeline keeps the un-reranked path
+// and the operator sees a warning in the logs.
+func (s *Server) attachReranker() {
+	if !s.cfg.Reranker.Enabled {
+		s.pipeline.SetReranker(nil, 0)
+		return
+	}
+
+	// Token counter is required for the context-budget guard; without it,
+	// oversized docs would hit the cross-encoder's context window and the
+	// /rerank call would fail at request time. Bail out if we can't resolve
+	// one — failure here is a config issue worth surfacing.
+	counter, err := s.resolveCounter(s.cfg.Reranker.Backend, s.cfg.Reranker.Model)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("reranker disabled: no token counter")
+		s.pipeline.SetReranker(nil, 0)
+		return
+	}
+
+	rc, err := s.resolveRerankClient(s.cfg.Reranker.Backend, llm.RerankClientConfig{
+		Model:          s.cfg.Reranker.Model,
+		Counter:        counter,
+		MaxTokens:      s.cfg.Reranker.MaxTokens,
+		ReservedTokens: s.cfg.Reranker.ReservedTokens,
+		Timeout:        s.cfg.Reranker.Timeout,
+	})
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("reranker disabled: client resolution failed")
+		s.pipeline.SetReranker(nil, 0)
+		return
+	}
+
+	s.pipeline.SetReranker(rc, s.cfg.Reranker.TopN)
+	s.logger.Info().
+		Str("backend", s.cfg.Reranker.Backend).
+		Str("model", s.cfg.Reranker.Model).
+		Int("top_n", s.cfg.Reranker.TopN).
+		Int("max_tokens", s.cfg.Reranker.MaxTokens).
+		Msg("reranker enabled")
+}
+
 // resolveCounter creates an appropriate token counter for the given backend.
 func (s *Server) resolveCounter(backendName, model string) (tokencount.Counter, error) {
 	b := s.cfg.GetBackend(backendName)
@@ -68,6 +133,7 @@ func (s *Server) probeLlamaCppBackends() {
 	stages := []stageRef{
 		{"embedding", s.cfg.Embedding.Backend, s.cfg.Embedding.Model},
 		{"agent", s.cfg.Agent.Backend, s.cfg.Agent.Model},
+		{"reranker", s.cfg.Reranker.Backend, s.cfg.Reranker.Model},
 	}
 
 	probed := make(map[string]*backend.LlamaCppProps) // key: "backend:model"
@@ -126,6 +192,14 @@ func (s *Server) probeLlamaCppBackends() {
 			s.logger.Warn().Int("max_tokens", s.cfg.Agent.MaxTokens).Int("context_window", props.ContextSize).
 				Msg("agent max_tokens exceeds context window")
 		}
+	}
+
+	// Apply reranker context window — used as the per-doc truncation budget
+	// inside RerankClient. The /props probe loads the reranker model into the
+	// router so the first /rerank call doesn't pay cold-load latency.
+	rerankKey := s.cfg.Reranker.Backend + ":" + s.cfg.Reranker.Model
+	if props, ok := probed[rerankKey]; ok && props.ContextSize > 0 {
+		s.cfg.Reranker.MaxTokens = props.ContextSize
 	}
 }
 

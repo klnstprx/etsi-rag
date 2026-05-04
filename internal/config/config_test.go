@@ -6,6 +6,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/knadh/koanf/parsers/toml"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/v2"
 )
 
 // writeTempConfig creates a temporary config directory with the given TOML as
@@ -392,6 +396,104 @@ func TestWriteTo(t *testing.T) {
 	}
 	if loaded.Retrieval.TopK != 3 {
 		t.Errorf("top_k = %d, want 3", loaded.Retrieval.TopK)
+	}
+}
+
+// TestWriteTo_PreservesUnknownSections locks the contract that WriteTo only
+// rewrites the top-level sections owned by Config. Foreign sections (notably
+// [eval], consumed by the Python eval harness) must round-trip untouched, and
+// shrinking a known slice (a removed [[backends]] entry) must take effect —
+// otherwise koanf's path-merge would let the deleted entry survive.
+func TestWriteTo_PreservesUnknownSections(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+
+	initial := `
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[[backends]]
+name = "a"
+base_url = "http://a"
+enabled = true
+
+[[backends]]
+name = "b"
+base_url = "http://b"
+enabled = true
+
+[eval]
+judge_backend = "remote-claude"
+judge_model = "claude-sonnet-4-6"
+judge_input_price_per_mtok = 3.0
+`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	cfg := &Config{
+		Server: ServerConfig{Host: "0.0.0.0", Port: 9090},
+		Backends: []BackendConfig{
+			{Name: "a", BaseURL: "http://a", Enabled: true},
+		},
+	}
+	if err := WriteTo(cfg, path); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	k := koanf.New(".")
+	if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	if got := k.String("eval.judge_backend"); got != "remote-claude" {
+		t.Errorf("eval.judge_backend = %q, want preserved 'remote-claude'", got)
+	}
+	if got := k.String("eval.judge_model"); got != "claude-sonnet-4-6" {
+		t.Errorf("eval.judge_model = %q, want preserved 'claude-sonnet-4-6'", got)
+	}
+	if got := k.Float64("eval.judge_input_price_per_mtok"); got != 3.0 {
+		t.Errorf("eval.judge_input_price_per_mtok = %v, want preserved 3.0", got)
+	}
+
+	if got := k.Int("server.port"); got != 9090 {
+		t.Errorf("server.port = %d, want 9090", got)
+	}
+	if got := k.String("server.host"); got != "0.0.0.0" {
+		t.Errorf("server.host = %q, want '0.0.0.0'", got)
+	}
+
+	type be struct {
+		Name string `koanf:"name"`
+	}
+	var bs []be
+	if err := k.Unmarshal("backends", &bs); err != nil {
+		t.Fatalf("unmarshal backends: %v", err)
+	}
+	if len(bs) != 1 {
+		t.Fatalf("backends len = %d, want 1 (deleted entry must not survive); got %#v", len(bs), bs)
+	}
+	if bs[0].Name != "a" {
+		t.Errorf("backends[0].name = %q, want 'a'", bs[0].Name)
+	}
+}
+
+// TestWriteTo_NoExistingFile covers the bootstrap case: WriteTo to a path that
+// does not exist yet should succeed (no preservation work to do) and produce a
+// readable file.
+func TestWriteTo_NoExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.toml")
+	cfg := &Config{Server: ServerConfig{Host: "1.2.3.4", Port: 4242}}
+	if err := WriteTo(cfg, path); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	k := koanf.New(".")
+	if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := k.Int("server.port"); got != 4242 {
+		t.Errorf("server.port = %d, want 4242", got)
 	}
 }
 

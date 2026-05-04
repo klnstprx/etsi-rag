@@ -581,6 +581,90 @@ func TestDocumentExists(t *testing.T) {
 	})
 }
 
+func TestGetDocumentURL(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	url := "https://www.uma.es/grado-en-ingenieria-informatica/"
+	doc := &domain.Document{
+		ID:       "doc-with-url",
+		Title:    "T",
+		Content:  "x",
+		URL:      &url,
+		Language: domain.LanguageES,
+		Category: domain.CategoryGeneral,
+	}
+	if err := store.CreateDocument(ctx, doc); err != nil {
+		t.Fatalf("creating doc: %v", err)
+	}
+	docNoURL := &domain.Document{
+		ID: "doc-no-url", Title: "T", Content: "x",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := store.CreateDocument(ctx, docNoURL); err != nil {
+		t.Fatalf("creating doc-no-url: %v", err)
+	}
+
+	t.Run("returns the stored URL", func(t *testing.T) {
+		got, err := store.GetDocumentURL(ctx, "doc-with-url")
+		if err != nil {
+			t.Fatalf("GetDocumentURL: %v", err)
+		}
+		if got != url {
+			t.Errorf("got %q, want %q", got, url)
+		}
+	})
+	t.Run("returns empty string for null url, no error", func(t *testing.T) {
+		got, err := store.GetDocumentURL(ctx, "doc-no-url")
+		if err != nil {
+			t.Fatalf("GetDocumentURL: %v", err)
+		}
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+	t.Run("missing id returns ErrNotFound", func(t *testing.T) {
+		_, err := store.GetDocumentURL(ctx, "ghost")
+		if err == nil || !errors.Is(err, ErrNotFound) {
+			t.Errorf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
+func TestUpdateDocumentURL(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	original := "https://www.uma.es/grado-en-ingenieria-informatica/cms/menu/informacion-grado/"
+	doc := &domain.Document{
+		ID: "doc-1", Title: "T", Content: "x", URL: &original,
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := store.CreateDocument(ctx, doc); err != nil {
+		t.Fatalf("creating doc: %v", err)
+	}
+
+	t.Run("updates the url", func(t *testing.T) {
+		canonical := "https://www.uma.es/grado-en-ingenieria-informatica/"
+		if err := store.UpdateDocumentURL(ctx, "doc-1", canonical); err != nil {
+			t.Fatalf("UpdateDocumentURL: %v", err)
+		}
+		got, err := store.GetDocumentURL(ctx, "doc-1")
+		if err != nil {
+			t.Fatalf("GetDocumentURL: %v", err)
+		}
+		if got != canonical {
+			t.Errorf("url = %q, want %q", got, canonical)
+		}
+	})
+	t.Run("returns ErrNotFound when doc missing", func(t *testing.T) {
+		err := store.UpdateDocumentURL(ctx, "ghost", "https://x")
+		if err == nil || !errors.Is(err, ErrNotFound) {
+			t.Errorf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
 func TestPurgeOrphanDocuments(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()

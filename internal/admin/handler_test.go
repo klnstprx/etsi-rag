@@ -271,6 +271,108 @@ func TestConfigSave_Retrieval(t *testing.T) {
 	}
 }
 
+func TestConfigSave_Reranker(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	// Need an enabled llama-cpp backend for Validate to accept the reranker.
+	h.config.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: "http://localhost:1337/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	h.config.Retrieval.TopK = 10
+
+	form := url.Values{
+		"enabled":         {"true"},
+		"backend":         {"llama"},
+		"model":           {"qwen-reranker"},
+		"top_n":           {"30"},
+		"max_tokens":      {"4096"},
+		"reserved_tokens": {"16"},
+		"timeout_s":       {"30"},
+	}
+	req := postForm("/admin/config/reranker", form)
+	req = withChiParam(req, "section", "reranker")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if !h.config.Reranker.Enabled {
+		t.Error("Reranker.Enabled = false, want true")
+	}
+	if h.config.Reranker.Backend != "llama" {
+		t.Errorf("Reranker.Backend = %q, want llama", h.config.Reranker.Backend)
+	}
+	if h.config.Reranker.Model != "qwen-reranker" {
+		t.Errorf("Reranker.Model = %q, want qwen-reranker", h.config.Reranker.Model)
+	}
+	if h.config.Reranker.TopN != 30 {
+		t.Errorf("Reranker.TopN = %d, want 30", h.config.Reranker.TopN)
+	}
+	if h.config.Reranker.MaxTokens != 4096 {
+		t.Errorf("Reranker.MaxTokens = %d, want 4096", h.config.Reranker.MaxTokens)
+	}
+	if h.config.Reranker.Timeout != 30*time.Second {
+		t.Errorf("Reranker.Timeout = %s, want 30s", h.config.Reranker.Timeout)
+	}
+}
+
+// TestConfigSave_Reranker_RejectsNonLlamaCppBackend exercises the
+// validate-on-save path: enabling the reranker against an OpenAI backend must
+// be rejected and the in-memory config must revert.
+func TestConfigSave_Reranker_RejectsNonLlamaCppBackend(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Backends = []config.BackendConfig{
+		{Name: "openai", BaseURL: "https://api.openai.com/v1", Enabled: true, IsLlamaCpp: false},
+	}
+	h.config.Retrieval.TopK = 10
+	originalEnabled := h.config.Reranker.Enabled
+
+	form := url.Values{
+		"enabled":         {"true"},
+		"backend":         {"openai"},
+		"model":           {"some-model"},
+		"top_n":           {"30"},
+		"reserved_tokens": {"16"},
+		"timeout_s":       {"30"},
+	}
+	req := postForm("/admin/config/reranker", form)
+	req = withChiParam(req, "section", "reranker")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Reranker.Enabled != originalEnabled {
+		t.Errorf("Reranker.Enabled = %v, want %v (revert on validation failure)",
+			h.config.Reranker.Enabled, originalEnabled)
+	}
+}
+
+func TestConfigSave_Reranker_RejectsTopNUnderTopK(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: "http://localhost:1337/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	h.config.Retrieval.TopK = 10
+	originalEnabled := h.config.Reranker.Enabled
+
+	form := url.Values{
+		"enabled":         {"true"},
+		"backend":         {"llama"},
+		"model":           {"qwen-reranker"},
+		"top_n":           {"5"},
+		"reserved_tokens": {"16"},
+		"timeout_s":       {"30"},
+	}
+	req := postForm("/admin/config/reranker", form)
+	req = withChiParam(req, "section", "reranker")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Reranker.Enabled != originalEnabled {
+		t.Errorf("Reranker.Enabled = %v, want %v (revert on validation failure)",
+			h.config.Reranker.Enabled, originalEnabled)
+	}
+}
+
 func TestConfigSave_Chunking(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
@@ -440,13 +542,18 @@ func TestConfigSave_Agent_DefaultTextNormalized(t *testing.T) {
 	}
 }
 
+// reprocessWarning is the toast fragment that signals stale stored embeddings.
+// Tests assert on the prefix so wording tweaks don't churn every assertion.
+const reprocessWarning = "Embedding model or dimension changed"
+
 func TestConfigSave_EmbeddingDimensionChange_WarnsReprocess(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 	h.config.Embedding.Dimension = 512 // initial
+	h.config.Embedding.Model = "bge-small"
 
 	form := url.Values{
 		"backend":    {""},
-		"model":      {""},
+		"model":      {"bge-small"},
 		"dimension":  {"1024"}, // changed
 		"max_tokens": {"512"},
 		"batch_size": {"32"},
@@ -458,19 +565,20 @@ func TestConfigSave_EmbeddingDimensionChange_WarnsReprocess(t *testing.T) {
 	h.ConfigSave(w, req)
 
 	body := w.Body.String()
-	if !strings.Contains(body, "existing documents should be reprocessed") {
+	if !strings.Contains(body, reprocessWarning) {
 		t.Error("expected reprocess warning toast when embedding dimension changes")
 	}
 }
 
-func TestConfigSave_EmbeddingDimensionSame_NoWarning(t *testing.T) {
+func TestConfigSave_EmbeddingModelChange_WarnsReprocess(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 	h.config.Embedding.Dimension = 1024
+	h.config.Embedding.Model = "bge-small"
 
 	form := url.Values{
 		"backend":    {""},
-		"model":      {""},
-		"dimension":  {"1024"}, // unchanged
+		"model":      {"bge-large"}, // changed, dim same
+		"dimension":  {"1024"},
 		"max_tokens": {"512"},
 		"batch_size": {"32"},
 	}
@@ -481,14 +589,39 @@ func TestConfigSave_EmbeddingDimensionSame_NoWarning(t *testing.T) {
 	h.ConfigSave(w, req)
 
 	body := w.Body.String()
-	if strings.Contains(body, "existing documents should be reprocessed") {
-		t.Error("should not warn when embedding dimension is unchanged")
+	if !strings.Contains(body, reprocessWarning) {
+		t.Error("expected reprocess warning toast when embedding model changes (vectors live in different semantic space)")
+	}
+}
+
+func TestConfigSave_EmbeddingDimensionSame_NoWarning(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Embedding.Dimension = 1024
+	h.config.Embedding.Model = "bge-small"
+
+	form := url.Values{
+		"backend":    {""},
+		"model":      {"bge-small"}, // unchanged
+		"dimension":  {"1024"},      // unchanged
+		"max_tokens": {"512"},
+		"batch_size": {"32"},
+	}
+	req := postForm("/admin/config/embedding", form)
+	req = withChiParam(req, "section", "embedding")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, reprocessWarning) {
+		t.Error("should not warn when embedding model and dimension are unchanged")
 	}
 }
 
 func TestConfigSave_NonEmbeddingSection_NoWarning(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 	h.config.Embedding.Dimension = 512
+	h.config.Embedding.Model = "bge-small"
 
 	form := url.Values{
 		"top_k":              {"10"},
@@ -501,8 +634,8 @@ func TestConfigSave_NonEmbeddingSection_NoWarning(t *testing.T) {
 	h.ConfigSave(w, req)
 
 	body := w.Body.String()
-	if strings.Contains(body, "existing documents should be reprocessed") {
-		t.Error("should not warn about dimension when saving non-embedding section")
+	if strings.Contains(body, reprocessWarning) {
+		t.Error("should not warn about embeddings when saving non-embedding section")
 	}
 }
 

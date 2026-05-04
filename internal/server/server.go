@@ -120,6 +120,10 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	// Initialize RAG pipeline (may have nil embedder — guarded in pipeline methods)
 	s.pipeline = rag.NewPipeline(sqliteStore, embeddingClient, chunker, embeddingCounter, cfg.Retrieval)
 
+	// Wire optional reranker. Disabled = no-op; resolution failures degrade
+	// retrieval to the un-reranked path without crashing the server.
+	s.attachReranker()
+
 	// Initialize object store (graceful: nil on failure)
 	objStore, err := objectstore.New(cfg.ObjectStore)
 	if err != nil {

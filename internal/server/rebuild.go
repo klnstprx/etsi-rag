@@ -41,6 +41,9 @@ func (s *Server) rebuildClients() {
 	s.apiHandler.SetCounter(counter)
 	s.pipeline.SetChunker(chunking.NewStructureAwareChunker(s.cfg.Chunking, counter, s.cfg.Embedding.MaxTokens))
 
+	// Reranker — re-evaluate every save so toggling enabled takes effect.
+	s.attachReranker()
+
 	// Agent (single chat client for agent)
 	if s.cfg.Agent.Backend != "" {
 		if ac, err := s.resolveChatClient(s.cfg.Agent.Backend, llm.ChatClientConfig{

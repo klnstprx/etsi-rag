@@ -329,6 +329,20 @@ func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
 
 	c.purgeOrphans(ctx, runID)
 
+	// After a model change the embedding cache invalidates itself on the
+	// first dim-mismatched insert and stays unloaded, so SearchSimilar would
+	// pay the full SQL-scan cost until server restart. Re-Warm here so the
+	// cache is hot again with vectors at the new dim.
+	warmCtx := ctx
+	if ctx.Err() != nil {
+		warmCtx = context.Background()
+	}
+	if n, err := c.store.Warm(warmCtx); err != nil {
+		c.logger.Warn().Err(err).Int64("run_id", runID).Msg("post-reprocess cache warm failed; SearchSimilar will use SQL fallback")
+	} else {
+		c.logger.Info().Int64("run_id", runID).Int("vectors", n).Msg("post-reprocess cache warmed")
+	}
+
 	status := domain.CrawlRunCompleted
 	if ctx.Err() != nil {
 		status = domain.CrawlRunCancelled
@@ -489,6 +503,67 @@ func hasBlockedExtension(path string) bool {
 		return blockedExtensions[ext]
 	}
 	return false
+}
+
+// preferCanonical reports whether candidate is a more canonical URL than
+// existing for the same content. Used by the embed-stage dedup to swap
+// documents.url when a content-hash collision surfaces a closer-to-the-seed
+// URL than the one that originally won the timing race.
+//
+// UMA's CMS serves identical extracted content at the bare program URL
+// (/grado-en-X/) and at one of its menu sub-pages (/grado-en-X/cms/menu/Y/).
+// Without this, documents.url is whichever URL hit the embed worker first —
+// which on a re-crawl can flip arbitrarily and breaks eval lookups against
+// the bare URL. With this, the bare URL always wins because it has fewer
+// path segments.
+//
+// Rules, in order:
+//  1. If only one URL parses, it wins.
+//  2. Cross-host candidates never replace existing — host swaps are never
+//     "more canonical."
+//  3. Same host: prefer fewer non-empty path segments. The bare program URL
+//     has 1 segment (`/grado-en-X`); a sub-page has 4+
+//     (`/grado-en-X/cms/menu/Y`). 1 < 4 → bare wins.
+//  4. Same segment count: prefer shorter total path string. Stable
+//     tie-breaker that doesn't depend on crawl order.
+//  5. Otherwise the existing URL wins.
+//
+// Pure function; no I/O.
+func preferCanonical(candidate, existing string) bool {
+	if candidate == "" {
+		return false
+	}
+	if existing == "" {
+		return true
+	}
+	cu, cerr := url.Parse(candidate)
+	eu, eerr := url.Parse(existing)
+	if cerr != nil {
+		return false
+	}
+	if eerr != nil {
+		return true
+	}
+	if !strings.EqualFold(cu.Host, eu.Host) {
+		return false
+	}
+	cSegs := pathSegments(cu.Path)
+	eSegs := pathSegments(eu.Path)
+	if cSegs != eSegs {
+		return cSegs < eSegs
+	}
+	return len(cu.Path) < len(eu.Path)
+}
+
+// pathSegments counts non-empty path segments. "/" → 0, "/a" → 1, "/a/b/" → 2.
+func pathSegments(p string) int {
+	n := 0
+	for _, seg := range strings.Split(p, "/") {
+		if seg != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // shouldFollow decides whether a discovered link should be crawled.

@@ -37,6 +37,44 @@ func (s *SQLiteStore) DocumentExists(ctx context.Context, id string) (bool, erro
 	return true, nil
 }
 
+// GetDocumentURL returns the stored URL for a document by ID. Used by the
+// crawler's dedup path to pick the more canonical URL when several URLs
+// resolve to the same content_hash. Returns empty string if the doc has no
+// URL recorded.
+func (s *SQLiteStore) GetDocumentURL(ctx context.Context, id string) (string, error) {
+	var url sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT url FROM documents WHERE id = ? LIMIT 1`, id).Scan(&url)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("document %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("querying document url: %w", err)
+	}
+	if !url.Valid {
+		return "", nil
+	}
+	return url.String, nil
+}
+
+// UpdateDocumentURL changes the URL recorded for an existing document.
+// Used by the crawler when a content-hash dedup discovers a more canonical
+// URL than the one originally stored (e.g. the seed URL beating a
+// `/cms/menu/...` sub-page that won the timing race).
+func (s *SQLiteStore) UpdateDocumentURL(ctx context.Context, id, url string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE documents SET url = ? WHERE id = ?`, url, id)
+	if err != nil {
+		return fmt.Errorf("updating document url: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("document %s: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // GetDocument retrieves a document by ID.
 func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Document, error) {
 	query := `

@@ -55,7 +55,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 	// restoring the snapshot's slice headers leaves no dangling references.
 	oldCfg := *h.config
 
-	var dimensionChanged bool
+	var embeddingInvalidated bool
 	switch section {
 	case "server":
 		h.config.Server.Host = r.FormValue("host")
@@ -74,6 +74,14 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		if v := strings.TrimSpace(r.FormValue("retrieval_mode")); v != "" {
 			h.config.Retrieval.RetrievalMode = v
 		}
+	case "reranker":
+		h.config.Reranker.Enabled = r.FormValue("enabled") == "true"
+		h.config.Reranker.Backend = r.FormValue("backend")
+		h.config.Reranker.Model = r.FormValue("model")
+		h.config.Reranker.TopN = formInt(r, "top_n", h.config.Reranker.TopN)
+		h.config.Reranker.MaxTokens = formInt(r, "max_tokens", h.config.Reranker.MaxTokens)
+		h.config.Reranker.ReservedTokens = formInt(r, "reserved_tokens", h.config.Reranker.ReservedTokens)
+		h.config.Reranker.Timeout = formDurationSeconds(r, "timeout_s", h.config.Reranker.Timeout)
 	case "chunking":
 		h.config.Chunking.MaxChunkSize = formInt(r, "max_chunk_size", h.config.Chunking.MaxChunkSize)
 		h.config.Chunking.ChunkOverlap = formInt(r, "chunk_overlap", h.config.Chunking.ChunkOverlap)
@@ -86,12 +94,20 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Session.TTLSeconds = formInt(r, "ttl_seconds", h.config.Session.TTLSeconds)
 	case "embedding":
 		oldDim := h.config.Embedding.Dimension
+		oldModel := h.config.Embedding.Model
 		h.config.Embedding.Backend = r.FormValue("backend")
 		h.config.Embedding.Model = r.FormValue("model")
 		h.config.Embedding.Dimension = formInt(r, "dimension", h.config.Embedding.Dimension)
 		h.config.Embedding.MaxTokens = formInt(r, "max_tokens", h.config.Embedding.MaxTokens)
 		h.config.Embedding.BatchSize = formInt(r, "batch_size", h.config.Embedding.BatchSize)
-		dimensionChanged = oldDim != 0 && h.config.Embedding.Dimension != oldDim
+		// Either a dimension or a model change invalidates existing embeddings:
+		// dimension breaks cosine math outright, model change keeps the math
+		// valid but the vectors are now in a different semantic space, so
+		// retrieval quality degrades silently. Skip the warning on first save
+		// (oldDim/oldModel == zero value) so initial setup isn't noisy.
+		dimensionChanged := oldDim != 0 && h.config.Embedding.Dimension != oldDim
+		modelChanged := oldModel != "" && h.config.Embedding.Model != oldModel
+		embeddingInvalidated = dimensionChanged || modelChanged
 	case "agent":
 		h.config.Agent.Backend = r.FormValue("backend")
 		h.config.Agent.Model = r.FormValue("model")
@@ -188,8 +204,8 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		templates.ConfigSectionForm(*saved).Render(r.Context(), w)
 	}
 	templates.Toast(fmt.Sprintf("Section '%s' saved", section), "success").Render(r.Context(), w)
-	if dimensionChanged {
-		templates.Toast("Embedding dimension changed — existing documents should be reprocessed", "warning").Render(r.Context(), w)
+	if embeddingInvalidated {
+		templates.Toast("Embedding model or dimension changed — reprocess crawled pages to refresh stored embeddings", "warning").Render(r.Context(), w)
 	}
 }
 
@@ -287,6 +303,26 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 					Options: []string{"dense", "hybrid"},
 					Hint:    "dense = cosine over embeddings; hybrid = dense + BM25 via reciprocal-rank fusion (ADR-008)",
 				},
+			},
+		},
+		{
+			Name:  "reranker",
+			Title: "Reranker",
+			Group: "Pipeline",
+			Fields: []templates.ConfigField{
+				{
+					Key:   "enabled",
+					Label: "Enabled",
+					Value: strconv.FormatBool(cfg.Reranker.Enabled),
+					Type:  "checkbox",
+					Hint:  "When enabled, re-scores retrieval candidates with a cross-encoder. Backend MUST be llama.cpp (the /rerank endpoint is a llama.cpp/Jina extension).",
+				},
+				{Key: "backend", Label: "Backend", Value: cfg.Reranker.Backend, Type: "select", Options: backendNames},
+				{Key: "model", Label: "Model", Value: cfg.Reranker.Model, Type: "model", Options: backendNames},
+				{Key: "top_n", Label: "Candidate Pool Size (top_n)", Value: strconv.Itoa(cfg.Reranker.TopN), Type: "number", Hint: "Must be >= retrieval.top_k. Typical: 30."},
+				{Key: "max_tokens", Label: "Max Tokens (0 = auto-detect via /props)", Value: strconv.Itoa(cfg.Reranker.MaxTokens), Type: "number"},
+				{Key: "reserved_tokens", Label: "Reserved Tokens", Value: strconv.Itoa(cfg.Reranker.ReservedTokens), Type: "number", Hint: "BOS/EOS/separator budget held back from per-doc truncation."},
+				{Key: "timeout_s", Label: "Timeout (s)", Value: strconv.FormatInt(int64(cfg.Reranker.Timeout/time.Second), 10), Type: "number", Hint: "Per-request deadline. Default 30s absorbs cold-load on the router."},
 			},
 		},
 		{

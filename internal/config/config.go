@@ -55,6 +55,7 @@ type Config struct {
 	Chunking  ChunkingConfig  `koanf:"chunking"`
 	Embedding EmbeddingConfig `koanf:"embedding"`
 	Retrieval RetrievalConfig `koanf:"retrieval"`
+	Reranker  RerankerConfig  `koanf:"reranker"`
 	Agent     AgentConfig     `koanf:"agent"`
 	Session   SessionConfig   `koanf:"session"`
 
@@ -144,6 +145,20 @@ type RetrievalConfig struct {
 	//   "hybrid" — dense + BM25 keyword search merged via reciprocal-rank
 	//              fusion. See ADR-008.
 	RetrievalMode string `koanf:"retrieval_mode"`
+}
+
+// RerankerConfig holds reranker stage settings. The reranker is opt-in
+// (Enabled) and llama-cpp only — the /rerank endpoint is a llama.cpp/Jina
+// extension, not part of the OpenAI-compatible surface, so non-llama-cpp
+// backends are rejected at config-load time. See ADR-009.
+type RerankerConfig struct {
+	Enabled        bool          `koanf:"enabled"`
+	Backend        string        `koanf:"backend"`
+	Model          string        `koanf:"model"`
+	TopN           int           `koanf:"top_n"`           // candidate pool size; must be >= retrieval.top_k
+	MaxTokens      int           `koanf:"max_tokens"`      // 0 = auto-detect via /props
+	ReservedTokens int           `koanf:"reserved_tokens"` // BOS/EOS/sep budget reserved before truncation
+	Timeout        time.Duration `koanf:"timeout"`
 }
 
 // ChunkingConfig holds document chunking settings.
@@ -339,6 +354,35 @@ func (c *Config) Validate() error {
 			c.Retrieval.RetrievalMode,
 		)
 	}
+	if c.Reranker.Enabled {
+		if c.Reranker.Backend == "" {
+			return fmt.Errorf("reranker.enabled = true requires reranker.backend to be set")
+		}
+		if c.Reranker.Model == "" {
+			return fmt.Errorf("reranker.enabled = true requires reranker.model to be set")
+		}
+		b := c.GetBackend(c.Reranker.Backend)
+		if b == nil {
+			return fmt.Errorf(
+				"reranker.backend = %q does not match any enabled [[backends]] entry",
+				c.Reranker.Backend,
+			)
+		}
+		if !b.IsLlamaCpp {
+			return fmt.Errorf(
+				"reranker.backend = %q is not a llama.cpp backend; the /rerank endpoint is "+
+					"a llama.cpp extension and not part of the OpenAI-compatible surface",
+				c.Reranker.Backend,
+			)
+		}
+		if c.Reranker.TopN < c.Retrieval.TopK {
+			return fmt.Errorf(
+				"reranker.top_n (%d) must be >= retrieval.top_k (%d): "+
+					"the candidate pool needs at least as many docs as the agent will see",
+				c.Reranker.TopN, c.Retrieval.TopK,
+			)
+		}
+	}
 	return nil
 }
 
@@ -391,6 +435,16 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Retrieval.RetrievalMode == "" {
 		c.Retrieval.RetrievalMode = "dense"
+	}
+
+	if c.Reranker.TopN == 0 {
+		c.Reranker.TopN = 30
+	}
+	if c.Reranker.ReservedTokens == 0 {
+		c.Reranker.ReservedTokens = 16
+	}
+	if c.Reranker.Timeout == 0 {
+		c.Reranker.Timeout = 30 * time.Second
 	}
 
 	if c.Session.MaxMessages == 0 {
@@ -488,13 +542,33 @@ func (c *Config) applyDefaults() {
 
 // WriteTo marshals the config to TOML and writes it atomically to the given path.
 // Uses koanf + structs provider so keys always match the koanf tags used for reading.
+//
+// Top-level sections not declared on Config (e.g. [eval], consumed by the
+// Python eval harness) are preserved: WriteTo loads the existing file first,
+// drops the keys this struct owns so stale slice entries don't leak through
+// koanf's path-merge, and overlays the typed struct on top.
 func WriteTo(cfg *Config, path string) error {
-	k := koanf.New(".")
-	if err := k.Load(structs.Provider(cfg, "koanf"), nil); err != nil {
-		return fmt.Errorf("loading config into koanf: %w", err)
+	merged := koanf.New(".")
+	if _, err := os.Stat(path); err == nil {
+		if err := merged.Load(file.Provider(path), toml.Parser()); err != nil {
+			return fmt.Errorf("loading existing config: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat config: %w", err)
 	}
 
-	data, err := k.Marshal(toml.Parser())
+	owned := koanf.New(".")
+	if err := owned.Load(structs.Provider(cfg, "koanf"), nil); err != nil {
+		return fmt.Errorf("loading config into koanf: %w", err)
+	}
+	for k := range owned.Raw() {
+		merged.Delete(k)
+	}
+	if err := merged.Merge(owned); err != nil {
+		return fmt.Errorf("merging config: %w", err)
+	}
+
+	data, err := merged.Marshal(toml.Parser())
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
