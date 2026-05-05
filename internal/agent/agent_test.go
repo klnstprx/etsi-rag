@@ -538,6 +538,9 @@ func TestChat_ToolEvents_Emitted(t *testing.T) {
 	if done.Name != "echo" {
 		t.Errorf("event[1].Name = %q, want %q", done.Name, "echo")
 	}
+	if done.Args != `{"msg":"hello"}` {
+		t.Errorf("event[1].Args = %q, want %q", done.Args, `{"msg":"hello"}`)
+	}
 	if done.Duration <= 0 {
 		t.Error("event[1].Duration should be > 0")
 	}

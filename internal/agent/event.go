@@ -9,7 +9,7 @@ type ToolEvent struct {
 	Type      string        // "start" or "done"
 	CallID    string        // unique tool call ID from the LLM response
 	Name      string        // tool name (e.g., "semantic_search")
-	Args      string        // JSON arguments (start only)
+	Args      string        // JSON arguments (start and done)
 	Result    string        // tool result text (done only)
 	Duration  time.Duration // wall-clock execution time (done only)
 	Error     bool          // true if tool returned an error (done only)

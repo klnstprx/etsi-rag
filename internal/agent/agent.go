@@ -398,6 +398,7 @@ func (a *Agent) runToolLoop(
 					Type:           "done",
 					CallID:         tc.ID,
 					Name:           tc.Function.Name,
+					Args:           tc.Function.Arguments,
 					Result:         resultText,
 					Duration:       execDuration,
 					Error:          toolErr,

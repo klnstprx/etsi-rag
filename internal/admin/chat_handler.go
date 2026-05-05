@@ -190,10 +190,10 @@ func renderToolEvent(w http.ResponseWriter, flusher http.Flusher, evt agent.Tool
 	var buf bytes.Buffer
 	switch evt.Type {
 	case "start":
-		templates.ToolCardLoading(evt.CallID, evt.Name).Render(context.Background(), &buf)
+		templates.ToolCardLoading(evt.CallID, evt.Name, evt.Args).Render(context.Background(), &buf)
 		writeSSE(w, "tool_start", buf.String())
 	case "done":
-		templates.ToolCardDone(evt.CallID, evt.Name, evt.Duration, evt.Error, evt.Citations, evt.Images, evt.VisionAttached).Render(context.Background(), &buf)
+		templates.ToolCardDone(evt.CallID, evt.Name, evt.Duration, evt.Error, evt.Citations, evt.Images, evt.VisionAttached, evt.Args).Render(context.Background(), &buf)
 		writeSSE(w, "tool_done", buf.String())
 	}
 	flusher.Flush()

@@ -1,7 +1,10 @@
 package templates
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"etsi-rag/internal/agent"
@@ -96,17 +99,20 @@ templ AssistantMessage(text string) {
 	</div>
 }
 
-templ ToolCardLoading(callID string, name string) {
-	<div id={ "tool-" + callID } class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-blue-50 text-blue-700 text-xs">
-		<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-			<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-			<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-		</svg>
-		<span class="font-medium">{ name }</span>
+templ ToolCardLoading(callID string, name string, args string) {
+	<div id={ "tool-" + callID }>
+		<div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-blue-50 text-blue-700 text-xs">
+			<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+			</svg>
+			<span class="font-medium">{ name }</span>
+		</div>
+		@toolArgsBlock(args)
 	</div>
 }
 
-templ ToolCardDone(callID string, name string, duration time.Duration, isError bool, citations []agent.Citation, images []agent.ImageRef, visionAttached bool) {
+templ ToolCardDone(callID string, name string, duration time.Duration, isError bool, citations []agent.Citation, images []agent.ImageRef, visionAttached bool, args string) {
 	<div id={ "tool-" + callID } hx-swap-oob="outerHTML">
 		if isError {
 			<div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-red-50 text-red-700 text-xs">
@@ -125,6 +131,7 @@ templ ToolCardDone(callID string, name string, duration time.Duration, isError b
 				<span class="opacity-75">{ formatDuration(duration) }</span>
 			</div>
 		}
+		@toolArgsBlock(args)
 		if len(citations) > 0 {
 			<ul class="mt-1 ml-2 space-y-0.5 text-xs text-gray-700">
 				for _, c := range citations {
@@ -211,4 +218,35 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dms", d.Milliseconds())
 	}
 	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+templ toolArgsBlock(args string) {
+	if formatted := formatToolArgs(args); formatted != "" {
+		<details class="mt-1 ml-2">
+			<summary class="text-[11px] text-gray-500 cursor-pointer select-none hover:text-gray-700">args</summary>
+			<pre class="mt-1 text-[11px] font-mono text-gray-700 bg-gray-50 rounded p-2 whitespace-pre-wrap break-all">{ formatted }</pre>
+		</details>
+	}
+}
+
+// formatToolArgs pretty-prints a JSON tool-call argument string for display.
+// Empty / "{}" / "null" return "" so callers can skip rendering. Invalid JSON
+// is returned verbatim — the model occasionally streams non-JSON during tool
+// calls, and a raw dump is more useful than hiding it.
+func formatToolArgs(args string) string {
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return trimmed
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return trimmed
+	}
+	return strings.TrimRight(buf.String(), "\n")
 }
