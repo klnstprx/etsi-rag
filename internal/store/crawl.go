@@ -276,27 +276,6 @@ func (s *SQLiteStore) UpdateCrawlRun(ctx context.Context, run *domain.CrawlRun) 
 	return nil
 }
 
-// GetCrawlRun returns a crawl run by ID.
-func (s *SQLiteStore) GetCrawlRun(ctx context.Context, id int64) (*domain.CrawlRun, error) {
-	var run domain.CrawlRun
-	var status string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, source_id, status, pages_discovered, pages_fetched,
-			pages_changed, pages_failed, error_message, started_at, finished_at
-		FROM crawl_runs WHERE id = ?`, id).
-		Scan(&run.ID, &run.SourceID, &status, &run.PagesDiscovered, &run.PagesFetched,
-			&run.PagesChanged, &run.PagesFailed, &run.ErrorMessage,
-			&run.StartedAt, &run.FinishedAt)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("crawl run %d: %w", id, ErrNotFound)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("getting crawl run: %w", err)
-	}
-	run.Status = domain.CrawlRunStatus(status)
-	return &run, nil
-}
-
 // ListCrawlRuns returns the most recent crawl runs.
 func (s *SQLiteStore) ListCrawlRuns(ctx context.Context, limit int) ([]domain.CrawlRun, error) {
 	rows, err := s.db.QueryContext(ctx, `

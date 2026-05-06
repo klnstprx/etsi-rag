@@ -49,15 +49,6 @@ func Migrate(db *sql.DB) error {
 			embedding BLOB NOT NULL
 		);
 
-		CREATE TABLE IF NOT EXISTS backends (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL UNIQUE,
-			base_url TEXT NOT NULL,
-			api_key TEXT NOT NULL DEFAULT '',
-			enabled INTEGER NOT NULL DEFAULT 1,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-
 		CREATE TABLE IF NOT EXISTS crawl_sources (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,

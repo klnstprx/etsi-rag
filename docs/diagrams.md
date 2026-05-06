@@ -300,15 +300,6 @@ erDiagram
         blob embedding
     }
 
-    backends {
-        int id PK "AUTOINCREMENT"
-        text name UK
-        text base_url
-        text api_key
-        bool enabled
-        datetime created_at
-    }
-
     crawl_sources {
         int id PK "AUTOINCREMENT"
         text name
@@ -367,4 +358,4 @@ erDiagram
     crawl_pages }o--o| documents : "references"
 ```
 
-`is_llama_cpp` is **not** a column on `backends` — it is a TOML-only flag in `BackendConfig`. The `chunks_fts` virtual table (FTS5 over `chunks.content`, `unicode61 remove_diacritics 2` tokenizer) is kept in sync with `chunks` via INSERT/UPDATE/DELETE triggers and backs the BM25 leg of hybrid retrieval.
+Backends are **not stored in SQLite** — they live as `[[backends]]` arrays in `config.toml`, edited via the admin UI which round-trips through `config.WriteTo()`. The `chunks_fts` virtual table (FTS5 over `chunks.content`, `unicode61 remove_diacritics 2` tokenizer) is kept in sync with `chunks` via INSERT/UPDATE/DELETE triggers and backs the BM25 leg of hybrid retrieval.

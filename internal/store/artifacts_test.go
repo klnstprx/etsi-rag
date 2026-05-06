@@ -55,26 +55,6 @@ func TestArtifactCRUD(t *testing.T) {
 		}
 	})
 
-	t.Run("get by id", func(t *testing.T) {
-		a := &domain.Artifact{
-			DocID:          "doc-1",
-			Ref:            "p2",
-			Kind:           domain.ArtifactPDFPage,
-			ObjectStoreKey: "crawl/img/abc/p2.png",
-			MimeType:       "image/png",
-		}
-		if err := store.UpsertArtifact(ctx, a); err != nil {
-			t.Fatalf("upserting: %v", err)
-		}
-		got, err := store.GetArtifactByID(ctx, a.ID)
-		if err != nil {
-			t.Fatalf("get by id: %v", err)
-		}
-		if got.Ref != "p2" {
-			t.Errorf("ref = %q, want p2", got.Ref)
-		}
-	})
-
 	t.Run("get by public token", func(t *testing.T) {
 		a := &domain.Artifact{
 			DocID:          "doc-1",
@@ -117,24 +97,10 @@ func TestArtifactCRUD(t *testing.T) {
 		}
 	})
 
-	t.Run("list by doc", func(t *testing.T) {
-		list, err := store.ListArtifacts(ctx, "doc-1")
-		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		if len(list) != 3 {
-			t.Errorf("expected 3 artifacts for doc-1, got %d", len(list))
-		}
-	})
-
 	t.Run("missing returns ErrNotFound", func(t *testing.T) {
 		_, err := store.GetArtifact(ctx, "doc-1", "nope")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound, got %v", err)
-		}
-		_, err = store.GetArtifactByID(ctx, 99999)
-		if !errors.Is(err, ErrNotFound) {
-			t.Errorf("expected ErrNotFound for id, got %v", err)
 		}
 		_, err = store.GetArtifactByToken(ctx, "no-such-token")
 		if !errors.Is(err, ErrNotFound) {
@@ -173,12 +139,8 @@ func TestArtifactCascadesOnDocDelete(t *testing.T) {
 		t.Fatalf("deleting document: %v", err)
 	}
 
-	list, err := store.ListArtifacts(ctx, "doc-1")
-	if err != nil {
-		t.Fatalf("list after delete: %v", err)
-	}
-	if len(list) != 0 {
-		t.Errorf("expected 0 artifacts after cascade, got %d", len(list))
+	if _, err := store.GetArtifact(ctx, "doc-1", "p1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound after cascade, got %v", err)
 	}
 }
 

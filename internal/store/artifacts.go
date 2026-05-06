@@ -99,19 +99,6 @@ func (s *SQLiteStore) GetArtifact(ctx context.Context, docID, ref string) (*doma
 	return a, nil
 }
 
-// GetArtifactByID looks up an artifact by primary key.
-func (s *SQLiteStore) GetArtifactByID(ctx context.Context, id int64) (*domain.Artifact, error) {
-	row := s.db.QueryRowContext(ctx, artifactSelect+" WHERE id = ?", id)
-	a, err := scanArtifact(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("scanning artifact: %w", err)
-	}
-	return a, nil
-}
-
 // GetArtifactByToken looks up an artifact by its opaque public token (used by
 // the /v1/artifacts/{token}.png route).
 func (s *SQLiteStore) GetArtifactByToken(ctx context.Context, token string) (*domain.Artifact, error) {
@@ -124,28 +111,6 @@ func (s *SQLiteStore) GetArtifactByToken(ctx context.Context, token string) (*do
 		return nil, fmt.Errorf("scanning artifact: %w", err)
 	}
 	return a, nil
-}
-
-// ListArtifacts returns all artifacts for a given document, ordered by ref.
-func (s *SQLiteStore) ListArtifacts(ctx context.Context, docID string) ([]domain.Artifact, error) {
-	rows, err := s.db.QueryContext(ctx, artifactSelect+" WHERE doc_id = ? ORDER BY ref", docID)
-	if err != nil {
-		return nil, fmt.Errorf("querying artifacts: %w", err)
-	}
-	defer rows.Close()
-
-	var out []domain.Artifact
-	for rows.Next() {
-		a, err := scanArtifact(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scanning artifact: %w", err)
-		}
-		out = append(out, *a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating artifacts: %w", err)
-	}
-	return out, nil
 }
 
 // CountArtifacts returns the total number of stored artifact rows. Useful for
