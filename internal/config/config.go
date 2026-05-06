@@ -88,7 +88,8 @@ type ServerConfig struct {
 	Host            string        `koanf:"host"`
 	Port            int           `koanf:"port"`
 	ReadTimeout     int           `koanf:"read_timeout"`     // seconds
-	WriteTimeout    int           `koanf:"write_timeout"`    // seconds
+	WriteTimeout    int           `koanf:"write_timeout"`    // seconds; should be >= request_timeout + a small grace
+	RequestTimeout  int           `koanf:"request_timeout"`  // seconds; per-request handler ceiling, bounds agent tool-calling loops
 	IdleTimeout     time.Duration `koanf:"idle_timeout"`     // keep-alive idle
 	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"` // graceful shutdown grace
 }
@@ -411,8 +412,13 @@ func (c *Config) applyDefaults() {
 	if c.Server.ReadTimeout == 0 {
 		c.Server.ReadTimeout = 15
 	}
+	if c.Server.RequestTimeout == 0 {
+		c.Server.RequestTimeout = 120
+	}
+	// WriteTimeout must outlast RequestTimeout so the handler timeout fires
+	// first and produces a clean 503 instead of a connection reset.
 	if c.Server.WriteTimeout == 0 {
-		c.Server.WriteTimeout = 120
+		c.Server.WriteTimeout = c.Server.RequestTimeout + 180
 	}
 	if c.Server.IdleTimeout == 0 {
 		c.Server.IdleTimeout = 60 * time.Second

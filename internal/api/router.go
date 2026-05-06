@@ -12,7 +12,12 @@ import (
 
 // NewRouter creates a new Chi router with middleware and routes.
 // The API follows OpenAI conventions where applicable.
-func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
+//
+// requestTimeout bounds every handler — including the agent tool-calling
+// loop on /v1/chat/completions, which on slow local LLMs can run for several
+// minutes. Pair with a server.write_timeout that outlasts it (see
+// config.applyDefaults) so the handler timeout fires first.
+func NewRouter(handler *Handler, logger zerolog.Logger, requestTimeout time.Duration) *chi.Mux {
 	SetLogger(logger)
 	r := chi.NewRouter()
 
@@ -21,7 +26,7 @@ func NewRouter(handler *Handler, logger zerolog.Logger) *chi.Mux {
 	r.Use(middleware.RealIP)
 	r.Use(zerologMiddleware(logger))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(120 * time.Second)) // LLM responses can be slow
+	r.Use(middleware.Timeout(requestTimeout))
 
 	// Health check (outside /v1 for simplicity)
 	r.Get("/health", handler.HealthCheck)

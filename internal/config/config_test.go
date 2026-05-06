@@ -72,7 +72,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		want int
 	}{
 		{"server.read_timeout", cfg.Server.ReadTimeout, 15},
-		{"server.write_timeout", cfg.Server.WriteTimeout, 120},
+		{"server.write_timeout", cfg.Server.WriteTimeout, 300},
+		{"server.request_timeout", cfg.Server.RequestTimeout, 120},
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 1024},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 512},

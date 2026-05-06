@@ -180,7 +180,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		ObjStore:        objStore,
 		Passthrough:     cfg.Agent.Passthrough,
 	})
-	router := api.NewRouter(s.apiHandler, logger)
+	router := api.NewRouter(s.apiHandler, logger, time.Duration(cfg.Server.RequestTimeout)*time.Second)
 
 	// Create admin handler
 	s.adminHandler = admin.NewHandler(admin.HandlerConfig{

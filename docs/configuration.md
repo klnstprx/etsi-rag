@@ -44,7 +44,8 @@ Sections are grouped by role:
 host = '127.0.0.1'
 port = 3000
 read_timeout = 15             # seconds
-write_timeout = 120           # seconds
+write_timeout = 300           # seconds; outer http.Server deadline, must outlast request_timeout
+request_timeout = 120         # seconds; per-request handler ceiling, bounds the agent tool-calling loop on /v1/chat/completions
 idle_timeout = '60s'          # keep-alive idle timeout
 shutdown_timeout = '30s'      # graceful shutdown grace period
 

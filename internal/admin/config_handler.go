@@ -62,6 +62,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Server.Port = formInt(r, "port", h.config.Server.Port)
 		h.config.Server.ReadTimeout = formInt(r, "read_timeout", h.config.Server.ReadTimeout)
 		h.config.Server.WriteTimeout = formInt(r, "write_timeout", h.config.Server.WriteTimeout)
+		h.config.Server.RequestTimeout = formInt(r, "request_timeout", h.config.Server.RequestTimeout)
 		h.config.Server.IdleTimeout = formDurationSeconds(r, "idle_timeout_s", h.config.Server.IdleTimeout)
 		h.config.Server.ShutdownTimeout = formDurationSeconds(r, "shutdown_timeout_s", h.config.Server.ShutdownTimeout)
 	case "admin":
@@ -229,7 +230,8 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "host", Label: "Host", Value: cfg.Server.Host, Type: "text"},
 				{Key: "port", Label: "Port", Value: strconv.Itoa(cfg.Server.Port), Type: "number"},
 				{Key: "read_timeout", Label: "Read Timeout (s)", Value: strconv.Itoa(cfg.Server.ReadTimeout), Type: "number"},
-				{Key: "write_timeout", Label: "Write Timeout (s)", Value: strconv.Itoa(cfg.Server.WriteTimeout), Type: "number"},
+				{Key: "write_timeout", Label: "Write Timeout (s)", Value: strconv.Itoa(cfg.Server.WriteTimeout), Type: "number", Hint: "Outer http.Server write deadline; should be larger than request_timeout"},
+				{Key: "request_timeout", Label: "Request Timeout (s)", Value: strconv.Itoa(cfg.Server.RequestTimeout), Type: "number", Hint: "Per-request handler ceiling; bounds the agent tool-calling loop on /v1/chat/completions"},
 				{Key: "idle_timeout_s", Label: "Idle Timeout (s)", Value: strconv.FormatInt(int64(cfg.Server.IdleTimeout/time.Second), 10), Type: "number", Hint: "HTTP keep-alive idle timeout"},
 				{Key: "shutdown_timeout_s", Label: "Shutdown Timeout (s)", Value: strconv.FormatInt(int64(cfg.Server.ShutdownTimeout/time.Second), 10), Type: "number", Hint: "Grace period for in-flight requests on shutdown"},
 			},
