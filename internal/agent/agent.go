@@ -18,6 +18,20 @@ type ChatResult struct {
 	Response  string
 	Citations []Citation
 	Images    []ImageRef
+	ToolCalls []ToolCallRecord
+}
+
+// ToolCallRecord captures one tool invocation inside the agent loop. Used by
+// downstream consumers (eval harness, observability) that need to know which
+// tools fired in a turn — distinct from ToolEvent (which is the streaming
+// channel shape) so we don't bind the persisted record to the live event
+// schema. Args is the raw JSON arguments string from the LLM (truncated by
+// the LLM's own tool-calling format if very long).
+type ToolCallRecord struct {
+	Name       string `json:"name"`
+	Args       string `json:"args,omitempty"`
+	Error      bool   `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
 // VisionGetter returns whether the configured chat backend supports vision
@@ -122,9 +136,10 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 
 	var citations []Citation
 	var attached []ImageRef
+	var toolCalls []ToolCallRecord
 
 	// Run tool loop
-	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, events, nil)
+	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, &toolCalls, events, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +150,7 @@ func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, 
 		sess.AddMessage(msg)
 	}
 
-	return &ChatResult{Response: response, Citations: citations, Images: attached}, nil
+	return &ChatResult{Response: response, Citations: citations, Images: attached, ToolCalls: toolCalls}, nil
 }
 
 // ChatStreamOutcome is the terminal value emitted on ChatStream's outcome channel
@@ -197,8 +212,9 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 
 		var citations []Citation
 		var attached []ImageRef
+		var toolCalls []ToolCallRecord
 
-		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, events, tokens)
+		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, &toolCalls, events, tokens)
 		if err != nil {
 			outcome <- ChatStreamOutcome{Err: err}
 			return
@@ -209,7 +225,7 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 			sess.AddMessage(msg)
 		}
 
-		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Citations: citations, Images: attached}}
+		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Citations: citations, Images: attached, ToolCalls: toolCalls}}
 	}()
 
 	return tokens, outcome
@@ -241,13 +257,14 @@ func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompl
 
 	var citations []Citation
 	var attached []ImageRef
+	var toolCalls []ToolCallRecord
 
-	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &citations, &attached, events, nil)
+	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &citations, &attached, &toolCalls, events, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ChatResult{Response: response, Citations: citations, Images: attached}, nil
+	return &ChatResult{Response: response, Citations: citations, Images: attached, ToolCalls: toolCalls}, nil
 }
 
 // runToolLoop executes the tool-calling loop and returns the final text response
@@ -264,6 +281,7 @@ func (a *Agent) runToolLoop(
 	maxIter int,
 	citations *[]Citation,
 	images *[]ImageRef,
+	toolCalls *[]ToolCallRecord,
 	events chan<- ToolEvent,
 	tokens chan<- string,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
@@ -337,6 +355,15 @@ func (a *Agent) runToolLoop(
 			toolRes, err := a.executeTool(ctx, tc.Function.Name, tc.Function.Arguments)
 			execDuration := time.Since(execStart)
 			toolErr := err != nil
+
+			if toolCalls != nil {
+				*toolCalls = append(*toolCalls, ToolCallRecord{
+					Name:       tc.Function.Name,
+					Args:       tc.Function.Arguments,
+					Error:      toolErr,
+					DurationMS: execDuration.Milliseconds(),
+				})
+			}
 
 			var resultText string
 			var callCitations []Citation

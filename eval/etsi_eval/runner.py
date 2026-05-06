@@ -1,4 +1,10 @@
-"""Orchestration: iterate dataset rows → agent → judge → collect verdicts."""
+"""Orchestration: iterate dataset rows → agent → record evidence.
+
+This runner captures only objective evidence per row: the agent's answer,
+the tool calls it made, and retrieval-stage metrics. Per-row LLM judging
+was retired 2026-05-06 in favour of the pairwise runner — see
+`docs/eval-methodology.md` and `pairwise_runner.py`.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +17,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import agent_client, config, db, dataset, judge, metrics, report, retrieval_client
+from . import agent_client, config, db, dataset, metrics, report, retrieval_client
 from .url_norm import canonicalize
 
 
@@ -27,13 +33,7 @@ def _process_question(
     run_id: str,
     retrieval_top_k: int,
 ) -> tuple[report.Row, str]:
-    """Run the full per-row pipeline. Returns (row, status_line).
-
-    Pure-ish: only mutates the local `row` it builds and the per-process DB
-    canonical-index cache (which is concurrency-safe — dict reads/writes for
-    distinct keys are atomic under the GIL, and the only writer is during
-    initial population which is idempotent).
-    """
+    """Run the full per-row pipeline. Returns (row, status_line)."""
     row = report.Row(
         id=q.id,
         category=q.category,
@@ -43,7 +43,9 @@ def _process_question(
         expected_behavior=q.expected_behavior,
     )
 
-    # 1. Fetch reference(s) from DB. Refuse-mode rows skip this.
+    # 1. Fetch reference(s) from DB. Only used as a sanity-check that the
+    # eval is pointed at the indexed corpus we expect; not consumed by any
+    # judge here. Refuse-mode rows skip.
     refs: list[db.ReferenceDocument] = []
     if q.expected_behavior == "answer":
         missing: list[str] = []
@@ -79,7 +81,9 @@ def _process_question(
             row.errors.append(f"retrieval: {e}")
             retrieval_warn = f" WARN retrieval({e})"
 
-    # 3. Ask the agent.
+    # 3. Ask the agent. The chat-completions response carries tool_calls as
+    # a custom root-level extension; we record them on the row to attribute
+    # downstream wins to specific tools (e.g. read_document).
     try:
         reply = agent_client.ask(
             rt.server_base_url,
@@ -88,71 +92,16 @@ def _process_question(
             session_id=f"eval-{run_id}-{q.id}",
         )
         row.agent_answer = reply.content
+        row.tool_calls = list(reply.tool_calls)
     except Exception as e:  # noqa: BLE001
         row.errors.append(f"agent: {e}")
         return row, f"#{q.id} ERROR agent ({e}){retrieval_warn}"
 
-    # 4. Score with the judge.
-    try:
-        verdict = judge.grade(
-            rt.judge_backend,
-            rt.judge_model,
-            q.question,
-            row.agent_answer,
-            refs,
-            expected_behavior=q.expected_behavior,
-        )
-        row.faithfulness = verdict.faithfulness.score
-        row.correctness = verdict.correctness.score
-        row.completeness = verdict.completeness.score
-        row.overall = verdict.overall
-        row.faithfulness_rationale = verdict.faithfulness.rationale
-        row.correctness_rationale = verdict.correctness.rationale
-        row.completeness_rationale = verdict.completeness.rationale
-        row.judge_prompt_tokens = verdict.usage.prompt_tokens
-        row.judge_completion_tokens = verdict.usage.completion_tokens
-        row.judge_total_tokens = verdict.usage.total_tokens
-        usage_part = (
-            f" toks={verdict.usage.prompt_tokens}+{verdict.usage.completion_tokens}"
-            if verdict.usage.total_tokens
-            else ""
-        )
-        return (
-            row,
-            f"#{q.id} F={verdict.faithfulness.score} "
-            f"C={verdict.correctness.score} "
-            f"Cm={verdict.completeness.score} "
-            f"(O={verdict.overall}){usage_part}{retrieval_warn}",
-        )
-    except Exception as e:  # noqa: BLE001
-        row.errors.append(f"judge: {e}")
-        return row, f"#{q.id} ERROR judge ({e}){retrieval_warn}"
-
-
-class _UsageTracker:
-    """Thread-safe running total of judge tokens + optional cost."""
-
-    def __init__(self, pricing: config.JudgePricing):
-        self._pricing = pricing
-        self._lock = threading.Lock()
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-
-    def add(self, row: report.Row) -> str:
-        """Add one row's tokens and return a formatted suffix for the log line."""
-        with self._lock:
-            self.prompt_tokens += row.judge_prompt_tokens
-            self.completion_tokens += row.judge_completion_tokens
-            cum_total = self.prompt_tokens + self.completion_tokens
-            cum_prompt = self.prompt_tokens
-            cum_completion = self.completion_tokens
-        if cum_total == 0:
-            return ""
-        suffix = f" cum={cum_total:,}"
-        if self._pricing.enabled:
-            cost = self._pricing.cost_usd(cum_prompt, cum_completion)
-            suffix += f" cost=${cost:.4f}"
-        return suffix
+    tool_summary = ""
+    if reply.tool_calls:
+        names = [str(c.get("name", "?")) for c in reply.tool_calls]
+        tool_summary = f" tools=[{','.join(names)}]"
+    return row, f"#{q.id} OK{tool_summary}{retrieval_warn}"
 
 
 def _run_serial(
@@ -160,7 +109,6 @@ def _run_serial(
     questions: list[dataset.Question],
     run_id: str,
     retrieval_top_k: int,
-    tracker: _UsageTracker,
 ) -> list[report.Row]:
     rows: list[report.Row] = []
     total = len(questions)
@@ -168,10 +116,8 @@ def _run_serial(
         prefix = f"[{i}/{total}] #{q.id} ({q.category}/{q.difficulty}/{q.expected_behavior}) ... "
         print(prefix, end="", flush=True)
         row, status = _process_question(rt, q, run_id, retrieval_top_k)
-        # status repeats the id for the parallel path; in serial we already
-        # printed the prefix, so strip the redundant "#id " head.
         tail = status.split(" ", 1)[1] if status.startswith(f"#{q.id} ") else status
-        print(tail + tracker.add(row))
+        print(tail)
         rows.append(row)
     return rows
 
@@ -182,7 +128,6 @@ def _run_parallel(
     run_id: str,
     retrieval_top_k: int,
     concurrency: int,
-    tracker: _UsageTracker,
 ) -> list[report.Row]:
     rows: list[report.Row] = []
     total = len(questions)
@@ -209,11 +154,10 @@ def _run_parallel(
                 )
                 row.errors.append(f"runner: {e}")
                 status = f"#{q.id} ERROR runner ({e})"
-            cum = tracker.add(row)
             with print_lock:
                 completed["n"] += 1
                 print(
-                    f"[{completed['n']}/{total}] {q.category}/{q.difficulty}/{q.expected_behavior} {status}{cum}"
+                    f"[{completed['n']}/{total}] {q.category}/{q.difficulty}/{q.expected_behavior} {status}"
                 )
             rows.append(row)
 
@@ -270,17 +214,12 @@ def run(args: argparse.Namespace) -> int:
     print(
         f"eval: {len(questions)} question(s)  concurrency={args.concurrency}  "
         f"server={rt.server_base_url}  agent={rt.agent_backend.name}/{rt.agent_model}  "
-        f"judge={rt.judge_backend.name}/{rt.judge_model}  db={rt.db_path}"
+        f"db={rt.db_path}"
     )
     if args.concurrency > 1:
         print(
             f"  NOTE: concurrency>1 only helps if the agent backend has enough slots. "
             f"For local llama-server, start it with --parallel >= {args.concurrency}."
-        )
-    if rt.judge_backend.name == rt.agent_backend.name and rt.judge_model == rt.agent_model:
-        print(
-            "  WARNING: judge backend/model is identical to the agent — results will "
-            "be biased by self-preference. Pick a different backend in [eval]."
         )
 
     # Per-run identifier: every row gets a fresh session id derived from this,
@@ -288,29 +227,14 @@ def run(args: argparse.Namespace) -> int:
     # session mode.
     run_id = uuid.uuid4().hex[:8]
 
-    tracker = _UsageTracker(rt.judge_pricing)
-    if rt.judge_pricing.enabled:
-        print(
-            f"  pricing: ${rt.judge_pricing.input_per_mtok:.2f}/MTok in, "
-            f"${rt.judge_pricing.output_per_mtok:.2f}/MTok out — running cost shown per row"
-        )
-
     if args.concurrency == 1:
-        rows = _run_serial(rt, questions, run_id, args.retrieval_top_k, tracker)
+        rows = _run_serial(rt, questions, run_id, args.retrieval_top_k)
     else:
         rows = _run_parallel(
-            rt, questions, run_id, args.retrieval_top_k, args.concurrency, tracker
+            rt, questions, run_id, args.retrieval_top_k, args.concurrency
         )
 
     agg = report.aggregate(rows)
-    if rt.judge_pricing.enabled:
-        agg["judge_usage"]["estimated_cost_usd"] = round(
-            rt.judge_pricing.cost_usd(
-                agg["judge_usage"]["prompt_tokens"],
-                agg["judge_usage"]["completion_tokens"],
-            ),
-            4,
-        )
     report.print_summary(rows, agg)
 
     out_path = args.out
@@ -321,15 +245,13 @@ def run(args: argparse.Namespace) -> int:
         out_path = results_dir / f"{stamp}.json"
 
     out = {
-        "schema_version": 2,
+        "schema_version": 3,
         "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
         "run_id": run_id,
         "concurrency": args.concurrency,
         "server_base_url": rt.server_base_url,
         "agent_backend": rt.agent_backend.name,
         "agent_model": rt.agent_model,
-        "judge_backend": rt.judge_backend.name,
-        "judge_model": rt.judge_model,
         "aggregate": agg,
         "rows": [r.to_dict() for r in rows],
     }
@@ -341,7 +263,11 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="etsi-eval",
-        description="Run the agent against the question dataset and grade answers with an LLM judge.",
+        description=(
+            "Run the agent against the question dataset and capture per-row "
+            "evidence (answer, tool calls, retrieval metrics). "
+            "Pairwise comparison is via etsi_eval.pairwise_runner."
+        ),
     )
     here = Path(__file__).resolve().parent.parent
     p.add_argument(
@@ -372,8 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help=(
             "number of rows to process in parallel (default: 1, serial). "
-            "For local llama-server, requires --parallel N+ on the server side; "
-            "the remote judge handles concurrency natively."
+            "For local llama-server, requires --parallel N+ on the server side."
         ),
     )
     p.add_argument("--out", type=Path, help="write results JSON to this path (default: eval/results/TIMESTAMP.json)")

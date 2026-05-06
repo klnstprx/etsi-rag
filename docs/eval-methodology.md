@@ -8,19 +8,26 @@ numbers in the memoria.
 
 ## What the harness measures today
 
+> **Update 2026-05-06:** per-row LLM-as-judge grading was retired from the
+> regular runner. Pairwise (§2 below) is now the only judge-graded
+> surface. The runner records evidence; pairwise decides direction.
+
 `eval/etsi_eval/runner.py` produces, per row:
 
 - **Retrieval metrics (objective):** `recall_at_5`, `recall_at_10`,
   `mrr`. Set-membership of `golden_urls` against the agent's retrieved
   URL list. No LLM involved.
-- **Answer-quality scores (LLM-as-judge):** three sub-dimensions —
-  `faithfulness`, `correctness`, `completeness` — each a 0–100 int with
-  a one-sentence rationale. `overall = min(...)`.
-- **Per-row aggregates** rolled up by category, difficulty, and globally.
+- **Agent answer text** — the artifact that pairwise compares.
+- **Tool calls** — name, args, error, duration_ms per invocation. Lets
+  us attribute lifts to specific tools (e.g. did `read_document` fire
+  on the rows where we saw improvement?).
+- **Errored rows count** and per-stage error messages.
 
-Schema in `eval/etsi_eval/report.py`. The judge call is made via the
-OpenAI SDK with `response_format=json_schema` (commit `e8db0c9`), so the
-verdict shape is enforced.
+Schema in `eval/etsi_eval/report.py`. Output JSON schema_version 3.
+
+Per-dimension scores (`faithfulness`, `correctness`, `completeness`,
+`overall`) and per-category / per-difficulty breakdowns are no longer
+emitted — they were within-noise for the kind of comparisons we run.
 
 ## Three structural problems with the LLM-judged half
 
@@ -73,7 +80,7 @@ metrics. Frame LLM-judged Overall as a secondary trend signal with
 explicit acknowledgement of its limits (one paragraph citing Zheng
 et al.).
 
-### 2. Pairwise preference between configs (~half a day)
+### 2. Pairwise preference between configs [SHIPPED 2026-05-06]
 
 Instead of "score this answer 0–100," ask the judge "given two answers
 to the same question, which better answers it? A / B / tie." Output is
@@ -82,10 +89,15 @@ a single bit per row. Translates to a defensible win-rate.
 **Why it helps:** eliminates absolute-score anchoring; reduces self-
 preference bias; standard in LMSYS Chatbot Arena, MT-Bench, AlpacaEval.
 
-**Concrete shape:** new judge prompt template; new runner that takes
-two result JSONs (e.g. `hybrid_topk10_ctx4092.json` vs
-`20260504_202044.json`), pairs answers per row, randomises A/B order,
-and reports win/loss/tie totals. Maybe 200 LOC of Python.
+**Implementation:** `eval/etsi_eval/pairwise.py` (judge module) +
+`eval/etsi_eval/pairwise_runner.py` (CLI). Each pair is judged TWICE
+with answer order swapped; a verdict only counts when both passes
+agree on the same underlying answer (`unstable` otherwise — that's the
+canonical positional-bias signature). Reports `wins_a` / `wins_b` /
+`ties` / `unstable`, win-rate over decisive verdicts only, and a
+two-sided binomial p-value vs the 50/50 null. Pure stdlib stats, no
+scipy. Per-category and per-difficulty breakdowns. See `eval/README.md`
+for invocation.
 
 **Headline statement gain:** "bge-m3 is preferred 47%, hybrid 35%, tied
 18% (n=83, judge=gpt-5.4-mini)" defends much better than "Overall mean
@@ -161,15 +173,17 @@ text in the memoria methodology chapter.
 ## Open follow-ups (none blocking)
 
 - Calibration study on 20–30 rows.
-- Pairwise-preference judge prompt + runner.
+- ~~Pairwise-preference judge prompt + runner.~~ Shipped 2026-05-06.
 - RAGAS faithfulness on the final config.
 - Per-row variance estimate: rerun the same eval 3× at temperature=0
   and compute SD of `overall` per row. Quantifies the noise floor with
   one number.
 
-When you come back to this, the cheapest first move is the calibration
-study — it's the one item that converts the absolute-score numbers from
-"indicative" to "defensible." Pairwise preference is the second.
+The remaining cheap-and-defensible move is the calibration study (κ, r
+on 20–30 hand-annotated rows) — it's the one item that converts the
+absolute-score numbers from "indicative" to "defensible." Pairwise is
+already in place; use it for every retrieval/agent change worth a
+memoria mention.
 
 ## References
 

@@ -11,7 +11,6 @@ from openai import OpenAI
 from etsi_eval.config import BackendConfig, JudgePricing
 from etsi_eval.db import ReferenceDocument
 from etsi_eval.judge import Usage, grade
-from etsi_eval.report import Row, aggregate
 
 
 _GOOD_CONTENT = {
@@ -86,27 +85,6 @@ def test_grade_works_when_usage_missing():
     )
     assert v.usage == Usage()
     assert v.faithfulness.score == 90  # parsing still works
-
-
-# ---- aggregate sums tokens ----------------------------------------------
-
-
-def test_aggregate_sums_judge_tokens():
-    rows = [
-        Row(id=1, category="x", difficulty="easy", question="q",
-            judge_prompt_tokens=100, judge_completion_tokens=20, judge_total_tokens=120,
-            faithfulness=90, correctness=90, completeness=90, overall=90),
-        Row(id=2, category="x", difficulty="easy", question="q",
-            judge_prompt_tokens=150, judge_completion_tokens=30, judge_total_tokens=180,
-            faithfulness=80, correctness=80, completeness=80, overall=80),
-        Row(id=3, category="x", difficulty="easy", question="q"),  # no usage
-    ]
-    agg = aggregate(rows)
-    usage = agg["judge_usage"]
-    assert usage["prompt_tokens"] == 250
-    assert usage["completion_tokens"] == 50
-    assert usage["total_tokens"] == 300
-    assert usage["rows_with_usage"] == 2
 
 
 # ---- pricing -------------------------------------------------------------

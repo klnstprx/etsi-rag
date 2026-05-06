@@ -1,8 +1,16 @@
-"""Aggregate eval rows and print a compact summary."""
+"""Aggregate eval rows and print a compact summary.
+
+Per-row LLM-as-judge grading was retired (see plan/decision 2026-05-06):
+absolute scores at this dataset size sit inside positional-flip noise. The
+runner now captures only objective evidence — agent answer, tool calls
+fired during the turn, retrieval metrics — and downstream comparison goes
+through the pairwise runner.
+"""
 
 from __future__ import annotations
 
 import statistics
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -20,43 +28,21 @@ class Row:
     ref_found: bool = False
     ref_titles: list[str] = field(default_factory=list)
     ref_content_len: int = 0
-    # judge sub-scores; None when the judge errored or wasn't run
-    faithfulness: int | None = None
-    correctness: int | None = None
-    completeness: int | None = None
-    overall: int | None = None
-    # rationales per dimension
-    faithfulness_rationale: str = ""
-    correctness_rationale: str = ""
-    completeness_rationale: str = ""
+    # tool invocations recorded by the agent loop. Each entry mirrors
+    # agent.ToolCallRecord on the Go side: {name, args, error, duration_ms}.
+    tool_calls: list[dict] = field(default_factory=list)
     # retrieval metrics; None for refuse rows or when retrieval failed
     recall_at_5: float | None = None
     recall_at_10: float | None = None
     mrr: float | None = None
     retrieved_urls: list[str] = field(default_factory=list)
-    # token usage reported by the judge backend (OpenAI-compatible `usage` block)
-    judge_prompt_tokens: int = 0
-    judge_completion_tokens: int = 0
-    judge_total_tokens: int = 0
     # Per-stage failures accumulated during the run. Each entry is prefixed
-    # with the stage name (e.g. "retrieval: ...", "agent: ...", "judge: ...")
-    # so a row that hit two failures retains both.
+    # with the stage name (e.g. "retrieval: ...", "agent: ...") so a row
+    # that hit two failures retains both.
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-_DIMS: tuple[str, ...] = ("faithfulness", "correctness", "completeness", "overall")
-
-
-def _stats(scores: list[int]) -> dict[str, float | int]:
-    return {
-        "count": len(scores),
-        "mean": round(statistics.mean(scores), 1),
-        "min": min(scores),
-        "max": max(scores),
-    }
 
 
 def _retrieval_stats(values: list[float]) -> dict[str, float | int]:
@@ -68,103 +54,86 @@ def _retrieval_stats(values: list[float]) -> dict[str, float | int]:
     }
 
 
+def _tool_call_stats(rows: list[Row]) -> dict[str, Any]:
+    """Per-tool aggregation. Counts both invocations and rows that used the
+    tool at least once. The latter answers "how often does the agent reach
+    for this tool" without being skewed by chains of calls in one row."""
+    by_tool_invocations: Counter[str] = Counter()
+    by_tool_rows: dict[str, set[int]] = {}
+    rows_using_any_tool: set[int] = set()
+    total = 0
+
+    for r in rows:
+        if not r.tool_calls:
+            continue
+        rows_using_any_tool.add(r.id)
+        for call in r.tool_calls:
+            name = str(call.get("name", "")) or "?"
+            by_tool_invocations[name] += 1
+            by_tool_rows.setdefault(name, set()).add(r.id)
+            total += 1
+
+    by_tool: dict[str, dict[str, int]] = {}
+    for name in sorted(by_tool_invocations):
+        by_tool[name] = {
+            "invocations": by_tool_invocations[name],
+            "rows": len(by_tool_rows[name]),
+        }
+    return {
+        "total_invocations": total,
+        "rows_using_tool": len(rows_using_any_tool),
+        "by_tool": by_tool,
+    }
+
+
 def aggregate(rows: list[Row]) -> dict[str, Any]:
-    scored = [r for r in rows if r.overall is not None]
+    answered = [r for r in rows if r.agent_answer.strip()]
     errored = [r for r in rows if r.errors]
-
-    by_dim: dict[str, dict[str, float | int] | None] = {}
-    for dim in _DIMS:
-        vals = [getattr(r, dim) for r in scored if getattr(r, dim) is not None]
-        by_dim[dim] = _stats(vals) if vals else None  # type: ignore[arg-type]
-
-    def breakdown(key: str) -> dict[str, dict[str, float | int]]:
-        groups: dict[str, list[int]] = {}
-        for r in scored:
-            assert r.overall is not None
-            groups.setdefault(getattr(r, key), []).append(r.overall)
-        return {k: _stats(v) for k, v in sorted(groups.items())}
 
     retrieval: dict[str, dict[str, float | int] | None] = {}
     for metric in ("recall_at_5", "recall_at_10", "mrr"):
         vals = [getattr(r, metric) for r in rows if getattr(r, metric) is not None]
         retrieval[metric] = _retrieval_stats(vals) if vals else None
 
-    judge_usage = {
-        "prompt_tokens": sum(r.judge_prompt_tokens for r in rows),
-        "completion_tokens": sum(r.judge_completion_tokens for r in rows),
-        "total_tokens": sum(r.judge_total_tokens for r in rows),
-        "rows_with_usage": sum(1 for r in rows if r.judge_total_tokens > 0),
-    }
-
     return {
         "total": len(rows),
-        "scored": len(scored),
+        "answered": len(answered),
         "errored": len(errored),
-        "by_dimension": by_dim,
         "retrieval": retrieval,
-        "by_category": breakdown("category"),
-        "by_difficulty": breakdown("difficulty"),
-        "judge_usage": judge_usage,
+        "tool_calls": _tool_call_stats(rows),
     }
-
-
-def _fmt_score(v: int | None) -> str:
-    return f"{v}" if v is not None else "-"
 
 
 def print_summary(rows: list[Row], agg: dict[str, Any]) -> None:
     print()
     print("=" * 92)
-    print(f"Scored: {agg['scored']}/{agg['total']}   errors: {agg['errored']}")
-    overall_stats = agg["by_dimension"].get("overall")
-    if overall_stats:
-        means = {d: agg["by_dimension"][d]["mean"] for d in _DIMS if agg["by_dimension"][d]}
-        print(
-            "Means: "
-            + "  ".join(f"{d}={means[d]}" for d in _DIMS if d in means)
-        )
-    print()
-    print(f"{'id':<4}{'cat':<11}{'diff':<8}{'F':>4}{'C':>4}{'Cm':>4}{'O':>4}  rationale (faithfulness)")
-    print("-" * 92)
-    for r in rows:
-        if r.errors and r.overall is None:
-            joined = "; ".join(r.errors)[:60]
-            print(f"{r.id:<4}{r.category:<11}{r.difficulty:<8}{'ERR':>16}  {joined}")
-            continue
-        rat = r.faithfulness_rationale.replace("\n", " ")[:60]
-        print(
-            f"{r.id:<4}{r.category:<11}{r.difficulty:<8}"
-            f"{_fmt_score(r.faithfulness):>4}{_fmt_score(r.correctness):>4}"
-            f"{_fmt_score(r.completeness):>4}{_fmt_score(r.overall):>4}  {rat}"
-        )
-    print()
-    print("By category (overall):")
-    for cat, stats in agg["by_category"].items():
-        print(f"  {cat:<12} mean={stats['mean']:>5}  (n={stats['count']})")
-    print("By difficulty (overall):")
-    for diff, stats in agg["by_difficulty"].items():
-        print(f"  {diff:<12} mean={stats['mean']:>5}  (n={stats['count']})")
+    print(f"Answered: {agg['answered']}/{agg['total']}   errors: {agg['errored']}")
+
     retrieval = agg.get("retrieval") or {}
     if any(v is not None for v in retrieval.values()):
-        print("Retrieval (URL-level, excluding refuse rows):")
+        print("\nRetrieval (URL-level, excluding refuse rows):")
         for metric, stats in retrieval.items():
             if stats is None:
                 continue
             print(f"  {metric:<14} mean={stats['mean']:>5}  (n={stats['count']})")
-    usage = agg.get("judge_usage") or {}
-    total = usage.get("total_tokens", 0)
-    if total:
-        n = usage["rows_with_usage"]
-        avg_prompt = usage["prompt_tokens"] // n if n else 0
-        avg_completion = usage["completion_tokens"] // n if n else 0
-        line = (
-            f"Judge tokens: prompt={usage['prompt_tokens']:,}  "
-            f"completion={usage['completion_tokens']:,}  "
-            f"total={total:,}  "
-            f"(avg per row: {avg_prompt:,} in / {avg_completion:,} out, n={n})"
+
+    tc = agg.get("tool_calls") or {}
+    if tc.get("total_invocations"):
+        print(
+            f"\nTool calls: {tc['total_invocations']} invocations across "
+            f"{tc['rows_using_tool']} rows"
         )
-        cost = usage.get("estimated_cost_usd")
-        if cost is not None:
-            line += f"  estimated cost: ${cost:.4f}"
-        print(line)
+        for name, stats in tc.get("by_tool", {}).items():
+            print(f"  {name:<20} invocations={stats['invocations']:>4}  rows={stats['rows']:>4}")
+    else:
+        print("\nTool calls: none recorded")
+
+    if errored_rows := [r for r in rows if r.errors and not r.agent_answer.strip()]:
+        print(f"\nErrored rows ({len(errored_rows)}):")
+        for r in errored_rows[:10]:
+            joined = "; ".join(r.errors)[:80]
+            print(f"  #{r.id:<4} {r.category:<11} {r.difficulty:<8} {joined}")
+        if len(errored_rows) > 10:
+            print(f"  ... and {len(errored_rows) - 10} more")
+
     print("=" * 92)

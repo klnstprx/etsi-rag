@@ -1,31 +1,23 @@
 # etsi-eval
 
-LLM-as-judge evaluation harness for the etsi-rag agent.
+Evaluation harness for the etsi-rag agent. Captures per-row raw evidence
+(answer, tool calls, retrieval metrics); pairwise comparison between two
+runs is the only judge-graded surface — see [Pairwise preference](#pairwise-preference) below.
+
+> **Per-row LLM-as-judge scoring was retired 2026-05-06.** Absolute scores
+> at this dataset size sat inside positional-flip noise (39–48 % unstable;
+> see `docs/eval-methodology.md` §2). The runner now records evidence only;
+> direction-of-change is decided by pairwise. Schema version 3.
 
 ## How it works
 
 For each question in `dataset.jsonl`:
 
-1. Look up the reference document(s) in `data/etsi-rag.db` by each entry in `golden_urls` (read-only). URLs are canonicalised on both sides (see "URL canonicalisation" below) so cosmetic differences don't cause silent misses. Skipped for `expected_behavior == "refuse"` rows.
+1. Look up the reference document(s) in `data/etsi-rag.db` by each entry in `golden_urls` (read-only). Used as a sanity-check that the eval is pointed at the indexed corpus we expect; not consumed by any judge in this runner. URLs are canonicalised on both sides (see "URL canonicalisation" below). Skipped for `expected_behavior == "refuse"` rows.
 2. Probe the retrieval layer via `POST /v1/rag/query` to compute Recall@k / MRR against `golden_urls` (URL-level, k = 5 and 10). Skipped for refuse rows where the metric is undefined.
-3. Ask the agent via `POST /v1/chat/completions` — single user turn. Each row gets a unique `X-Session-ID` of the form `eval-<run_id>-<question_id>` so chat history never bleeds between questions even when the server is in session mode.
-4. Feed `(question, agent answer, reference docs, expected_behavior)` to the **judge LLM** (configured separately in `[eval]` — see "Configuring the judge" below; called via the OpenAI Python SDK so the judge never goes through the agent's tool loop). Transient failures are handled by the SDK's built-in retry layer.
-5. The judge returns three independent sub-scores (see "Rubric" below) constrained by an OpenAI structured-output JSON schema, so the response is always parseable. For refuse rows, the rubric scores how well the model declined to answer.
-6. Results are aggregated per dimension, retrieval metric, category, and difficulty and written to `results/TIMESTAMP.json` (schema_version 2).
-
-## Rubric
-
-The judge scores each answer on three independent dimensions:
-
-| Dimension | Question it answers |
-|---|---|
-| **faithfulness** | Is every claim in the answer entailed by the reference document? Catches hallucination. |
-| **correctness**  | Of the claims that are made, are they factually accurate? Catches subtle wrongness. |
-| **completeness** | Does the answer address every part of the question with the key facts present? Catches partial answers. |
-
-`overall = min(faithfulness, correctness, completeness)`. Min (not mean) is the policy: an unfaithful answer is worthless even if complete; the weakest dimension caps quality. All four numbers are reported.
-
-For `expected_behavior == "refuse"` rows the rubric is repurposed: faithfulness penalises fabricated content, correctness rewards explicit acknowledgement of lack of information, completeness rewards clear communication of the limitation.
+3. Ask the agent via `POST /v1/chat/completions` — single user turn. Each row gets a unique `X-Session-ID` of the form `eval-<run_id>-<question_id>` so chat history never bleeds between questions when the server is in session mode.
+4. Record the agent answer and the list of tool invocations the agent made (custom `tool_calls` extension on the chat-completion response — `name`, `args`, `error`, `duration_ms` per call).
+5. Aggregate retrieval metrics and per-tool counts. Results are written to `results/TIMESTAMP.json` (schema_version 3).
 
 ## Retrieval metrics
 
@@ -46,9 +38,9 @@ Ground-truth matching applies a small set of conservative normalisations on both
 
 Run with `--validate-urls` to fail fast before any agent calls if a `golden_urls` entry can't be resolved against the indexed corpus — useful after a fresh crawl.
 
-## Configuring the judge
+## Configuring the judge (for pairwise)
 
-A `[eval]` section is **required** in `config/config.toml`. The judge_backend must reference an enabled `[[backends]]` entry. The eval tool will refuse to start if the section is missing or malformed. The backend must be OpenAI-compatible — the judge is invoked via the OpenAI Python SDK with `response_format=json_schema` so the verdict shape is enforced at decode time. llama-server, Anthropic's OpenAI-compat endpoint, and OpenAI itself all qualify.
+A `[eval]` section is **required** in `config/config.toml` so the pairwise runner has a judge to call. The runner itself no longer grades, so `[eval]` is loaded but unused there — leaving it configured is the simplest path. The judge_backend must reference an enabled `[[backends]]` entry. The backend must be OpenAI-compatible — the judge is invoked via the OpenAI Python SDK with `response_format=json_schema` so the verdict shape is enforced at decode time. llama-server, Anthropic's OpenAI-compat endpoint, and OpenAI itself all qualify.
 
 ```toml
 [[backends]]
@@ -67,18 +59,7 @@ judge_input_price_per_mtok  = 3.0
 judge_output_price_per_mtok = 15.0
 ```
 
-Using the same backend/model for both the agent and the judge is allowed but discouraged — it's the canonical setup for self-preference bias and the runner will print a warning. For thesis-grade results, the judge should be a different model family from the agent (e.g. agent = local Gemma, judge = remote Claude).
-
-## Token usage and cost
-
-Every judge call returns an OpenAI-compatible `usage` block (`prompt_tokens`, `completion_tokens`, `total_tokens`). The runner:
-
-- stores each row's tokens on `Row.judge_prompt_tokens` / `judge_completion_tokens` / `judge_total_tokens`;
-- shows per-row tokens in the live status line (`toks=1234+45`) plus a cumulative count (`cum=8923`);
-- aggregates totals into `aggregate.judge_usage` in the output JSON;
-- if `judge_input_price_per_mtok` / `judge_output_price_per_mtok` are set in `[eval]`, also displays per-row running cost (`cost=$0.0234`) and a final estimate.
-
-If a backend strips the `usage` block (rare, but happens behind some proxies), the runner falls back to zero — totals will under-report rather than crash.
+Using the same backend/model for both the agent and the judge is allowed but discouraged for pairwise — it's the canonical setup for self-preference bias. For thesis-grade results, the judge should be a different model family from the agent (e.g. agent = local Gemma, judge = remote Claude).
 
 ## Prerequisites
 
@@ -129,60 +110,64 @@ uv run python -m etsi_eval.runner --out /tmp/run1.json
 
 ## Parallel execution
 
-By default the runner is single-flight (`--concurrency 1`) — one row at a time. With `--concurrency N` it runs N rows in parallel via a thread pool, which is useful because each row is dominated by network I/O on the agent (local llama-server) and the judge (remote LLM).
+By default the runner is single-flight (`--concurrency 1`) — one row at a time. With `--concurrency N` it runs N rows in parallel via a thread pool, which is useful because each row is dominated by network I/O on the agent (local llama-server).
 
-Important caveat: a local llama-server only delivers parallelism when started with `--parallel N` (server slots) — otherwise extra concurrent requests just queue inside the server and you get no speedup. Continuous batching is enabled by default in llama-server, so once the slots are there the GPU schedules requests automatically. Set `N` to match (or exceed) the eval `--concurrency`. The remote judge backends used in this repo (Anthropic) handle concurrent requests natively without extra setup.
+Important caveat: a local llama-server only delivers parallelism when started with `--parallel N` (server slots) — otherwise extra concurrent requests just queue inside the server and you get no speedup. Continuous batching is enabled by default in llama-server, so once the slots are there the GPU schedules requests automatically. Set `N` to match (or exceed) the eval `--concurrency`.
 
 Row order in the output JSON is always sorted by `id`, regardless of completion order.
 
 ## Output
 
-Console: progress line per question, then a summary table with per-category / per-difficulty means.
+Console: progress line per question with a `tools=[name,name,...]` summary, then retrieval / tool-call totals.
 
 JSON file (default `results/YYYYMMDD_HHMMSS.json`):
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "timestamp": "...",
   "run_id": "a1b2c3d4",
   "server_base_url": "http://127.0.0.1:3000",
   "agent_backend": "local-llama",
-  "agent_model": "agent-model",
-  "judge_backend": "remote-claude",
-  "judge_model": "claude-sonnet-4-6",
+  "agent_model": "gemma4-e4b",
   "aggregate": {
     "total": 85,
-    "scored": 83,
+    "answered": 83,
     "errored": 2,
-    "by_dimension": {
-      "faithfulness": {"count": 83, "mean": 82.1, "min": 30, "max": 100},
-      "correctness":  {"count": 83, "mean": 78.4, "min": 20, "max": 100},
-      "completeness": {"count": 83, "mean": 70.5, "min": 0,  "max": 100},
-      "overall":      {"count": 83, "mean": 65.2, "min": 0,  "max": 95}
-    },
     "retrieval": {
-      "recall_at_5":  {"count": 75, "mean": 0.722, "min": 0.0, "max": 1.0},
-      "recall_at_10": {"count": 75, "mean": 0.833, "min": 0.0, "max": 1.0},
-      "mrr":          {"count": 75, "mean": 0.611, "min": 0.0, "max": 1.0}
+      "recall_at_5":  {"count": 75, "mean": 0.777, "min": 0.0, "max": 1.0},
+      "recall_at_10": {"count": 75, "mean": 0.838, "min": 0.0, "max": 1.0},
+      "mrr":          {"count": 75, "mean": 0.609, "min": 0.0, "max": 1.0}
     },
-    "by_category":   { "course": {...}, ... },
-    "by_difficulty": { "easy": {...}, ... }
+    "tool_calls": {
+      "total_invocations": 142,
+      "rows_using_tool": 71,
+      "by_tool": {
+        "semantic_search": {"invocations": 85, "rows": 84},
+        "read_document":   {"invocations": 57, "rows": 31}
+      }
+    }
   },
   "rows": [
     {
       "id": 1,
-      "faithfulness": 95, "correctness": 90, "completeness": 80, "overall": 80,
-      "faithfulness_rationale": "...",
+      "category": "course",
+      "difficulty": "easy",
+      "question": "...",
       "agent_answer": "...",
-      "errors": [],
-      ...
+      "tool_calls": [
+        {"name": "semantic_search", "args": "{\"query\":\"...\"}", "duration_ms": 412},
+        {"name": "read_document",   "args": "{\"url\":\"...\"}",   "duration_ms": 89}
+      ],
+      "retrieved_urls": ["https://...", "..."],
+      "recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0,
+      "errors": []
     }
   ]
 }
 ```
 
-The `errors` field on each row is a list (not a single string) so a row that hits both a transient retrieval failure and a judge failure retains both messages, each prefixed with its stage (`"retrieval: ..."`, `"agent: ..."`, `"judge: ..."`).
+The `errors` field on each row is a list (not a single string) so a row that hits both a transient retrieval failure and an agent failure retains both messages, each prefixed with its stage (`"retrieval: ..."`, `"agent: ..."`).
 
 ## Dataset format
 
@@ -202,19 +187,66 @@ One JSON object per line:
 ```
 
 Fields:
-- `golden_urls` — list of canonical URLs that should be used as ground truth. For cross-doc questions, list all URLs whose chunks should appear in retrieval (eval Step 4 will compute Recall@k against this list). Must be empty when `expected_behavior == "refuse"`.
-- `expected_behavior` — `"answer"` (default) when the corpus contains the answer; `"refuse"` when the question is deliberately out-of-corpus and the system should acknowledge it doesn't know. The judge applies a different rubric for `"refuse"` rows.
-- `key_facts` — retained for human review and curation; **not** passed to the judge.
-- `notes` — curator-only; ignored by the runner and judge.
+- `golden_urls` — list of canonical URLs that should be used as ground truth. For cross-doc questions, list all URLs whose chunks should appear in retrieval (eval Step 2 will compute Recall@k against this list). Must be empty when `expected_behavior == "refuse"`.
+- `expected_behavior` — `"answer"` (default) when the corpus contains the answer; `"refuse"` when the question is deliberately out-of-corpus and the system should acknowledge it doesn't know. The pairwise judge applies a different rubric for `"refuse"` rows.
+- `key_facts` — retained for human review and curation; **not** passed to any judge.
+- `notes` — curator-only; ignored by the runner and pairwise judge.
 
 Legacy rows that use `source_url` (single string) are auto-promoted to `golden_urls = [that_url]` at load time, but new rows should use the canonical shape above.
 
 ## Extending
 
 - **More questions**: append to `dataset.jsonl`. IDs must be unique.
-- **Different judge model**: edit `[eval].judge_backend` / `[eval].judge_model` in `config/config.toml`.
-- **Different grading rubric**: edit `JUDGE_SYSTEM` in `etsi_eval/judge.py`.
-- **Retrieval-layer introspection** (what the agent actually retrieved vs. the ground-truth source): add a second call to `/v1/rag/query` and compare chunks against `source_url`.
+- **Different pairwise-judge model**: edit `[eval].judge_backend` / `[eval].judge_model` in `config/config.toml`.
+- **Different pairwise rubric**: edit `JUDGE_SYSTEM_*` in `etsi_eval/pairwise.py`.
+
+## Pairwise preference
+
+`etsi_eval.pairwise_runner` compares two saved result JSONs head-to-head: same
+question, same reference document(s), two candidate answers. The judge picks
+which is better (`A` / `B` / `tie`). Each pair is judged TWICE with answer
+order swapped — a verdict only counts when both passes agree on the same
+underlying answer; positional flips are tagged `unstable` and excluded from
+the win-rate. This is the canonical setup for LMSYS-style preference eval
+(see Zheng et al., MT-Bench).
+
+Workflow:
+
+```fish
+# 1. Run the agent eval before the change
+uv run python -m etsi_eval.runner --out results/before.json
+
+# 2. Apply your change (config edit, code change, model swap, ...)
+
+# 3. Run again
+uv run python -m etsi_eval.runner --out results/after.json
+
+# 4. Pairwise comparison
+uv run python -m etsi_eval.pairwise_runner \
+    --a results/before.json --b results/after.json \
+    --label-a baseline --label-b after
+```
+
+Pairs that can't be fairly judged are skipped and reported (different
+`golden_urls`, mismatched `expected_behavior`, empty answer on one side, or
+errors recorded on either side).
+
+Output (`pairwise_results/TIMESTAMP.json`) per row includes:
+
+- `winner`: `A` / `B` / `tie` / `unstable` — in the *original* frame
+  (i.e. relative to the answer ordering you passed)
+- `forward_winner` / `swapped_winner`: raw position-frame verdicts from
+  each judge call, for debugging positional bias
+- `forward_rationale` / `swapped_rationale`: the judge's reasoning per pass
+- `judge_*_tokens`: usage block aggregated across both passes
+
+Aggregate includes `wins_a`, `wins_b`, `ties`, `unstable`, `win_rate_a`
+(decisive verdicts only), and a two-sided binomial p-value vs the 50/50
+null. Per-category and per-difficulty breakdowns are reported alongside.
+
+The judge backend is the same one configured in `[eval]`. Each pair costs
+2× a normal judge call, but the extra cost buys positional-bias control —
+see `docs/eval-methodology.md` §2.
 
 ## Tests
 

@@ -235,6 +235,21 @@ func TestChat_WithToolCall(t *testing.T) {
 		t.Errorf("citation URL = %q, want %q", result.Citations[0].URL, "https://example.com/doc-1")
 	}
 
+	// Tool calls must be recorded for downstream observability (eval harness,
+	// debugging which tools fired without parsing logs).
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call record, got %d", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].Name != "search" {
+		t.Errorf("ToolCalls[0].Name = %q, want %q", result.ToolCalls[0].Name, "search")
+	}
+	if result.ToolCalls[0].Args == "" {
+		t.Errorf("ToolCalls[0].Args is empty; expected the LLM-supplied JSON args")
+	}
+	if result.ToolCalls[0].Error {
+		t.Errorf("ToolCalls[0].Error should be false on a successful call")
+	}
+
 	// Session should have: user + assistant(tool_call) + tool_result + assistant(final) = 4
 	sess := ss.Get(sessionID)
 	msgs := sess.GetMessages()

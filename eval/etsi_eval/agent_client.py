@@ -16,7 +16,8 @@ import httpx
 @dataclass(frozen=True)
 class AgentReply:
     content: str
-    raw: dict  # full response body for later introspection (sources, tool calls, etc.)
+    tool_calls: list[dict]  # ToolCallRecord shape: {name, args, error, duration_ms}
+    raw: dict  # full response body for later introspection
 
 
 def ask(
@@ -63,4 +64,5 @@ def ask(
     if not choices:
         raise RuntimeError(f"agent returned no choices: {body}")
     content = choices[0].get("message", {}).get("content", "") or ""
-    return AgentReply(content=content, raw=body)
+    tool_calls = list(body.get("tool_calls") or [])
+    return AgentReply(content=content, tool_calls=tool_calls, raw=body)

@@ -184,6 +184,7 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 		},
 		Citations: result.Citations,
 		Images:    result.Images,
+		ToolCalls: result.ToolCalls,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

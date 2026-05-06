@@ -27,6 +27,12 @@ type ChatCompletionWithCitations struct {
 	// rooted under /v1/artifacts/{token}.png). Empty when the configured
 	// backend doesn't support vision or no markers were resolved.
 	Images []agent.ImageRef `json:"images,omitempty"`
+
+	// ToolCalls records every tool invocation made inside the agent loop.
+	// Custom extension on top of the OpenAI response shape; root-level so
+	// it doesn't clash with the OpenAI-reserved tool_calls field that lives
+	// inside choices[].message. Same loose-compat posture as Citations.
+	ToolCalls []agent.ToolCallRecord `json:"tool_calls,omitempty"`
 }
 
 // EmbeddingRequest is the OpenAI-compatible embedding request.

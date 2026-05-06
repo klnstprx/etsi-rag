@@ -26,3 +26,4 @@ internal/admin/static/styles.css
 # Python
 __pycache__
 eval/results
+eval/pairwise_results
