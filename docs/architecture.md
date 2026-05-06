@@ -44,7 +44,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `config` | Centralized config types, koanf loading (TOML + env vars), `WriteTo()` for persistence |
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
-| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with semantic_search tool; single entry point for all conversations |
+| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with `semantic_search` and `read_document` tools; single entry point for all conversations |
 | `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling; cross-encoder reranker client (`rerank.go`, llama.cpp `/v1/rerank`) |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
@@ -102,7 +102,12 @@ Three-stage concurrent pipeline using Go channels. Each source runs independent 
 
 The agent is the single entry point for all conversations. It owns the system prompt, manages sessions, and collects citations from tool calls.
 
-`Tool` is an interface (`Name`, `Description`, `Parameters`, `Execute`). Each concrete tool (e.g. `SemanticSearchTool`) is its own type. `Execute` returns a `ToolResult` carrying the LLM-facing text and optional `[]Citation` (tool-agnostic `{Title, URL}` references used to render links in the UI and in the REST response).
+`Tool` is an interface (`Name`, `Description`, `Parameters`, `Execute`). Each concrete tool is its own type. `Execute` returns a `ToolResult` carrying the LLM-facing text and optional `[]Citation` (tool-agnostic `{Title, URL}` references used to render links in the UI and in the REST response).
+
+| Tool | Purpose |
+|------|---------|
+| `semantic_search` | Top-K dense / hybrid retrieval across the entire corpus. Resolves `[[image:ref]]` markers to image artifacts when the backend supports vision. |
+| `read_document` | Fetch a full document by URL (for follow-up after a too-narrow snippet). Optional `query` runs a doc-scoped dense search and returns the top-K chunks within that document. Reuses `documents.content` and the per-doc chunk vectors — RustFS is not on the read path. |
 
 ```
 User message --> [Load session history] --> [Chat with tools] --> [Tool call?]

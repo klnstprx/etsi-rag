@@ -221,6 +221,75 @@ func TestRetrieve(t *testing.T) {
 	}
 }
 
+// RetrieveInDocument is the doc-scoped variant powering read_document's
+// query mode. It must (a) embed the query, (b) restrict the search to the
+// requested doc's chunks, (c) wrap the result identically to Retrieve so
+// the caller can reuse BuildContext.
+func TestRetrieveInDocument(t *testing.T) {
+	p, s := setupTestPipeline(t)
+	ctx := context.Background()
+
+	// Two docs. SearchInDocument-level test already covers ranking; here we
+	// only verify the pipeline correctly threads docID and embedder.
+	for _, id := range []string{"doc-a", "doc-b"} {
+		if err := s.CreateDocument(ctx, &domain.Document{
+			ID: id, Title: "Doc " + id, Content: "c",
+			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateChunks(ctx, "doc-a",
+		[]domain.Chunk{{Content: "alpha chunk", ChunkIndex: 0}},
+		[][]float32{{0.5, 0.5, 0, 0}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateChunks(ctx, "doc-b",
+		[]domain.Chunk{{Content: "beta chunk", ChunkIndex: 0}},
+		[][]float32{{0.5, 0.5, 0, 0}},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.RetrieveInDocument(ctx, "any query", "doc-a", 5)
+	if err != nil {
+		t.Fatalf("RetrieveInDocument: %v", err)
+	}
+	if len(got.Chunks) != 1 {
+		t.Fatalf("expected 1 chunk (only doc-a), got %d", len(got.Chunks))
+	}
+	if got.Chunks[0].Chunk.DocID != "doc-a" {
+		t.Errorf("got chunk from %q, want doc-a", got.Chunks[0].Chunk.DocID)
+	}
+	if len(got.Documents) != 1 || got.Documents[0].ID != "doc-a" {
+		t.Errorf("Documents: got %v, want [doc-a]", got.Documents)
+	}
+}
+
+func TestRetrieveInDocument_UnknownDocReturnsEmpty(t *testing.T) {
+	p, _ := setupTestPipeline(t)
+	got, err := p.RetrieveInDocument(context.Background(), "q", "missing", 5)
+	if err != nil {
+		t.Fatalf("RetrieveInDocument: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil RetrievalResult on miss (empty chunks ok)")
+	}
+	if len(got.Chunks) != 0 {
+		t.Errorf("expected 0 chunks, got %d", len(got.Chunks))
+	}
+}
+
+func TestRetrieveInDocument_EmbedderUnconfiguredFails(t *testing.T) {
+	p, _ := setupTestPipeline(t)
+	p.SetEmbedder(nil)
+	_, err := p.RetrieveInDocument(context.Background(), "q", "doc-a", 5)
+	if err == nil {
+		t.Fatal("expected error when embedder is nil")
+	}
+}
+
 func TestBuildContext(t *testing.T) {
 	p, _ := setupTestPipeline(t)
 

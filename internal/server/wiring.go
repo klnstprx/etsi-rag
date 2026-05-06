@@ -219,7 +219,11 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 	searchTool := agent.NewSemanticSearchTool(s.pipeline)
 	searchTool.SetStore(s.store)
 	searchTool.SetMaxImages(s.cfg.Agent.Vision.MaxImagesPerCall)
-	tools := []agent.Tool{searchTool}
+
+	readDocTool := agent.NewReadDocumentTool(s.pipeline, s.store)
+	readDocTool.SetDefaultTopK(s.cfg.Retrieval.TopK)
+
+	tools := []agent.Tool{searchTool, readDocTool}
 
 	systemPrompt := s.agentSystemPrompt()
 	agentCounter, err := s.resolveCounter(s.cfg.Agent.Backend, s.cfg.Agent.Model)

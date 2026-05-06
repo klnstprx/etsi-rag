@@ -179,6 +179,174 @@ func TestSearchKeyword_DocumentDeleteRemovesFromFTS(t *testing.T) {
 	}
 }
 
+// SearchInDocument is the doc-scoped dense search powering read_document's
+// query mode. It mirrors SearchSimilar but filters chunks to a single
+// document — small enough that we don't bother with the embedding cache.
+
+func TestSearchInDocument_RanksByCosine(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Two docs, three chunks each, distinct embeddings.
+	doc1 := &domain.Document{
+		ID: "doc-1", Title: "Doc 1", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc1); err != nil {
+		t.Fatal(err)
+	}
+	chunks := []domain.Chunk{
+		{Content: "axis-x", ChunkIndex: 0},
+		{Content: "axis-y", ChunkIndex: 1},
+		{Content: "diagonal", ChunkIndex: 2},
+	}
+	embeddings := [][]float32{
+		{1.0, 0.0, 0.0, 0.0},
+		{0.0, 1.0, 0.0, 0.0},
+		{0.7, 0.7, 0.0, 0.0},
+	}
+	if err := s.CreateChunks(ctx, "doc-1", chunks, embeddings); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second doc with chunks that, by themselves, would dominate the global
+	// top-K. SearchInDocument must ignore them.
+	doc2 := &domain.Document{
+		ID: "doc-2", Title: "Doc 2", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateChunks(ctx, "doc-2",
+		[]domain.Chunk{{Content: "perfect-x", ChunkIndex: 0}},
+		[][]float32{{1.0, 0.0, 0.0, 0.0}},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	query := []float32{1.0, 0.0, 0.0, 0.0}
+	results, err := s.SearchInDocument(ctx, "doc-1", query, 5)
+	if err != nil {
+		t.Fatalf("SearchInDocument: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results (all of doc-1), got %d", len(results))
+	}
+	// All results must be from doc-1.
+	for i, r := range results {
+		if r.Chunk.DocID != "doc-1" {
+			t.Errorf("result[%d] from foreign doc %q", i, r.Chunk.DocID)
+		}
+	}
+	// Top-1 is the axis-x chunk (perfect cosine match).
+	if results[0].Chunk.ChunkIndex != 0 {
+		t.Errorf("top result should be chunk 0 (axis-x), got chunk %d: %q",
+			results[0].Chunk.ChunkIndex, results[0].Chunk.Content)
+	}
+	// Strictly descending scores.
+	for i := 1; i < len(results); i++ {
+		if results[i].Score > results[i-1].Score {
+			t.Errorf("not score-descending at i=%d: %f > %f",
+				i, results[i].Score, results[i-1].Score)
+		}
+	}
+}
+
+func TestSearchInDocument_TopKLimit(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	doc := &domain.Document{
+		ID: "doc-1", Title: "Doc", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	chunks := make([]domain.Chunk, 5)
+	embs := make([][]float32, 5)
+	for i := range chunks {
+		chunks[i] = domain.Chunk{Content: "c", ChunkIndex: i}
+		embs[i] = []float32{float32(i+1) * 0.1, 0, 0, 0}
+	}
+	if err := s.CreateChunks(ctx, "doc-1", chunks, embs); err != nil {
+		t.Fatal(err)
+	}
+
+	query := []float32{1, 0, 0, 0}
+
+	t.Run("topK less than total", func(t *testing.T) {
+		got, err := s.SearchInDocument(ctx, "doc-1", query, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Errorf("got %d, want 2", len(got))
+		}
+	})
+
+	t.Run("topK greater than total returns all", func(t *testing.T) {
+		got, err := s.SearchInDocument(ctx, "doc-1", query, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 5 {
+			t.Errorf("got %d, want 5 (all chunks)", len(got))
+		}
+	})
+
+	t.Run("topK zero returns empty", func(t *testing.T) {
+		got, err := s.SearchInDocument(ctx, "doc-1", query, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d, want 0", len(got))
+		}
+	})
+}
+
+func TestSearchInDocument_UnknownDocReturnsEmpty(t *testing.T) {
+	// Mirror SearchSimilar's "no results = empty slice, not error" semantics.
+	// The agent tool maps this to a graceful "document not found / no hits"
+	// text reply rather than propagating an error.
+	s := setupTestStore(t)
+	got, err := s.SearchInDocument(context.Background(), "missing-doc",
+		[]float32{1, 0, 0, 0}, 5)
+	if err != nil {
+		t.Fatalf("unexpected error for unknown doc: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 results, got %d", len(got))
+	}
+}
+
+func TestSearchInDocument_EmbeddingDimMismatch(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	doc := &domain.Document{
+		ID: "doc-1", Title: "Doc", Content: "c",
+		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateChunks(ctx, "doc-1",
+		[]domain.Chunk{{Content: "c", ChunkIndex: 0}},
+		[][]float32{{1, 0, 0, 0}},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wrong-length query → error, not silent zero score.
+	_, err := s.SearchInDocument(ctx, "doc-1", []float32{1, 0}, 5)
+	if err == nil {
+		t.Fatal("expected error for dimension mismatch")
+	}
+}
+
 func TestSearchKeyword_OrdersByRelevance(t *testing.T) {
 	store := setupTestStore(t)
 	seedChunks(t, store, "doc-1", []string{

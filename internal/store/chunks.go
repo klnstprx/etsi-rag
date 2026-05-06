@@ -313,6 +313,63 @@ func (s *SQLiteStore) SearchKeyword(ctx context.Context, query string, topK int)
 	return s.fetchSearchResults(ctx, scored)
 }
 
+// SearchInDocument performs a dense cosine search restricted to chunks of a
+// single document. Powers the read_document tool's query mode: when the LLM
+// asks "what does this doc say about X" we score only that doc's chunks.
+//
+// SQL-based (cache-bypass): the cache wasn't built for doc-scoped filtering
+// and a single doc has at most a few dozen chunks, so the JOIN-and-score
+// path is sub-millisecond. Mirrors SearchSimilar in semantics — unknown
+// docID returns an empty slice (not an error) so the caller can map the
+// "no hits" case to a graceful tool reply.
+func (s *SQLiteStore) SearchInDocument(ctx context.Context, docID string, embedding []float32, topK int) ([]SearchResult, error) {
+	if topK <= 0 {
+		return nil, nil
+	}
+	if dim := s.embeddingDim(); len(embedding) != dim {
+		return nil, fmt.Errorf("embedding dimension mismatch: expected %d, got %d",
+			dim, len(embedding))
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ce.chunk_id, ce.embedding
+		FROM chunk_embeddings ce
+		JOIN chunks c ON c.id = ce.chunk_id
+		WHERE c.doc_id = ?
+	`, docID)
+	if err != nil {
+		return nil, fmt.Errorf("loading doc chunk embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	var scored []cacheScored
+	for rows.Next() {
+		var chunkID int64
+		var blob []byte
+		if err := rows.Scan(&chunkID, &blob); err != nil {
+			return nil, fmt.Errorf("scanning chunk embedding: %w", err)
+		}
+		vec := deserializeFloat32(blob)
+		if dim := s.embeddingDim(); len(vec) != dim {
+			return nil, fmt.Errorf("stored embedding dim mismatch for chunk %d: expected %d, got %d",
+				chunkID, dim, len(vec))
+		}
+		scored = append(scored, cacheScored{ChunkID: chunkID, Score: cosineSimilarity(embedding, vec)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating doc chunk embeddings: %w", err)
+	}
+
+	if len(scored) == 0 {
+		return nil, nil
+	}
+	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+	if topK > len(scored) {
+		topK = len(scored)
+	}
+	return s.fetchSearchResults(ctx, scored[:topK])
+}
+
 // searchSimilarSQL is the legacy full-scan path. Used when the cache hasn't
 // been warmed (typical for :memory: tests). Loads every embedding row,
 // deserializes, scores, sorts, then fetches metadata for the top-K.

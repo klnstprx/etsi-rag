@@ -75,6 +75,35 @@ func (s *SQLiteStore) UpdateDocumentURL(ctx context.Context, id, url string) err
 	return nil
 }
 
+// GetDocumentByURL retrieves a document by its stored URL. Used by the
+// read_document agent tool to resolve a URL the LLM saw in a previous
+// citation back to a doc record. Exact match — the LLM passes URLs it
+// copied verbatim from prior tool output, so no canonicalisation is
+// needed; add it later if mismatches show up in logs. Empty URL never
+// matches (NULL-URL docs are not addressable through this lookup).
+func (s *SQLiteStore) GetDocumentByURL(ctx context.Context, url string) (*domain.Document, error) {
+	if url == "" {
+		return nil, fmt.Errorf("document with empty url: %w", ErrNotFound)
+	}
+	query := `
+		SELECT id, title, content, url, language, category
+		FROM documents
+		WHERE url = ?
+		LIMIT 1
+	`
+	var doc domain.Document
+	err := s.db.QueryRowContext(ctx, query, url).Scan(
+		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language, &doc.Category,
+	)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("document with url %q: %w", url, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying document by url: %w", err)
+	}
+	return &doc, nil
+}
+
 // GetDocument retrieves a document by ID.
 func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Document, error) {
 	query := `

@@ -121,6 +121,76 @@ func TestGetDocumentNotFound(t *testing.T) {
 	}
 }
 
+// GetDocumentByURL is the entry point for the read_document agent tool: the
+// LLM passes back a URL it saw in a previous citation, and we need to resolve
+// it to a doc record. Lookup is exact-match on documents.url.
+func TestGetDocumentByURL(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	url := "https://example.com/curso/info"
+	doc := &domain.Document{
+		ID:       "doc-with-url",
+		Title:    "Curso de prueba",
+		Content:  "Contenido completo del documento",
+		URL:      &url,
+		Language: domain.LanguageES,
+		Category: domain.CategoryCourse,
+	}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatalf("creating document: %v", err)
+	}
+
+	t.Run("hit", func(t *testing.T) {
+		got, err := s.GetDocumentByURL(ctx, url)
+		if err != nil {
+			t.Fatalf("GetDocumentByURL: %v", err)
+		}
+		if got == nil {
+			t.Fatal("expected document, got nil")
+		}
+		if got.ID != "doc-with-url" {
+			t.Errorf("ID mismatch: got %q, want doc-with-url", got.ID)
+		}
+		if got.Title != doc.Title {
+			t.Errorf("Title mismatch: got %q, want %q", got.Title, doc.Title)
+		}
+		if got.Content != doc.Content {
+			t.Errorf("Content mismatch: got %q, want %q", got.Content, doc.Content)
+		}
+	})
+
+	t.Run("miss returns ErrNotFound", func(t *testing.T) {
+		got, err := s.GetDocumentByURL(ctx, "https://example.com/does/not/exist")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got: %v", err)
+		}
+		if got != nil {
+			t.Error("expected nil document on miss")
+		}
+	})
+
+	t.Run("doc with NULL url is not returned by URL lookup", func(t *testing.T) {
+		// The LLM never sees citations for URL-less docs, so by-URL lookup
+		// must not surface them — and certainly not via "" matching NULL.
+		nullDoc := &domain.Document{
+			ID:       "doc-no-url",
+			Title:    "URL-less doc",
+			Content:  "x",
+			URL:      nil,
+			Language: domain.LanguageES,
+			Category: domain.CategoryGeneral,
+		}
+		if err := s.CreateDocument(ctx, nullDoc); err != nil {
+			t.Fatalf("creating URL-less document: %v", err)
+		}
+		got, err := s.GetDocumentByURL(ctx, "")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("empty URL must miss, got err=%v doc=%v", err, got)
+		}
+	})
+}
+
 func TestChunksWithEmbeddings(t *testing.T) {
 	store := setupTestStore(t)
 

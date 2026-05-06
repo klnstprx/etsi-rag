@@ -229,6 +229,32 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 	return buildRetrievalResult(candidates), nil
 }
 
+// RetrieveInDocument runs a dense cosine search restricted to a single
+// document's chunks. Powers the read_document agent tool's query mode:
+// when the LLM has a URL in hand and wants to drill into that doc with a
+// follow-up question, this is the entry point.
+//
+// No hybrid / reranker variants in the first cut — within ≤50 candidates
+// from one document the marginal precision wins from BM25 fusion or
+// cross-encoder reranking aren't worth the complexity (and the recent
+// pairwise eval showed those wins are inside judge noise even at full
+// corpus scale). Revisit if read_document eval shows a precision gap.
+func (p *Pipeline) RetrieveInDocument(ctx context.Context, query, docID string, topK int) (*RetrievalResult, error) {
+	embedder := p.getEmbedder()
+	if embedder == nil {
+		return nil, fmt.Errorf("embedding backend not configured")
+	}
+	embedding, err := embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embedding query: %w", err)
+	}
+	results, err := p.store.SearchInDocument(ctx, docID, embedding, topK)
+	if err != nil {
+		return nil, fmt.Errorf("searching in document: %w", err)
+	}
+	return buildRetrievalResult(results), nil
+}
+
 // applyRerank re-scores candidates using the supplied reranker and trims to
 // topK. On any failure (network, timeout, malformed response, partial result)
 // the original ordering is returned trimmed to topK. We never bubble a
