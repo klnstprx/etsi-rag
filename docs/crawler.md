@@ -127,7 +127,7 @@ Document language is determined per page, not per source:
 3. If the normalised value names a language supported by `domain.Language.Valid()` (currently `es` or `en`), it propagates to the document; otherwise it's discarded.
 4. On discard — or on PDFs, where no `<html lang>` exists — the embed stage falls back to the source's configured language (`CrawlSource.Language`).
 
-So an `/en/` translation served under a Spanish-language source is correctly tagged `en` if its `<html lang="en">` is present, instead of inheriting the source's `es`. The tag shows up in `documents.language` and downstream in the RAG language filter.
+So an `/en/` translation served under a Spanish-language source is correctly tagged `en` if its `<html lang="en">` is present, instead of inheriting the source's `es`. The tag is persisted in `documents.language` and surfaced in the `/v1/rag/documents` listing for metadata, but is no longer used to filter retrieval — multilingual embeddings made the hard filter unnecessary, and it was removed in commit `81d3b12`.
 
 ## Content-Addressed Document IDs
 

@@ -3,60 +3,61 @@
 ## 1. High-Level System Architecture
 
 ```mermaid
+%%{init: {'flowchart': {'defaultRenderer': 'elk'}}}%%
 graph TD
-    Main["cmd/server/main.go<br/>(entry point)"]
-    Server["internal/server/<br/>(compositor + lifecycle)"]
+    Main["cmd/server/main.go<br/>(entry)"] --> Server["internal/server/<br/>(compositor + lifecycle)"]
 
-    Main --> Server
-    Server --> API & Admin
+    Server --> API
+    Server --> Admin
 
     subgraph HTTP["HTTP Layer"]
         API["api/<br/>OpenAI-compatible + RAG"]
         Admin["admin/<br/>templ + Tailwind + HTMX"]
     end
 
-    API --> RAG
-    Admin --> Agent & Crawler
+    API --> Agent
+    Admin --> Agent
+    Admin --> Crawler
 
     subgraph Core["Core Logic"]
         Agent["agent/<br/>Tool-calling LLM loop"]
-        RAG["rag/<br/>Pipeline orchestration"]
+        RAG["rag/<br/>Retrieval service"]
         Crawler["crawler/<br/>BFS 3-stage pipeline"]
     end
 
     Agent --> RAG
     Crawler --> RAG
 
-    RAG --> LLMPkg & Store & Chunking
-    Agent --> LLMPkg
-    Crawler --> ObjStore
-
     subgraph Infra["Infrastructure"]
         LLMPkg["llm/<br/>openai-go SDK wrapper"]
         Store["store/<br/>SQLite + cosine similarity"]
         ObjStore["objectstore/<br/>S3 client"]
-        Session["session/<br/>Conversation state + TTL"]
         Chunking["chunking/<br/>Structure-aware splitting"]
     end
 
-    Chunking --> TokenCount["tokencount/<br/>Token counting"]
-
-    LLMPkg -->|"openai-go SDK"| LLM
-    Store --> SQLite
-    ObjStore -->|"aws-sdk-go-v2"| S3
-    Crawler -->|"go-rod"| Chrome
+    RAG --> Store
+    RAG --> Chunking
+    Agent --> LLMPkg
+    RAG --> LLMPkg
+    Crawler --> ObjStore
 
     subgraph External["External Services"]
-        LLM["LLM Backend<br/>(llama-server / OpenAI-compatible)"]
+        LLMBackend["LLM Backend<br/>(llama-server)"]
+        SQLite[("SQLite")]
         S3[("RustFS / S3")]
         Chrome["Headless Chrome"]
     end
 
-    SQLite[("SQLite")]
+    LLMPkg --> LLMBackend
+    Store --> SQLite
+    ObjStore --> S3
+    Crawler --> Chrome
 
-    subgraph Shared
-        Config["config/"] ~~~ Domain["domain/"] ~~~ Prompts["prompts/"]
+    subgraph Shared["Shared (types &amp; utilities, used by all layers)"]
+        Config["config/"] ~~~ Domain["domain/"] ~~~ Prompts["prompts/"] ~~~ Markers["markers/"] ~~~ Backend["backend/"] ~~~ Session["session/"] ~~~ TokenCount["tokencount/"]
     end
+
+    External ~~~ Shared
 ```
 
 ## 2. Package Dependency Graph
@@ -102,13 +103,17 @@ graph TD
         domain
         tokencount
         prompts
+        markers
+        backend
     end
 
     store --> domain
     chunking --> config & domain
-    rag --> domain & config
+    rag --> domain & config & markers
     api --> domain & tokencount
-    crawler --> domain
+    crawler --> domain & markers
+    server --> backend
+    agent --> markers
 ```
 
 ## 3. RAG Pipeline
@@ -117,23 +122,39 @@ graph TD
 flowchart TB
     subgraph Ingestion["Ingestion Flow"]
         direction TB
-        Doc["Document"] --> Chunk["Chunk<br/>(StructureAwareChunker)"]
-        Chunk --> Embed["Embed chunks<br/>(embedding model)"]
-        Embed --> StoreDoc["Store document +<br/>chunks + embeddings<br/>(SQLite)"]
+        Doc["Document<br/>(markdown + [[image:ref]] markers)"] --> Chunk["Chunk<br/>(StructureAwareChunker)"]
+        Chunk --> Embed["Embed chunks<br/>(markers stripped in-flight)"]
+        Embed --> StoreDoc["Store document +<br/>chunks + embeddings +<br/>chunks_fts (FTS5)"]
+        Doc -.->|"page renders / screenshots"| Artifacts["document_artifacts<br/>(RustFS PNGs)"]
     end
 
     subgraph Query["Query Flow (retrieval-only — agent owns chat)"]
         direction TB
         Q["User query"] --> Agent["agent.Chat<br/>(LLM + tools loop)"]
         Agent -->|"semantic_search tool call"| EmbedQ["Embed tool query"]
-        EmbedQ --> Search["Vector search<br/>(cosine similarity)"]
-        Search --> TopK["Top-K chunks"]
-        TopK --> BuildCtx["Build context<br/>(chunks + metadata)"]
-        BuildCtx -->|"ToolResult.Text + Citations"| Agent
+        EmbedQ --> Mode{"retrieval_mode"}
+        Mode -->|"dense"| Cosine["Cosine top-K_pool"]
+        Mode -->|"hybrid"| HybridBox
+        subgraph HybridBox["Hybrid"]
+            direction LR
+            Cos2["Cosine top-K_each"] --> RRF["RRF merge<br/>(k=60)"]
+            BM25["BM25 top-K_each<br/>(chunks_fts)"] --> RRF
+        end
+        Cosine --> Pool["Candidate pool"]
+        HybridBox --> Pool
+        Pool --> Rerank{"reranker.enabled?"}
+        Rerank -->|"yes"| Cross["Cross-encoder<br/>(/v1/rerank)"]
+        Rerank -->|"no / soft fall-through"| TopK
+        Cross --> TopK["Top-K chunks"]
+        TopK --> BuildCtx["Build context<br/>(chunks + metadata + image refs)"]
+        BuildCtx -->|"ToolResult.Text + Citations + Images"| Agent
         Agent --> Response["Streamed response<br/>(text + citations)"]
     end
 
-    StoreDoc -.->|"stored embeddings"| Search
+    StoreDoc -.->|"stored embeddings"| Cosine
+    StoreDoc -.->|"stored embeddings"| Cos2
+    StoreDoc -.->|"FTS5 index"| BM25
+    Artifacts -.->|"resolved by markers"| BuildCtx
 ```
 
 ## 4. Crawler Pipeline (3-Stage)
@@ -152,14 +173,19 @@ flowchart TD
         direction LR
         HTML["HTML"] --> Readability["go-readability"]
         PDFIn["PDF"] --> PDFText["pdftotext (poppler)"]
-        Readability --> MD["Markdown"]
+        Readability --> MD["Markdown<br/>(with [[image:ref]] markers)"]
         PDFText --> MD
+        HTML -.->|"go-rod screenshot"| Screenshot["HTML page PNG"]
+        PDFIn -.->|"pdftoppm"| PDFPages["PDF page PNGs"]
+        Screenshot --> ArtUpload["Upload to RustFS<br/>crawl/img/{sha}/{ref}.png"]
+        PDFPages --> ArtUpload
     end
 
     Parse -->|"embedCh"| HashCheck
+    Parse -.->|"document_artifacts row<br/>(doc_id, ref, public_token)"| ArtTable[("document_artifacts")]
 
     HashCheck{"Content changed?"}
-    HashCheck -->|"Yes"| Ingest["RAG Ingest<br/>(chunk + embed + store)"]
+    HashCheck -->|"Yes"| Ingest["RAG Ingest<br/>(chunk + embed + store + FTS5)"]
     HashCheck -->|"No"| Skip["Skip (update timestamp)"]
 ```
 
@@ -167,20 +193,27 @@ flowchart TD
 
 ```mermaid
 flowchart TB
-    Start["User message"] --> Build["Build messages<br/>(system + user)"]
+    Start["User message"] --> Build["Build messages<br/>(system + history + user)"]
     Build --> LLMCall["Chat with tools<br/>(LLM backend)"]
     LLMCall --> Check{"Tool calls<br/>in response?"}
 
-    Check -->|"No"| Final["Return text response"]
+    Check -->|"No"| Final["Return text response<br/>+ aggregated citations"]
     Check -->|"Yes"| Execute["Execute tool(s)"]
 
-    Execute --> SemanticSearch["semantic_search<br/>(vector search + context)"]
+    Execute --> SemanticSearch["semantic_search<br/>(retrieve + build context)"]
+    SemanticSearch --> Result["ToolResult<br/>{Text, Citations, Images}"]
 
-    SemanticSearch --> Append["Append tool results<br/>to messages"]
+    Result --> AggCite["Aggregate Citations<br/>(into ChatResult/ToolEvent)"]
+    AggCite --> Append["Append tool message<br/>to history"]
 
-    Append --> Counter{"Iterations<br/>< max_iterations?"}
+    Append --> Vision{"Images present<br/>and vision enabled?"}
+    Vision -->|"Yes"| Inject["Inject synthetic user message<br/>with image_url parts<br/>(public artifact URLs)"]
+    Vision -->|"No"| Counter
+    Inject --> Counter
+
+    Counter{"Iterations<br/>< max_iterations?"}
     Counter -->|"Yes"| LLMCall
-    Counter -->|"No"| Error["Error: max iterations<br/>(configured by [agent].max_iterations, default 5)"]
+    Counter -->|"No"| ErrorBox["Error: max iterations<br/>([agent].max_iterations, default 5)"]
 ```
 
 ## 6. Configuration & Client Resolution
@@ -193,15 +226,18 @@ flowchart TD
         Koanf --> Config["Config struct"]
     end
 
-    Config --> Stage["Stage config ([embedding] / [agent])"]
-    Stage --> Resolve["server.resolveEmbedClient / resolveChatClient<br/>(GetBackend by name + merge stage cfg)"]
+    Config --> Stage["Stage config<br/>([embedding] / [agent] / [reranker])"]
+    Stage --> Resolve["server.resolveEmbedClient / resolveChatClient / resolveReranker<br/>(GetBackend by name + merge stage cfg)"]
     Resolve --> Backend["BackendConfig"]
 
     Backend --> EmbedClient["llm.EmbedClient"]
     Backend --> ChatClient["llm.ChatClient"]
+    Backend --> RerankClient["llm.RerankClient<br/>(llama.cpp /v1/rerank)"]
     Backend --> Counter{"IsLlamaCpp?"}
     Counter -->|"Yes"| LlamaCounter["LlamaCppCounter (HTTP /tokenize)"]
     Counter -->|"No"| Tiktoken["TiktokenCounter (tiktoken-go)"]
+
+    Stage -.->|"[agent.vision].enabled<br/>+ public_base_url"| VisionFlag["Agent vision<br/>(synthetic image_url messages)"]
 ```
 
 ## 7. Request Routing
@@ -210,10 +246,11 @@ flowchart TD
 flowchart TB
     HTTP["HTTP Request"] --> Router["Chi Router"]
 
-    Router --> Health["/health"]
+    Router --> Health["GET /health"]
     Router --> V1["/v1/*"]
     Router --> AdminRoutes["/admin/*"]
 
+    V1 --> V1Health["GET /v1/health"]
     V1 --> ChatComp["POST /v1/chat/completions"]
     V1 --> Embeddings["POST /v1/embeddings"]
     V1 --> Artifacts["GET /v1/artifacts/{token}<br/>(image artifact stream)"]
@@ -241,71 +278,93 @@ erDiagram
         text title
         text content
         text url
-        text language
+        text language "es | en"
         text category
+        datetime created_at
     }
 
     chunks {
-        text id PK
-        text document_id FK
-        int chunk_index
+        int id PK "AUTOINCREMENT"
+        text doc_id FK
         text content
+        int chunk_index
         text section_title
     }
 
+    chunks_fts {
+        text content "FTS5 virtual table"
+    }
+
     chunk_embeddings {
-        text chunk_id FK
+        int chunk_id PK
         blob embedding
-        int dimension
     }
 
     backends {
-        text id PK
+        int id PK "AUTOINCREMENT"
         text name UK
         text base_url
         text api_key
         bool enabled
-        bool is_llama_cpp
+        datetime created_at
     }
 
     crawl_sources {
-        text id PK
+        int id PK "AUTOINCREMENT"
         text name
-        text seed_url
+        text seed_url UK
         text category
         text language
         bool enabled
+        datetime created_at
     }
 
     crawl_pages {
-        text id PK
-        text source_id FK
-        text url
+        int id PK "AUTOINCREMENT"
+        int source_id FK
+        text url UK
+        text content_type
+        text title
         text content_hash
+        text object_store_key
         text doc_id FK
         text status
+        text error_message
+        datetime last_crawled_at
+        datetime last_changed_at
     }
 
     crawl_runs {
-        text id PK
+        int id PK "AUTOINCREMENT"
+        int source_id FK
         text status
         int pages_discovered
-        int pages_ingested
+        int pages_fetched
+        int pages_changed
+        int pages_failed
+        datetime started_at
+        datetime finished_at
     }
 
     document_artifacts {
-        int id PK
+        int id PK "AUTOINCREMENT"
         text doc_id FK
         text ref
         text kind
         text object_store_key
         text mime_type
+        int width
+        int height
         text public_token UK
     }
 
     documents ||--o{ chunks : "has"
     chunks ||--|| chunk_embeddings : "has"
+    chunks ||--|| chunks_fts : "indexed via triggers"
     documents ||--o{ document_artifacts : "has"
     crawl_sources ||--o{ crawl_pages : "has"
+    crawl_sources ||--o{ crawl_runs : "tracked by"
     crawl_pages }o--o| documents : "references"
 ```
+
+`is_llama_cpp` is **not** a column on `backends` — it is a TOML-only flag in `BackendConfig`. The `chunks_fts` virtual table (FTS5 over `chunks.content`, `unicode61 remove_diacritics 2` tokenizer) is kept in sync with `chunks` via INSERT/UPDATE/DELETE triggers and backs the BM25 leg of hybrid retrieval.

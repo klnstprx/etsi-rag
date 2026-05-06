@@ -46,7 +46,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
 | `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with semantic_search tool; single entry point for all conversations |
 | `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
-| `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling |
+| `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling; cross-encoder reranker client (`rerank.go`, llama.cpp `/v1/rerank`) |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
 | `crawler` | BFS web crawler: 3-stage pipeline (crawl -> parse -> embed), go-rod for JS pages, go-readability for content extraction, PDF support |
 | `objectstore` | S3-compatible object storage client (RustFS) |
@@ -66,19 +66,23 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 ```
 User query
     |
-    +-- [retrieval_mode = "dense"]   --> [Embed] --> [Cosine top-K]
-    |
-    +-- [retrieval_mode = "hybrid"]  --> [Embed] --> [Cosine top-K_each]  -+
-    |                                                                     |
-    |                                       [BM25 top-K_each] (FTS5) -----+--> [RRF merge] --> [Top-K]
-    |
-    v
+    +-- [retrieval_mode = "dense"]   --> [Embed] --> [Cosine top-K_pool]   -+
+    |                                                                      |
+    +-- [retrieval_mode = "hybrid"]  --> [Embed] --> [Cosine top-K_each]   -+
+    |                                                                      |
+    |                                       [BM25 top-K_each] (FTS5) ------+--> [RRF merge] --> [pool]
+    |                                                                                              |
+    |                                                                                              v
+    |                                                                                   [Reranker (optional)]
+    |                                                                                              |
+    |                                                                                              v
+    v                                                                                          [Top-K]
 [Build context] --> [Formatted chunk text with token budget]
 ```
 
-The pipeline is a pure retrieval service — it takes an `embedder` only. Chat generation is handled by the agent, which calls `semantic_search` as a tool.
+The pipeline is a pure retrieval service — it takes an `embedder` and (optionally) a reranker only. Chat generation is handled by the agent, which calls `semantic_search` as a tool.
 
-`retrieval_mode` is selected via `[retrieval]` in `config.toml`. Default is `"dense"`. `"hybrid"` adds a BM25 leg over an SQLite FTS5 index of `chunks.content` and merges with cosine via reciprocal-rank fusion (`k=60`). For formulas, parameter choices, and citations see [retrieval.md](retrieval.md); for the decision rationale and eval results see [ADR-008](decisions/008-hybrid-retrieval.md). The agent's `semantic_search` tool sees the same `Retrieve` contract regardless of mode.
+`retrieval_mode` is selected via `[retrieval]` in `config.toml`. Default is `"dense"`. `"hybrid"` adds a BM25 leg over an SQLite FTS5 index of `chunks.content` and merges with cosine via reciprocal-rank fusion (`k=60`). When `[reranker].enabled = true`, a cross-encoder (llama.cpp `/v1/rerank`) re-scores the candidate pool to produce the final top-K (soft fall-through if the backend errors). For formulas, parameter choices, and citations see [retrieval.md](retrieval.md); see [ADR-008](decisions/008-hybrid-retrieval.md) for hybrid and [ADR-009](decisions/009-reranker.md) for the reranker. The agent's `semantic_search` tool sees the same `Retrieve` contract regardless of mode.
 
 ### Crawl Pipeline
 
@@ -106,12 +110,16 @@ User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
                                                   |                     v
                                                   +---- [Execute tool]
                                                         [Aggregate ToolResult.Citations]
+                                                        [If image refs + vision-capable model:
+                                                         inject synthetic user message with
+                                                         image_url parts]
 
                                            (max_iterations configurable, default 5)
 ```
 
 Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
-Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime. Agent construction (search-tool wiring, vision getter) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
+Vision: when `[agent.vision].enabled = true` and `public_base_url` is set, the agent inspects retrieved chunks for `[[image:ref]]` markers, resolves them to artifact URLs, and injects a synthetic user message carrying `image_url` parts on the next turn (see [ADR-006](decisions/006-multimodal-artifacts.md)).
+Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime. Agent construction (search-tool wiring, vision getter, reranker wiring) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
 
 ## Key Design Patterns
 
