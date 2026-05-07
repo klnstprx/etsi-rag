@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 
@@ -13,6 +14,26 @@ import (
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/domain"
 )
+
+// validateSourceKey rejects keys that are empty, contain a path separator, or
+// contain non-printable runes. Belt-and-braces: sources.toml validation already
+// covers stored keys, but route handlers receive their key from the URL path,
+// which is operator-controlled.
+func validateSourceKey(key string) error {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return fmt.Errorf("key is required")
+	}
+	if trimmed != key {
+		return fmt.Errorf("key must not have leading or trailing whitespace")
+	}
+	for _, r := range key {
+		if r == '/' || !unicode.IsPrint(r) {
+			return fmt.Errorf("key contains invalid character %q", r)
+		}
+	}
+	return nil
+}
 
 // parseTags splits a comma-separated form value into a clean tag slice.
 // Whitespace-only entries are dropped; the validator enforces the rest.
@@ -189,8 +210,8 @@ func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
 // SourceUpdate handles PUT /admin/crawler/sources/{key}.
 func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	if key == "" {
-		http.Error(w, "missing key", http.StatusBadRequest)
+	if err := validateSourceKey(key); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -233,8 +254,8 @@ func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
 // SourceDelete handles DELETE /admin/crawler/sources/{key}.
 func (h *Handler) SourceDelete(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	if key == "" {
-		http.Error(w, "missing key", http.StatusBadRequest)
+	if err := validateSourceKey(key); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
