@@ -208,7 +208,7 @@ func TestRetrieve(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := p.Retrieve(ctx, "query", nil)
+	result, err := p.Retrieve(ctx, "query", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve failed: %v", err)
 	}

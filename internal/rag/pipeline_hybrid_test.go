@@ -99,7 +99,7 @@ func TestRetrieve_HybridSurfacesDenseLowChunkViaBM25(t *testing.T) {
 	// last in dense (cos=0 vs ~1.0 for A) but rank 1 in BM25. RRF should
 	// pull it to the top of the merged result.
 	q := "uniquetokenzigzag"
-	got, err := p.Retrieve(ctx, q, nil)
+	got, err := p.Retrieve(ctx, q, RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestRetrieve_DenseModeIgnoresLexicalMatch(t *testing.T) {
 	p.SetConfig(cfg)
 
 	ctx := context.Background()
-	got, err := p.Retrieve(ctx, "uniquetokenzigzag", nil)
+	got, err := p.Retrieve(ctx, "uniquetokenzigzag", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestRetrieve_UnsupportedModeErrors(t *testing.T) {
 	cfg.RetrievalMode = "wat"
 	p.SetConfig(cfg)
 
-	_, err := p.Retrieve(context.Background(), "anything", nil)
+	_, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err == nil {
 		t.Fatal("expected error for unsupported retrieval_mode")
 	}

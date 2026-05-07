@@ -120,7 +120,7 @@ func TestRetrieve_RerankInvertsOrder(t *testing.T) {
 	rr := &reverseReranker{}
 	p.SetReranker(rr, 5)
 
-	got, err := p.Retrieve(context.Background(), "anything", nil)
+	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestRetrieve_RerankErrorFallsThrough(t *testing.T) {
 	er := &erroringReranker{}
 	p.SetReranker(er, 5)
 
-	got, err := p.Retrieve(context.Background(), "anything", nil)
+	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve must not surface reranker errors, got: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestRetrieve_NilRerankerSkipsRerank(t *testing.T) {
 	p, _ := setupDensePipeline(t, 3)
 	// No SetReranker call — reranker is nil. Retrieve should behave exactly
 	// like the pre-rerank pipeline.
-	got, err := p.Retrieve(context.Background(), "anything", nil)
+	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRetrieve_RerankOverFetchesCandidatePool(t *testing.T) {
 	rec := &recordingReranker{}
 	p.SetReranker(rec, 5)
 
-	got, err := p.Retrieve(context.Background(), "anything", nil)
+	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestRetrieve_RerankRespectsTopKWhenPoolSmaller(t *testing.T) {
 	rec := &recordingReranker{}
 	p.SetReranker(rec, 2) // poolSize < topK
 
-	got, err := p.Retrieve(context.Background(), "anything", nil)
+	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestRetrieve_RerankWithHybridUsesPoolDepth(t *testing.T) {
 	rec := &recordingReranker{}
 	p.SetReranker(rec, 50)
 
-	_, err := p.Retrieve(context.Background(), "anything", nil)
+	_, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestRetrieve_RerankSingleCandidateSkipsReranker(t *testing.T) {
 	rr := &reverseReranker{}
 	p.SetReranker(rr, 1)
 
-	if _, err := p.Retrieve(context.Background(), "anything", nil); err != nil {
+	if _, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{}); err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
 	if rr.calls != 0 {

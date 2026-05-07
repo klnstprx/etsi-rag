@@ -144,6 +144,19 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 	return nil
 }
 
+// RetrieveOpts bundles the optional knobs accepted by Retrieve. The zero
+// value selects the configured defaults and searches the full corpus.
+//
+// TopK overrides the configured top-k when non-nil.
+//
+// SourceKeys, when non-empty, restricts retrieval to chunks whose document is
+// referenced from at least one crawl_pages row matching the given source key
+// — the agent's list_sources / source_keys scoping path.
+type RetrieveOpts struct {
+	TopK       *int
+	SourceKeys []string
+}
+
 // Retrieve finds relevant chunks for a query.
 //
 // In "dense" mode, scores chunks by cosine similarity over query embeddings
@@ -155,7 +168,7 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 // trims the result to top-k. Reranker failures (network, timeout, tokenization
 // trouble) fall through silently to the un-reranked ordering — chats must not
 // fail because a reranker is offline. See ADR-009.
-func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int, sourceKeys ...string) (*RetrievalResult, error) {
+func (p *Pipeline) Retrieve(ctx context.Context, query string, opts RetrieveOpts) (*RetrievalResult, error) {
 	embedder := p.getEmbedder()
 	if embedder == nil {
 		return nil, fmt.Errorf("embedding backend not configured")
@@ -163,9 +176,10 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int, source
 	cfg := p.getConfig()
 
 	k := cfg.TopK
-	if topK != nil {
-		k = *topK
+	if opts.TopK != nil {
+		k = *opts.TopK
 	}
+	sourceKeys := opts.SourceKeys
 
 	reranker, rerankerPool := p.getReranker()
 

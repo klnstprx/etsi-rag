@@ -81,7 +81,10 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		return ToolResult{}, fmt.Errorf("parsing args: %w", err)
 	}
 
-	results, err := t.Pipeline.Retrieve(ctx, args.Query, args.TopK, args.SourceKeys...)
+	results, err := t.Pipeline.Retrieve(ctx, args.Query, rag.RetrieveOpts{
+		TopK:       args.TopK,
+		SourceKeys: args.SourceKeys,
+	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("RAG search: %w", err)
 	}

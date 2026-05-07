@@ -355,7 +355,7 @@ func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.pipeline.Retrieve(r.Context(), req.Query, req.TopK)
+	result, err := h.pipeline.Retrieve(r.Context(), req.Query, rag.RetrieveOpts{TopK: req.TopK})
 	if err != nil {
 		ErrInternal(err).WriteJSON(w, r)
 		return
