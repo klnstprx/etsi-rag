@@ -157,10 +157,7 @@ func TestPurgeOrphanDocuments_InvalidatesCache(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	src := &domain.CrawlSource{Name: "test", SeedURL: "https://example.com/", Category: "general", Language: "es", Enabled: true}
-	if err := s.CreateCrawlSource(ctx, src); err != nil {
-		t.Fatal(err)
-	}
+	const srcKey = "test"
 
 	// doc-orphan's embedding is closer to the query than doc-keep's, so
 	// without cache invalidation the cache would still rank it first and the
@@ -190,7 +187,7 @@ func TestPurgeOrphanDocuments_InvalidatesCache(t *testing.T) {
 	keepID := "doc-keep"
 	now := time.Now()
 	if err := s.UpsertCrawlPage(ctx, &domain.CrawlPage{
-		SourceID: src.ID, URL: "https://example.com/keep", DocID: &keepID,
+		SourceKey: srcKey, URL: "https://example.com/keep", DocID: &keepID,
 		ContentHash: "h", Status: domain.CrawlPageFetched, LastCrawledAt: &now,
 	}); err != nil {
 		t.Fatal(err)
@@ -230,10 +227,7 @@ func TestPurgeStaleDocuments_InvalidatesCache(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	src := &domain.CrawlSource{Name: "test", SeedURL: "https://example.com/", Category: "general", Language: "es", Enabled: true}
-	if err := s.CreateCrawlSource(ctx, src); err != nil {
-		t.Fatal(err)
-	}
+	const srcKey2 = "test"
 
 	specs := []struct {
 		id  string
@@ -260,8 +254,8 @@ func TestPurgeStaleDocuments_InvalidatesCache(t *testing.T) {
 	fresh, stale := "doc-fresh", "doc-stale"
 	now := time.Now()
 	pages := []*domain.CrawlPage{
-		{SourceID: src.ID, URL: "https://example.com/fresh", DocID: &fresh, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-		{SourceID: src.ID, URL: "https://example.com/stale", DocID: &stale, ContentHash: "h2", Status: domain.CrawlPageStale, LastCrawledAt: &now},
+		{SourceKey: srcKey2, URL: "https://example.com/fresh", DocID: &fresh, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: srcKey2, URL: "https://example.com/stale", DocID: &stale, ContentHash: "h2", Status: domain.CrawlPageStale, LastCrawledAt: &now},
 	}
 	for _, p := range pages {
 		if err := s.UpsertCrawlPage(ctx, p); err != nil {

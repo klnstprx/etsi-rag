@@ -155,24 +155,76 @@ func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]
 // pre-deserialized vectors and only the metadata for the top-K hits is
 // fetched from SQLite. When the cache is unloaded, falls back to the full
 // SQL scan path — keeping :memory: tests that never call Warm working.
-func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, topK int) ([]SearchResult, error) {
+//
+// Optional sourceKeys narrow the search to chunks whose document is
+// referenced by at least one crawl_pages row matching the given source key
+// (the agent's list_sources / source_keys scoping path). Empty/no slice =
+// search the entire corpus, identical to the pre-filter behaviour.
+func (s *SQLiteStore) SearchSimilar(ctx context.Context, embedding []float32, topK int, sourceKeys ...string) ([]SearchResult, error) {
 	if dim := s.embeddingDim(); len(embedding) != dim {
 		return nil, fmt.Errorf("embedding dimension mismatch: expected %d, got %d",
 			dim, len(embedding))
 	}
 
-	scored, useCache, err := s.cache.searchTopK(embedding, topK)
+	allowed, err := s.allowedDocIDsBySourceKeys(ctx, sourceKeys)
+	if err != nil {
+		return nil, err
+	}
+	if allowed != nil && len(allowed) == 0 {
+		return nil, nil // sourceKeys provided but none of them have any pages
+	}
+
+	scored, useCache, err := s.cache.searchTopK(embedding, topK, allowed)
 	if err != nil {
 		return nil, fmt.Errorf("scoring against cache: %w", err)
 	}
 	if !useCache {
-		return s.searchSimilarSQL(ctx, embedding, topK)
+		return s.searchSimilarSQL(ctx, embedding, topK, allowed)
 	}
 	if len(scored) == 0 {
 		return nil, nil
 	}
 
 	return s.fetchSearchResults(ctx, scored)
+}
+
+// allowedDocIDsBySourceKeys returns the set of doc IDs reachable via at least
+// one crawl_pages row whose source_key is in the provided slice. nil sourceKeys
+// → returns nil (the predicate "no filter"). Non-empty sourceKeys → returns a
+// non-nil set (possibly empty if no pages match).
+func (s *SQLiteStore) allowedDocIDsBySourceKeys(ctx context.Context, sourceKeys []string) (map[string]struct{}, error) {
+	if len(sourceKeys) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(sourceKeys))
+	args := make([]any, len(sourceKeys))
+	for i, k := range sourceKeys {
+		placeholders[i] = "?"
+		args[i] = k
+	}
+
+	query := `SELECT DISTINCT doc_id FROM crawl_pages
+		WHERE source_key IN (` + strings.Join(placeholders, ",") + `)
+		AND doc_id IS NOT NULL`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("resolving allowed doc IDs: %w", err)
+	}
+	defer rows.Close()
+
+	allowed := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning doc id: %w", err)
+		}
+		allowed[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating doc ids: %w", err)
+	}
+	return allowed, nil
 }
 
 // fetchSearchResults loads chunk + document metadata for the given top-K
@@ -271,7 +323,7 @@ func sanitizeFTS5Query(q string) string {
 //	SQLite FTS5 bm25() docs: https://www.sqlite.org/fts5.html#the_bm25_function
 //
 // See docs/retrieval.md for the formula and project-specific parameters.
-func (s *SQLiteStore) SearchKeyword(ctx context.Context, query string, topK int) ([]SearchResult, error) {
+func (s *SQLiteStore) SearchKeyword(ctx context.Context, query string, topK int, sourceKeys ...string) ([]SearchResult, error) {
 	if topK <= 0 {
 		return nil, nil
 	}
@@ -280,13 +332,31 @@ func (s *SQLiteStore) SearchKeyword(ctx context.Context, query string, topK int)
 		return nil, nil
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT rowid, bm25(chunks_fts) AS score
+	allowed, err := s.allowedDocIDsBySourceKeys(ctx, sourceKeys)
+	if err != nil {
+		return nil, err
+	}
+	if allowed != nil && len(allowed) == 0 {
+		return nil, nil
+	}
+
+	sql := `SELECT rowid, bm25(chunks_fts) AS score
 		FROM chunks_fts
-		WHERE chunks_fts MATCH ?
-		ORDER BY score
-		LIMIT ?
-	`, cleaned, topK)
+		WHERE chunks_fts MATCH ?`
+	args := []any{cleaned}
+	if allowed != nil {
+		placeholders := make([]string, 0, len(allowed))
+		for id := range allowed {
+			placeholders = append(placeholders, "?")
+			args = append(args, id)
+		}
+		sql += ` AND rowid IN (SELECT id FROM chunks WHERE doc_id IN (` +
+			strings.Join(placeholders, ",") + `))`
+	}
+	sql += ` ORDER BY score LIMIT ?`
+	args = append(args, topK)
+
+	rows, err := s.db.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 search: %w", err)
 	}
@@ -373,8 +443,24 @@ func (s *SQLiteStore) SearchInDocument(ctx context.Context, docID string, embedd
 // searchSimilarSQL is the legacy full-scan path. Used when the cache hasn't
 // been warmed (typical for :memory: tests). Loads every embedding row,
 // deserializes, scores, sorts, then fetches metadata for the top-K.
-func (s *SQLiteStore) searchSimilarSQL(ctx context.Context, embedding []float32, topK int) ([]SearchResult, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT chunk_id, embedding FROM chunk_embeddings`)
+//
+// allowed (when non-nil) restricts scoring to chunks whose document is in the
+// set — used by the source-key scoping path. The JOIN to chunks lets the
+// SQL filter happen at the query level instead of post-load filtering.
+func (s *SQLiteStore) searchSimilarSQL(ctx context.Context, embedding []float32, topK int, allowed map[string]struct{}) ([]SearchResult, error) {
+	query := `SELECT ce.chunk_id, ce.embedding FROM chunk_embeddings ce`
+	var args []any
+	if allowed != nil {
+		placeholders := make([]string, 0, len(allowed))
+		args = make([]any, 0, len(allowed))
+		for id := range allowed {
+			placeholders = append(placeholders, "?")
+			args = append(args, id)
+		}
+		query += ` JOIN chunks c ON c.id = ce.chunk_id WHERE c.doc_id IN (` +
+			strings.Join(placeholders, ",") + `)`
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("loading embeddings: %w", err)
 	}

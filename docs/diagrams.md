@@ -300,19 +300,9 @@ erDiagram
         blob embedding
     }
 
-    crawl_sources {
-        int id PK "AUTOINCREMENT"
-        text name
-        text seed_url UK
-        text category
-        text language
-        bool enabled
-        datetime created_at
-    }
-
     crawl_pages {
         int id PK "AUTOINCREMENT"
-        int source_id FK
+        text source_key "slug from sources.toml"
         text url UK
         text content_type
         text title
@@ -327,7 +317,7 @@ erDiagram
 
     crawl_runs {
         int id PK "AUTOINCREMENT"
-        int source_id FK
+        text source_key "slug; nullable for run-all"
         text status
         int pages_discovered
         int pages_fetched
@@ -353,9 +343,7 @@ erDiagram
     chunks ||--|| chunk_embeddings : "has"
     chunks ||--|| chunks_fts : "indexed via triggers"
     documents ||--o{ document_artifacts : "has"
-    crawl_sources ||--o{ crawl_pages : "has"
-    crawl_sources ||--o{ crawl_runs : "tracked by"
     crawl_pages }o--o| documents : "references"
 ```
 
-Backends are **not stored in SQLite** — they live as `[[backends]]` arrays in `config.toml`, edited via the admin UI which round-trips through `config.WriteTo()`. The `chunks_fts` virtual table (FTS5 over `chunks.content`, `unicode61 remove_diacritics 2` tokenizer) is kept in sync with `chunks` via INSERT/UPDATE/DELETE triggers and backs the BM25 leg of hybrid retrieval.
+Backends and crawl sources are **not stored in SQLite** — they live as `[[backends]]` in `config.toml` and `[[sources]]` in `config/sources.toml` respectively. Both round-trip through admin UI CRUD via `config.WriteTo()` and `config.WriteSources()`. `crawl_pages.source_key` and `crawl_runs.source_key` reference the slug from each `[[sources]]` block, validated against the in-memory snapshot at runtime rather than by SQL FK. The `chunks_fts` virtual table (FTS5 over `chunks.content`, `unicode61 remove_diacritics 2` tokenizer) is kept in sync with `chunks` via INSERT/UPDATE/DELETE triggers and backs the BM25 leg of hybrid retrieval.

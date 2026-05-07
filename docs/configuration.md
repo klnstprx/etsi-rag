@@ -1,6 +1,6 @@
 # Configuration
 <!-- packages: internal/config -->
-<!-- related: docs/architecture.md, config/config.default.toml -->
+<!-- related: docs/architecture.md, config/config.default.toml, config/sources.default.toml -->
 
 Centralized configuration via TOML files and environment variables.
 
@@ -12,7 +12,42 @@ config/config.default.toml  ->  config/{RUN_MODE}.toml  ->  APP__* env vars
 
 Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` loads `config/test.toml`). Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__AGENT__TEMPERATURE=0.5`).
 
-On first run, if `config/config.toml` does not exist, `config.default.toml` is copied into place; from then on `config.toml` is the user-editable file (gitignored).
+On first run, if `config/config.toml` does not exist, `config.default.toml` is copied into place; from then on `config.toml` is the user-editable file (gitignored). The same template-copy pattern applies to `config/sources.toml` (seeded from `sources.default.toml`), which holds the crawl source list.
+
+## Crawl sources
+
+Crawl sources live in `config/sources.toml` as a top-level array of `[[sources]]` blocks, not in the database. `crawl_pages.source_key` and `crawl_runs.source_key` reference the slug from each block, so renaming a seed URL or display name never orphans history.
+
+```toml
+[[sources]]
+key = 'becas'                    # stable slug; used as FK in crawl_pages/crawl_runs
+name = 'Becas y ayudas UMA'
+seed_url = 'https://www.uma.es/becas/'
+description = 'Convocatorias MEFPYD, becas UMA, becas de movilidad y ayudas Santander.'
+tags = ['financial-aid', 'mobility', 'enrollment']
+enabled = true
+```
+
+Source records carry only what's needed for crawl scoping plus agent-facing scoping hints. Per-document `category` (course/procedure/staff/general) is computed at ingest by `crawler.Categorize()` from URL patterns; per-page `language` is detected from `<html lang>` and falls back to Spanish (the project is UMA-only Spanish).
+
+`description` and `tags` are surfaced through the `list_sources` agent tool so the agent can decide whether to scope a search by passing `source_keys` to `semantic_search`. They are **not** persisted on documents and **not** used as SQL filters.
+
+### Tag vocabulary
+
+A controlled-but-extensible set; operators may invent new tags but should prefer existing ones for cross-source consistency:
+
+- **Degree-specific**: `degree-cs`, `degree-software`, `degree-computers`, `degree-health`, `degree-cybersecurity-ai`, `degree-math-cs-double`
+- **Level**: `master`, `phd`
+- **Academic procedures**: `enrollment`, `procedures`, `academic-calendar`, `exams`
+- **Mobility & funding**: `mobility`, `international`, `financial-aid`
+- **Career**: `internships`, `employment`
+- **Wellbeing & support**: `accessibility`, `wellbeing`, `student-life`, `housing`, `sports`
+- **Services**: `library`, `it-services`, `quality-assurance`
+- **Institution**: `school`
+
+`LoadSources` validates that `key` is non-empty and unique and that `seed_url` parses as an absolute URL. The admin UI at `/admin/crawler` performs CRUD against this file via `WriteSources` (atomic temp+rename) and calls `Crawler.SetSources` so the running crawler picks up edits without a server restart.
+
+Deleting a source — whether via the admin UI or by hand-editing `sources.toml` — marks the source's existing `crawl_pages` as `stale` rather than dropping them; embeddings, chunks and stored objects survive until the operator clicks **Purge Stale** on the crawler page. See [crawler.md](crawler.md#deletion-semantics) for the full mark-then-sweep flow and the rationale (typo recovery, history preservation).
 
 ## Pre-provisioning (no UI access)
 

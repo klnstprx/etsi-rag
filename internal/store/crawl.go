@@ -9,77 +9,12 @@ import (
 	"etsi-rag/internal/domain"
 )
 
-// --- Sources ---
-
-// ListCrawlSources returns all crawl sources ordered by ID.
-func (s *SQLiteStore) ListCrawlSources(ctx context.Context) ([]domain.CrawlSource, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, seed_url, category, language, enabled
-		FROM crawl_sources ORDER BY id`)
-	if err != nil {
-		return nil, fmt.Errorf("listing crawl sources: %w", err)
-	}
-	defer rows.Close()
-
-	var sources []domain.CrawlSource
-	for rows.Next() {
-		var src domain.CrawlSource
-		if err := rows.Scan(&src.ID, &src.Name, &src.SeedURL, &src.Category,
-			&src.Language, &src.Enabled); err != nil {
-			return nil, fmt.Errorf("scanning crawl source: %w", err)
-		}
-		sources = append(sources, src)
-	}
-	return sources, rows.Err()
-}
-
-// CreateCrawlSource inserts a new crawl source (INSERT OR IGNORE for idempotent seeding).
-func (s *SQLiteStore) CreateCrawlSource(ctx context.Context, src *domain.CrawlSource) error {
-	result, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO crawl_sources (name, seed_url, category, language, enabled)
-		VALUES (?, ?, ?, ?, ?)`,
-		src.Name, src.SeedURL, src.Category, src.Language, src.Enabled)
-	if err != nil {
-		return fmt.Errorf("creating crawl source: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("getting crawl source id: %w", err)
-	}
-	if id != 0 {
-		src.ID = id
-	}
-	return nil
-}
-
-// UpdateCrawlSource updates an existing crawl source.
-func (s *SQLiteStore) UpdateCrawlSource(ctx context.Context, src *domain.CrawlSource) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE crawl_sources SET name = ?, seed_url = ?, category = ?,
-			language = ?, enabled = ?
-		WHERE id = ?`,
-		src.Name, src.SeedURL, src.Category, src.Language, src.Enabled, src.ID)
-	if err != nil {
-		return fmt.Errorf("updating crawl source: %w", err)
-	}
-	return nil
-}
-
-// DeleteCrawlSource removes a crawl source by ID.
-func (s *SQLiteStore) DeleteCrawlSource(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM crawl_sources WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting crawl source: %w", err)
-	}
-	return nil
-}
-
 // --- Pages ---
 
 // UpsertCrawlPage inserts or updates a crawl page by URL.
 func (s *SQLiteStore) UpsertCrawlPage(ctx context.Context, page *domain.CrawlPage) error {
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO crawl_pages (source_id, url, content_type, title, content_hash,
+		INSERT INTO crawl_pages (source_key, url, content_type, title, content_hash,
 			object_store_key, doc_id, status, error_message, last_crawled_at, last_changed_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
@@ -92,7 +27,7 @@ func (s *SQLiteStore) UpsertCrawlPage(ctx context.Context, page *domain.CrawlPag
 			error_message = excluded.error_message,
 			last_crawled_at = excluded.last_crawled_at,
 			last_changed_at = excluded.last_changed_at`,
-		page.SourceID, page.URL, page.ContentType, page.Title, page.ContentHash,
+		page.SourceKey, page.URL, page.ContentType, page.Title, page.ContentHash,
 		page.ObjectStoreKey, page.DocID, string(page.Status), page.ErrorMessage,
 		page.LastCrawledAt, page.LastChangedAt)
 	if err != nil {
@@ -110,10 +45,10 @@ func (s *SQLiteStore) GetCrawlPageByURL(ctx context.Context, url string) (*domai
 	var page domain.CrawlPage
 	var status string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, source_id, url, content_type, title, content_hash,
+		SELECT id, source_key, url, content_type, title, content_hash,
 			object_store_key, doc_id, status, error_message, last_crawled_at, last_changed_at
 		FROM crawl_pages WHERE url = ?`, url).
-		Scan(&page.ID, &page.SourceID, &page.URL, &page.ContentType, &page.Title,
+		Scan(&page.ID, &page.SourceKey, &page.URL, &page.ContentType, &page.Title,
 			&page.ContentHash, &page.ObjectStoreKey, &page.DocID, &status,
 			&page.ErrorMessage, &page.LastCrawledAt, &page.LastChangedAt)
 	if err == sql.ErrNoRows {
@@ -127,15 +62,15 @@ func (s *SQLiteStore) GetCrawlPageByURL(ctx context.Context, url string) (*domai
 }
 
 // ListCrawlPages returns crawl pages, optionally filtered by source and/or status.
-func (s *SQLiteStore) ListCrawlPages(ctx context.Context, sourceID *int64, status *string) ([]domain.CrawlPage, error) {
-	query := `SELECT id, source_id, url, content_type, title, content_hash,
+func (s *SQLiteStore) ListCrawlPages(ctx context.Context, sourceKey *string, status *string) ([]domain.CrawlPage, error) {
+	query := `SELECT id, source_key, url, content_type, title, content_hash,
 		object_store_key, doc_id, status, error_message, last_crawled_at, last_changed_at
 		FROM crawl_pages WHERE 1=1`
 	var args []any
 
-	if sourceID != nil {
-		query += ` AND source_id = ?`
-		args = append(args, *sourceID)
+	if sourceKey != nil {
+		query += ` AND source_key = ?`
+		args = append(args, *sourceKey)
 	}
 	if status != nil {
 		query += ` AND status = ?`
@@ -153,7 +88,7 @@ func (s *SQLiteStore) ListCrawlPages(ctx context.Context, sourceID *int64, statu
 	for rows.Next() {
 		var p domain.CrawlPage
 		var st string
-		if err := rows.Scan(&p.ID, &p.SourceID, &p.URL, &p.ContentType, &p.Title,
+		if err := rows.Scan(&p.ID, &p.SourceKey, &p.URL, &p.ContentType, &p.Title,
 			&p.ContentHash, &p.ObjectStoreKey, &p.DocID, &st,
 			&p.ErrorMessage, &p.LastCrawledAt, &p.LastChangedAt); err != nil {
 			return nil, fmt.Errorf("scanning crawl page: %w", err)
@@ -165,14 +100,63 @@ func (s *SQLiteStore) ListCrawlPages(ctx context.Context, sourceID *int64, statu
 }
 
 // MarkStalePages marks pages not crawled since runStartedAt as stale.
-func (s *SQLiteStore) MarkStalePages(ctx context.Context, sourceID int64, runStartedAt time.Time) (int, error) {
+func (s *SQLiteStore) MarkStalePages(ctx context.Context, sourceKey string, runStartedAt time.Time) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE crawl_pages SET status = 'stale'
-		WHERE source_id = ? AND status != 'stale'
+		WHERE source_key = ? AND status != 'stale'
 			AND (last_crawled_at IS NULL OR last_crawled_at < ?)`,
-		sourceID, runStartedAt)
+		sourceKey, runStartedAt)
 	if err != nil {
 		return 0, fmt.Errorf("marking stale pages: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+// MarkPagesStaleBySourceKey flags every non-stale page belonging to sourceKey
+// as stale. Called when a source is removed from sources.toml so the existing
+// purge-stale flow can drop the embeddings, chunks and stored objects.
+func (s *SQLiteStore) MarkPagesStaleBySourceKey(ctx context.Context, sourceKey string) (int, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE crawl_pages SET status = 'stale'
+		WHERE source_key = ? AND status != 'stale'`, sourceKey)
+	if err != nil {
+		return 0, fmt.Errorf("marking pages stale for source %q: %w", sourceKey, err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+// MarkOrphanPagesStale flags every non-stale page whose source_key is not in
+// knownKeys as stale. Used at boot to reconcile crawl_pages with the loaded
+// sources.toml — covers hand-edits to the file that bypass the admin UI.
+// An empty knownKeys slice marks every non-stale page as stale.
+func (s *SQLiteStore) MarkOrphanPagesStale(ctx context.Context, knownKeys []string) (int, error) {
+	if len(knownKeys) == 0 {
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE crawl_pages SET status = 'stale' WHERE status != 'stale'`)
+		if err != nil {
+			return 0, fmt.Errorf("marking all pages stale: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		return int(n), nil
+	}
+
+	placeholders := make([]byte, 0, 2*len(knownKeys)-1)
+	args := make([]any, 0, len(knownKeys))
+	for i, k := range knownKeys {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args = append(args, k)
+	}
+
+	query := `UPDATE crawl_pages SET status = 'stale'
+		WHERE status != 'stale' AND source_key NOT IN (` + string(placeholders) + `)`
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("marking orphan pages stale: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
@@ -252,10 +236,11 @@ func (s *SQLiteStore) purgeDocumentsTx(ctx context.Context, selectQuery, deleteQ
 
 // --- Runs ---
 
-// CreateCrawlRun creates a new crawl run and returns its ID.
-func (s *SQLiteStore) CreateCrawlRun(ctx context.Context, sourceID *int64) (int64, error) {
+// CreateCrawlRun creates a new crawl run and returns its ID. sourceKey is nil
+// for an "all sources" run.
+func (s *SQLiteStore) CreateCrawlRun(ctx context.Context, sourceKey *string) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO crawl_runs (source_id, status) VALUES (?, 'running')`, sourceID)
+		INSERT INTO crawl_runs (source_key, status) VALUES (?, 'running')`, sourceKey)
 	if err != nil {
 		return 0, fmt.Errorf("creating crawl run: %w", err)
 	}
@@ -279,7 +264,7 @@ func (s *SQLiteStore) UpdateCrawlRun(ctx context.Context, run *domain.CrawlRun) 
 // ListCrawlRuns returns the most recent crawl runs.
 func (s *SQLiteStore) ListCrawlRuns(ctx context.Context, limit int) ([]domain.CrawlRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, source_id, status, pages_discovered, pages_fetched,
+		SELECT id, source_key, status, pages_discovered, pages_fetched,
 			pages_changed, pages_failed, error_message, started_at, finished_at
 		FROM crawl_runs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -291,7 +276,7 @@ func (s *SQLiteStore) ListCrawlRuns(ctx context.Context, limit int) ([]domain.Cr
 	for rows.Next() {
 		var run domain.CrawlRun
 		var status string
-		if err := rows.Scan(&run.ID, &run.SourceID, &status, &run.PagesDiscovered,
+		if err := rows.Scan(&run.ID, &run.SourceKey, &status, &run.PagesDiscovered,
 			&run.PagesFetched, &run.PagesChanged, &run.PagesFailed,
 			&run.ErrorMessage, &run.StartedAt, &run.FinishedAt); err != nil {
 			return nil, fmt.Errorf("scanning crawl run: %w", err)

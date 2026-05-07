@@ -51,7 +51,7 @@ func (c *Crawler) crawlStageAll(
 			}
 
 			// Mark stale pages after source completes
-			stale, err := c.store.MarkStalePages(ctx, src.ID, runStartedAt)
+			stale, err := c.store.MarkStalePages(ctx, src.Key, runStartedAt)
 			if err != nil {
 				c.logger.Warn().Err(err).Str("source", src.Name).Msg("failed to mark stale pages")
 			} else if stale > 0 {
@@ -95,9 +95,7 @@ func (c *Crawler) crawlSourceStage(
 	seedPath := seedParsed.Path
 
 	srcRef := CrawlSourceRef{
-		ID:       src.ID,
-		Category: src.Category,
-		Language: src.Language,
+		Key: src.Key,
 	}
 
 	ticker := time.NewTicker(c.fetcher.Delay())
@@ -135,7 +133,7 @@ func (c *Crawler) crawlSourceStage(
 			c.logger.Warn().Err(err).Str("url", item.url).Msg("fetch failed")
 			progress.CrawlFail.Add(1)
 			srcFailed++
-			c.recordFailedPage(ctx, src.ID, item.url, err)
+			c.recordFailedPage(ctx, src.Key, item.url, err)
 			continue
 		}
 		progress.Fetched.Add(1)
@@ -166,7 +164,7 @@ func (c *Crawler) crawlSourceStage(
 			if err != nil {
 				c.logger.Warn().Err(err).Str("url", item.url).Msg("html parse failed")
 				progress.CrawlFail.Add(1)
-				c.recordFailedPage(ctx, src.ID, item.url, err)
+				c.recordFailedPage(ctx, src.Key, item.url, err)
 				continue
 			}
 			ci.HTMLParsed = parsed
@@ -261,7 +259,7 @@ func (c *Crawler) parseStage(
 			if err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("pdf extraction failed")
 				progress.ParseFail.Add(1)
-				c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
+				c.recordFailedPage(ctx, item.Source.Key, item.URL, err)
 				continue
 			}
 			text = result.Text
@@ -354,18 +352,17 @@ func (c *Crawler) embedStage(
 		}
 
 		docID := StableDocID(item.ContentHash)
-		category := Categorize(item.URL, item.Source.Category)
+		category := Categorize(item.URL, "")
 		// Prefer the per-page <html lang> when the parser extracted a supported
-		// language; fall back to the source's configured language otherwise
-		// (PDFs, pages without lang attr, pages tagged with unsupported langs).
-		language := domain.Language(item.Source.Language)
+		// language; fall back to Spanish (project is UMA-only Spanish content).
+		language := domain.LanguageES
 		if item.Language != "" {
 			language = domain.Language(item.Language)
 		}
 		urlStr := item.URL
 
 		page := &domain.CrawlPage{
-			SourceID:       item.Source.ID,
+			SourceKey:      item.Source.Key,
 			URL:            item.URL,
 			ContentType:    item.ContentType,
 			Title:          item.Title,
@@ -416,7 +413,7 @@ func (c *Crawler) embedStage(
 				c.logger.Warn().Err(err).Str("url", item.URL).Str("doc_id", docID).Msg("delete stale document failed")
 				progress.EmbedFail.Add(1)
 				embedFailed++
-				c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
+				c.recordFailedPage(ctx, item.Source.Key, item.URL, err)
 				continue
 			}
 		}
@@ -442,7 +439,7 @@ func (c *Crawler) embedStage(
 			}
 			progress.EmbedFail.Add(1)
 			embedFailed++
-			c.recordFailedPage(ctx, item.Source.ID, item.URL, err)
+			c.recordFailedPage(ctx, item.Source.Key, item.URL, err)
 			if chunkErr {
 				continue
 			}

@@ -155,7 +155,7 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 // trims the result to top-k. Reranker failures (network, timeout, tokenization
 // trouble) fall through silently to the un-reranked ordering — chats must not
 // fail because a reranker is offline. See ADR-009.
-func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*RetrievalResult, error) {
+func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int, sourceKeys ...string) (*RetrievalResult, error) {
 	embedder := p.getEmbedder()
 	if embedder == nil {
 		return nil, fmt.Errorf("embedding backend not configured")
@@ -183,7 +183,7 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 		if err != nil {
 			return nil, fmt.Errorf("embedding query: %w", err)
 		}
-		results, err := p.store.SearchSimilar(ctx, embedding, fetch)
+		results, err := p.store.SearchSimilar(ctx, embedding, fetch, sourceKeys...)
 		if err != nil {
 			return nil, fmt.Errorf("searching: %w", err)
 		}
@@ -203,11 +203,11 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, topK *int) (*Retr
 		if err != nil {
 			return nil, fmt.Errorf("embedding query: %w", err)
 		}
-		dense, err := p.store.SearchSimilar(ctx, embedding, kEach)
+		dense, err := p.store.SearchSimilar(ctx, embedding, kEach, sourceKeys...)
 		if err != nil {
 			return nil, fmt.Errorf("dense search: %w", err)
 		}
-		sparse, err := p.store.SearchKeyword(ctx, query, kEach)
+		sparse, err := p.store.SearchKeyword(ctx, query, kEach, sourceKeys...)
 		if err != nil {
 			return nil, fmt.Errorf("keyword search: %w", err)
 		}

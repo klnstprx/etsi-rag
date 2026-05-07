@@ -49,19 +49,13 @@ func Migrate(db *sql.DB) error {
 			embedding BLOB NOT NULL
 		);
 
-		CREATE TABLE IF NOT EXISTS crawl_sources (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			seed_url TEXT NOT NULL UNIQUE,
-			category TEXT NOT NULL,
-			language TEXT NOT NULL DEFAULT 'es',
-			enabled INTEGER NOT NULL DEFAULT 1,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-
+		-- crawl_sources lives in config/sources.toml. crawl_pages and crawl_runs
+		-- reference it by stable slug (source_key) so renaming a seed URL or
+		-- display name in the TOML does not orphan history. The slug is
+		-- validated against the loaded sources at runtime, not by SQL FK.
 		CREATE TABLE IF NOT EXISTS crawl_pages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			source_id INTEGER NOT NULL REFERENCES crawl_sources(id),
+			source_key TEXT NOT NULL,
 			url TEXT NOT NULL UNIQUE,
 			content_type TEXT NOT NULL DEFAULT 'html',
 			title TEXT NOT NULL DEFAULT '',
@@ -75,12 +69,12 @@ func Migrate(db *sql.DB) error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_crawl_pages_source ON crawl_pages(source_id);
+		CREATE INDEX IF NOT EXISTS idx_crawl_pages_source ON crawl_pages(source_key);
 		CREATE INDEX IF NOT EXISTS idx_crawl_pages_status ON crawl_pages(status);
 
 		CREATE TABLE IF NOT EXISTS crawl_runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			source_id INTEGER REFERENCES crawl_sources(id),
+			source_key TEXT,
 			status TEXT NOT NULL DEFAULT 'running',
 			pages_discovered INTEGER NOT NULL DEFAULT 0,
 			pages_fetched INTEGER NOT NULL DEFAULT 0,

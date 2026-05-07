@@ -1,8 +1,23 @@
 # Crawler Design
 <!-- packages: internal/crawler, internal/objectstore -->
-<!-- related: docs/uma-site-structure.md, docs/architecture.md -->
+<!-- related: docs/uma-site-structure.md, docs/architecture.md, docs/configuration.md -->
 
 BFS web crawler for ETSI Informatica (UMA) content acquisition. Fetches HTML pages and PDFs, extracts content, chunks and embeds into the RAG pipeline.
+
+## Sources
+
+Seed URLs live in `config/sources.toml` (single source of truth) — see [configuration.md](configuration.md#crawl-sources) for the schema. The crawler holds an in-memory snapshot loaded at boot; the admin UI mutates the file and calls `Crawler.SetSources` to hot-reload it for the next run. Per-URL state (`crawl_pages`) and per-run history (`crawl_runs`) reference each source by its stable `key` slug.
+
+Each source also carries a `description` and a list of `tags`. These are agent-facing only — surfaced through the `list_sources` tool so the agent can pass `source_keys` to `semantic_search` for scoped retrieval. They are not stored on documents and not used as SQL filters at ingest or retrieval time.
+
+### Deletion semantics
+
+Removing a source is non-destructive by design — TOML edits should never silently drop indexed content. The two paths converge on the same flow:
+
+- **Admin UI delete** (`DELETE /admin/crawler/sources/{key}`): writes the new `sources.toml`, then calls `MarkPagesStaleBySourceKey` so the source's `crawl_pages` flip from `fetched`/`failed` to `stale`. The toast reports the count.
+- **Hand-edit to `sources.toml`**: caught at next boot — `server.New` calls `MarkOrphanPagesStale` with the loaded keys, marking any page whose `source_key` is no longer in the file.
+
+In both cases the embeddings, chunks and stored objects stay in place until the operator clicks **Purge Stale** on the crawler page, which runs `PurgeStaleDocuments` (cascades to chunks/embeddings via FK) and clears `doc_id` on the now-orphaned stale pages. This gives a typo'd or temporary source removal a recovery window: re-add the key before purging and the next crawl re-uses the existing rows.
 
 ## Pipeline
 
@@ -121,13 +136,13 @@ This is the supported path after switching embedding model or dimension: save th
 
 ## Per-Page Language Detection
 
-Document language is determined per page, not per source:
+Document language is determined per page:
 1. `ParseHTML` reads the `lang` attribute from the first `<html>` element.
 2. The value is normalised — trim whitespace, lowercase, drop the region subtag (`en-US` → `en`, `es-ES` → `es`).
 3. If the normalised value names a language supported by `domain.Language.Valid()` (currently `es` or `en`), it propagates to the document; otherwise it's discarded.
-4. On discard — or on PDFs, where no `<html lang>` exists — the embed stage falls back to the source's configured language (`CrawlSource.Language`).
+4. On discard — or on PDFs, where no `<html lang>` exists — the embed stage falls back to `domain.LanguageES` (Spanish), since the project crawls UMA-only content.
 
-So an `/en/` translation served under a Spanish-language source is correctly tagged `en` if its `<html lang="en">` is present, instead of inheriting the source's `es`. The tag is persisted in `documents.language` and surfaced in the `/v1/rag/documents` listing for metadata, but is no longer used to filter retrieval — multilingual embeddings made the hard filter unnecessary, and it was removed in commit `81d3b12`.
+So an `/en/` translation served under a Spanish-language source is correctly tagged `en` if its `<html lang="en">` is present. The tag is persisted in `documents.language` and surfaced in the `/v1/rag/documents` listing for metadata, but is no longer used to filter retrieval — multilingual embeddings made the hard filter unnecessary, and it was removed in commit `81d3b12`.
 
 ## Content-Addressed Document IDs
 

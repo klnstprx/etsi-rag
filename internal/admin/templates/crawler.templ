@@ -92,10 +92,11 @@ templ CrawlerContent(data CrawlerData) {
 						hx-swap="innerHTML"
 						class="grid grid-cols-1 gap-4 sm:grid-cols-2"
 					>
+						@FormField("key", "Key (slug)", "text", "", "my-source", true)
 						@FormField("name", "Name", "text", "", "My Source", true)
 						@FormField("seed_url", "Seed URL", "url", "", "https://example.com/path", true)
-						@FormField("category", "Category", "text", "", "general", false)
-						@FormField("language", "Language", "text", "es", "", false)
+						@FormTextarea("description", "Description (agent-facing)", "", "Convocatorias MEFPYD, becas UMA…", "Shown to the agent via list_sources to help it pick scopes.", 2)
+						@FormField("tags", "Tags (comma-separated)", "text", "", "financial-aid, mobility", false)
 						<div class="sm:col-span-2">
 							@FormCheckbox("enabled", "Enabled", true)
 						</div>
@@ -170,10 +171,10 @@ templ SourceTable(sources []domain.CrawlSource) {
 		<table class="min-w-full divide-y divide-gray-200">
 			<thead class="bg-gray-50">
 				<tr>
+					@Th("Key")
 					@Th("Name")
 					@Th("Seed URL")
-					@Th("Category")
-					@Th("Language")
+					@Th("Tags")
 					@Th("Status")
 					@Th("Actions")
 				</tr>
@@ -181,16 +182,18 @@ templ SourceTable(sources []domain.CrawlSource) {
 			<tbody class="bg-white divide-y divide-gray-200">
 				for _, src := range sources {
 					<tr>
+						<td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-700">{ src.Key }</td>
 						<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{ src.Name }</td>
 						<td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">{ src.SeedURL }</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ src.Category }</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ src.Language }</td>
+						<td class="px-6 py-4 text-sm text-gray-500">
+							@TagPills(src.Tags)
+						</td>
 						<td class="px-6 py-4 whitespace-nowrap">
 							@EnabledBadge(src.Enabled)
 						</td>
 						<td class="px-6 py-4 whitespace-nowrap">
 							@BtnLink("Delete", "red", templ.Attributes{
-								"hx-delete":  fmt.Sprintf("/admin/crawler/sources/%d", src.ID),
+								"hx-delete":  fmt.Sprintf("/admin/crawler/sources/%s", src.Key),
 								"hx-target":  "#main",
 								"hx-swap":    "innerHTML",
 								"hx-confirm": "Delete this source?",

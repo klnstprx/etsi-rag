@@ -103,7 +103,7 @@ func TestEmbedStage_Force_DeletesAndReingestsExistingDocument(t *testing.T) {
 		Text:        "fresh content body for re-embedding",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{ID: 1, Category: "general", Language: "es"},
+		Source:      CrawlSourceRef{Key: "test"},
 	}
 	close(in)
 
@@ -178,7 +178,7 @@ func TestEmbedStage_DedupSwapsToCanonicalURL(t *testing.T) {
 		Text:        "x",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{ID: 1, Category: "degree", Language: "es"},
+		Source:      CrawlSourceRef{Key: "test"},
 	}
 	close(in)
 
@@ -226,7 +226,7 @@ func TestEmbedStage_DedupKeepsCanonicalURL(t *testing.T) {
 		Text:        "x",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{ID: 1, Category: "degree", Language: "es"},
+		Source:      CrawlSourceRef{Key: "test"},
 	}
 	close(in)
 
@@ -271,7 +271,7 @@ func TestEmbedStage_NoForce_SkipsExistingDocument(t *testing.T) {
 		Text:        "fresh text",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{ID: 1, Category: "general", Language: "es"},
+		Source:      CrawlSourceRef{Key: "test"},
 	}
 	close(in)
 

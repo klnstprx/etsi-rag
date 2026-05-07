@@ -44,7 +44,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `config` | Centralized config types, koanf loading (TOML + env vars), `WriteTo()` for persistence |
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
-| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with `semantic_search` and `read_document` tools; single entry point for all conversations |
+| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with `semantic_search`, `list_sources` and `read_document` tools; single entry point for all conversations |
 | `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling; cross-encoder reranker client (`rerank.go`, llama.cpp `/v1/rerank`) |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
@@ -106,7 +106,8 @@ The agent is the single entry point for all conversations. It owns the system pr
 
 | Tool | Purpose |
 |------|---------|
-| `semantic_search` | Top-K dense / hybrid retrieval across the entire corpus. Resolves `[[image:ref]]` markers to image artifacts when the backend supports vision. |
+| `semantic_search` | Top-K dense / hybrid retrieval. Optional `source_keys` array scopes retrieval to documents reachable via the listed crawl-source keys (joined through `crawl_pages.source_key`). Resolves `[[image:ref]]` markers to image artifacts when the backend supports vision. |
+| `list_sources` | Returns the operator-curated source catalogue (`{key, name, description, tags}` for every enabled source) so the agent can pick `source_keys` to scope a follow-up `semantic_search` for narrow topical queries. Reads `config/sources.toml` fresh on every call so admin edits propagate without a server restart. |
 | `read_document` | Fetch a full document by URL (for follow-up after a too-narrow snippet). Optional `query` runs a doc-scoped dense search and returns the top-K chunks within that document. Reuses `documents.content` and the per-doc chunk vectors — RustFS is not on the read path. |
 
 ```
@@ -144,18 +145,20 @@ Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config sa
 ## Storage
 
 ```
-RustFS (S3)             SQLite
-+----------------+      +--------------------+
-| Raw HTML       |      | documents          |
-| Raw PDFs       |      | chunks             |
-| crawl/{type}   |      | chunk_embeddings   |
+RustFS (S3)             SQLite                config/
++----------------+      +--------------------+ +-------------+
+| Raw HTML       |      | documents          | | config.toml |
+| Raw PDFs       |      | chunks             | | sources.toml|
+| crawl/{type}   |      | chunk_embeddings   | +-------------+
 |   /{sha256}    |      | document_artifacts |
 | Page images    |      | backends           |
-| crawl/img/     |      | crawl_sources      |
-|   {sha256}/    |      | crawl_pages        |
-|   {ref}.png    |      | crawl_runs         |
+| crawl/img/     |      | crawl_pages        |
+|   {sha256}/    |      | crawl_runs         |
+|   {ref}.png    |      |                    |
 +----------------+      +--------------------+
 ```
+
+Crawl sources live in `config/sources.toml`, not the database. `crawl_pages.source_key` and `crawl_runs.source_key` reference the stable slug from each `[[sources]]` block. Admin CRUD writes back to `sources.toml` and hot-reloads the running crawler via `Crawler.SetSources`.
 
 **Why both?** RustFS preserves raw content for re-processing. SQLite holds structured data, metadata, and vectors. Brute-force cosine similarity in Go, with an in-memory embedding cache warmed at startup so retrieval avoids re-loading 16 K BLOBs from SQLite per query (~37 ms cached vs ~370 ms uncached at the current corpus); see [ADR-002](decisions/002-brute-force-cosine.md).
 

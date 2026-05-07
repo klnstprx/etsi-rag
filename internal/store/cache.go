@@ -106,10 +106,14 @@ func (c *embeddingCache) removeByDocIDs(docIDs []string) {
 // searchTopK scores query against every cached vector and returns the top-K
 // entries by cosine similarity descending.
 //
+// When allowed is non-nil, only vectors whose DocID appears in the set
+// participate in scoring — used to scope retrieval to a subset of sources
+// (see SearchSimilar with source_keys).
+//
 // Returns useCache=false when the cache is unloaded — the caller should run
 // the legacy SQL search path. Returns an empty slice with useCache=true when
 // the cache is loaded but empty.
-func (c *embeddingCache) searchTopK(query []float32, topK int) (results []cacheScored, useCache bool, err error) {
+func (c *embeddingCache) searchTopK(query []float32, topK int, allowed map[string]struct{}) (results []cacheScored, useCache bool, err error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if !c.loaded {
@@ -121,6 +125,11 @@ func (c *embeddingCache) searchTopK(query []float32, topK int) (results []cacheS
 
 	scored := make([]cacheScored, 0, len(c.vecs))
 	for _, v := range c.vecs {
+		if allowed != nil {
+			if _, ok := allowed[v.DocID]; !ok {
+				continue
+			}
+		}
 		scored = append(scored, cacheScored{ChunkID: v.ChunkID, Score: cosineSimilarity(query, v.Vec)})
 	}
 	if len(scored) == 0 {

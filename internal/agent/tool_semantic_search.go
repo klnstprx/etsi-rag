@@ -42,14 +42,15 @@ func (t *SemanticSearchTool) SetStore(s *store.SQLiteStore) { t.Store = s }
 func (t *SemanticSearchTool) SetMaxImages(n int) { t.MaxImages = n }
 
 type semanticSearchArgs struct {
-	Query string `json:"query"`
-	TopK  *int   `json:"top_k,omitempty"`
+	Query      string   `json:"query"`
+	TopK       *int     `json:"top_k,omitempty"`
+	SourceKeys []string `json:"source_keys,omitempty"`
 }
 
 func (*SemanticSearchTool) Name() string { return "semantic_search" }
 
 func (*SemanticSearchTool) Description() string {
-	return "Semantic search over indexed documents. Use this to find information about ETSI courses, degrees, procedures, or other university information."
+	return "Semantic search over indexed documents. Use this to find information about ETSI courses, degrees, procedures, or other university information. For narrow topical questions, optionally pass source_keys (from list_sources) to scope retrieval to a relevant subset of the corpus."
 }
 
 func (*SemanticSearchTool) Parameters() openai.FunctionParameters {
@@ -64,6 +65,11 @@ func (*SemanticSearchTool) Parameters() openai.FunctionParameters {
 				"type":        "integer",
 				"description": "Number of results to return (optional; server default is used when omitted).",
 			},
+			"source_keys": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Optional. Restrict the search to documents reachable from any of these crawl-source keys (use list_sources to discover them). Omit to search the full corpus.",
+			},
 		},
 		"required": []string{"query"},
 	}
@@ -75,7 +81,7 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		return ToolResult{}, fmt.Errorf("parsing args: %w", err)
 	}
 
-	results, err := t.Pipeline.Retrieve(ctx, args.Query, args.TopK)
+	results, err := t.Pipeline.Retrieve(ctx, args.Query, args.TopK, args.SourceKeys...)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("RAG search: %w", err)
 	}

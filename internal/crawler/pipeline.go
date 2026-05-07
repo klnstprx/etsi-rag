@@ -15,9 +15,7 @@ type CrawlItem struct {
 
 // CrawlSourceRef is a lightweight reference to a crawl source, avoiding domain import in pipeline types.
 type CrawlSourceRef struct {
-	ID       int64
-	Category string
-	Language string
+	Key string
 }
 
 // ParseItem flows from parse stage to embed stage.

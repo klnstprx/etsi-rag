@@ -28,6 +28,7 @@ type Handler struct {
 	store        *store.SQLiteStore
 	config       *config.Config
 	configPath   string
+	configDir    string // directory holding config.toml and sources.toml
 	sessionStore *session.Store
 	agent        atomic.Pointer[agent.Agent]
 	crawler      *crawler.Crawler
@@ -44,6 +45,7 @@ type HandlerConfig struct {
 	Store        *store.SQLiteStore
 	Config       *config.Config
 	ConfigPath   string
+	ConfigDir    string
 	SessionStore *session.Store
 	Crawler      *crawler.Crawler
 	Pipeline     *rag.Pipeline
@@ -66,6 +68,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		store:        cfg.Store,
 		config:       cfg.Config,
 		configPath:   cfg.ConfigPath,
+		configDir:    cfg.ConfigDir,
 		sessionStore: cfg.SessionStore,
 		crawler:      cfg.Crawler,
 		pipeline:     cfg.Pipeline,
@@ -122,8 +125,8 @@ func (h *Handler) Routes() chi.Router {
 	r.Delete("/crawler/run", h.CrawlerStop)
 	r.Get("/crawler/status", h.CrawlerStatus)
 	r.Post("/crawler/sources", h.SourceCreate)
-	r.Put("/crawler/sources/{id}", h.SourceUpdate)
-	r.Delete("/crawler/sources/{id}", h.SourceDelete)
+	r.Put("/crawler/sources/{key}", h.SourceUpdate)
+	r.Delete("/crawler/sources/{key}", h.SourceDelete)
 	r.Post("/crawler/purge", h.PurgeStale)
 
 	r.Get("/chat", h.ChatPage)

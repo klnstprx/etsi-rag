@@ -739,10 +739,7 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	src := &domain.CrawlSource{Name: "test", SeedURL: "https://example.com/", Category: "general", Language: "es", Enabled: true}
-	if err := store.CreateCrawlSource(ctx, src); err != nil {
-		t.Fatalf("creating source: %v", err)
-	}
+	const srcKey = "test"
 
 	// Three docs: referenced, orphan, shared-by-two.
 	docs := []*domain.Document{
@@ -767,9 +764,9 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 	refID, sharedID := "doc-ref", "doc-shared"
 	now := time.Now()
 	pages := []*domain.CrawlPage{
-		{SourceID: src.ID, URL: "https://example.com/a", DocID: &refID, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-		{SourceID: src.ID, URL: "https://example.com/b", DocID: &sharedID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-		{SourceID: src.ID, URL: "https://example.com/c", DocID: &sharedID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: srcKey, URL: "https://example.com/a", DocID: &refID, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: srcKey, URL: "https://example.com/b", DocID: &sharedID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: srcKey, URL: "https://example.com/c", DocID: &sharedID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
 	}
 	for _, p := range pages {
 		if err := store.UpsertCrawlPage(ctx, p); err != nil {
@@ -802,6 +799,298 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 	}
 	if len(remaining) != 0 {
 		t.Errorf("expected orphan chunks to cascade, got %d", len(remaining))
+	}
+}
+
+// setupSourceKeyFilterFixture seeds two source keys ("alpha", "beta"), one
+// document per source plus a third document referenced by both, and one chunk
+// per document with deterministic embeddings along distinct axes. Returns the
+// store ready for SearchSimilar / SearchKeyword scoping assertions.
+func setupSourceKeyFilterFixture(t *testing.T) *SQLiteStore {
+	t.Helper()
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	docs := []*domain.Document{
+		{ID: "doc-alpha", Title: "Alpha", Content: "alpha unique-alpha-token", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+		{ID: "doc-beta", Title: "Beta", Content: "beta unique-beta-token", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+		{ID: "doc-shared", Title: "Shared", Content: "shared unique-shared-token", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+	}
+	for _, d := range docs {
+		if err := s.CreateDocument(ctx, d); err != nil {
+			t.Fatalf("creating %s: %v", d.ID, err)
+		}
+	}
+
+	now := time.Now()
+	alphaID, betaID, sharedID := "doc-alpha", "doc-beta", "doc-shared"
+	pages := []*domain.CrawlPage{
+		{SourceKey: "alpha", URL: "https://x/alpha", DocID: &alphaID, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "beta", URL: "https://x/beta", DocID: &betaID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "alpha", URL: "https://x/shared-from-alpha", DocID: &sharedID, ContentHash: "h3", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "beta", URL: "https://x/shared-from-beta", DocID: &sharedID, ContentHash: "h3", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+	}
+	for _, p := range pages {
+		if err := s.UpsertCrawlPage(ctx, p); err != nil {
+			t.Fatalf("upserting page %s: %v", p.URL, err)
+		}
+	}
+
+	chunks := map[string]struct {
+		c domain.Chunk
+		v []float32
+	}{
+		"doc-alpha":  {domain.Chunk{Content: "alpha unique-alpha-token", ChunkIndex: 0}, []float32{1, 0, 0, 0}},
+		"doc-beta":   {domain.Chunk{Content: "beta unique-beta-token", ChunkIndex: 0}, []float32{0, 1, 0, 0}},
+		"doc-shared": {domain.Chunk{Content: "shared unique-shared-token", ChunkIndex: 0}, []float32{0, 0, 1, 0}},
+	}
+	for docID, ch := range chunks {
+		if err := s.CreateChunks(ctx, docID, []domain.Chunk{ch.c}, [][]float32{ch.v}); err != nil {
+			t.Fatalf("creating chunk for %s: %v", docID, err)
+		}
+	}
+	return s
+}
+
+func TestSearchSimilar_SourceKeysFilter(t *testing.T) {
+	s := setupSourceKeyFilterFixture(t)
+	ctx := context.Background()
+	query := []float32{0.9, 0.5, 0.5, 0} // similar to all three, descending order alpha/beta/shared
+
+	t.Run("no filter returns all chunks", func(t *testing.T) {
+		results, err := s.SearchSimilar(ctx, query, 10)
+		if err != nil {
+			t.Fatalf("SearchSimilar: %v", err)
+		}
+		if len(results) != 3 {
+			t.Errorf("got %d results, want 3", len(results))
+		}
+	})
+
+	t.Run("filter by alpha only", func(t *testing.T) {
+		results, err := s.SearchSimilar(ctx, query, 10, "alpha")
+		if err != nil {
+			t.Fatalf("SearchSimilar: %v", err)
+		}
+		if len(results) != 2 {
+			t.Fatalf("got %d results, want 2 (alpha + shared via alpha)", len(results))
+		}
+		seen := map[string]bool{}
+		for _, r := range results {
+			seen[r.Document.ID] = true
+		}
+		if !seen["doc-alpha"] || !seen["doc-shared"] {
+			t.Errorf("results missing expected docs: %v", seen)
+		}
+		if seen["doc-beta"] {
+			t.Errorf("filter leaked beta: %v", seen)
+		}
+	})
+
+	t.Run("shared doc returned by either source key", func(t *testing.T) {
+		resAlpha, _ := s.SearchSimilar(ctx, query, 10, "alpha")
+		resBeta, _ := s.SearchSimilar(ctx, query, 10, "beta")
+		alphaHasShared := false
+		betaHasShared := false
+		for _, r := range resAlpha {
+			if r.Document.ID == "doc-shared" {
+				alphaHasShared = true
+			}
+		}
+		for _, r := range resBeta {
+			if r.Document.ID == "doc-shared" {
+				betaHasShared = true
+			}
+		}
+		if !alphaHasShared || !betaHasShared {
+			t.Errorf("doc-shared should appear via both keys: alpha=%v beta=%v", alphaHasShared, betaHasShared)
+		}
+	})
+
+	t.Run("unknown source key returns empty without error", func(t *testing.T) {
+		results, err := s.SearchSimilar(ctx, query, 10, "ghost")
+		if err != nil {
+			t.Fatalf("SearchSimilar: %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("expected empty, got %d", len(results))
+		}
+	})
+}
+
+func TestSearchKeyword_SourceKeysFilter(t *testing.T) {
+	s := setupSourceKeyFilterFixture(t)
+	ctx := context.Background()
+
+	t.Run("no filter matches all unique tokens", func(t *testing.T) {
+		results, err := s.SearchKeyword(ctx, "unique-alpha-token unique-beta-token unique-shared-token", 10)
+		if err != nil {
+			t.Fatalf("SearchKeyword: %v", err)
+		}
+		if len(results) != 3 {
+			t.Errorf("got %d results, want 3", len(results))
+		}
+	})
+
+	t.Run("filter by alpha hides beta-only chunks", func(t *testing.T) {
+		results, err := s.SearchKeyword(ctx, "unique-alpha-token unique-beta-token unique-shared-token", 10, "alpha")
+		if err != nil {
+			t.Fatalf("SearchKeyword: %v", err)
+		}
+		seen := map[string]bool{}
+		for _, r := range results {
+			seen[r.Document.ID] = true
+		}
+		if !seen["doc-alpha"] {
+			t.Error("expected doc-alpha")
+		}
+		if !seen["doc-shared"] {
+			t.Error("expected doc-shared via alpha")
+		}
+		if seen["doc-beta"] {
+			t.Error("filter leaked beta")
+		}
+	})
+
+	t.Run("unknown key returns empty without error", func(t *testing.T) {
+		results, err := s.SearchKeyword(ctx, "unique-alpha-token", 10, "ghost")
+		if err != nil {
+			t.Fatalf("SearchKeyword: %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("expected empty, got %d", len(results))
+		}
+	})
+}
+
+func TestMarkPagesStaleBySourceKey(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	pages := []*domain.CrawlPage{
+		{SourceKey: "alpha", URL: "https://example.com/a1", ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "alpha", URL: "https://example.com/a2", ContentHash: "h2", Status: domain.CrawlPageFailed, LastCrawledAt: &now},
+		{SourceKey: "alpha", URL: "https://example.com/a3", ContentHash: "h3", Status: domain.CrawlPageStale, LastCrawledAt: &now},
+		{SourceKey: "beta", URL: "https://example.com/b1", ContentHash: "h4", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+	}
+	for _, p := range pages {
+		if err := store.UpsertCrawlPage(ctx, p); err != nil {
+			t.Fatalf("upserting page %s: %v", p.URL, err)
+		}
+	}
+
+	// Mark all alpha pages stale; the already-stale a3 must not be re-counted,
+	// and beta must be untouched.
+	n, err := store.MarkPagesStaleBySourceKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("MarkPagesStaleBySourceKey: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("affected rows = %d, want 2 (a1 + a2; a3 already stale)", n)
+	}
+
+	stale := string(domain.CrawlPageStale)
+	alphaKey := "alpha"
+	got, err := store.ListCrawlPages(ctx, &alphaKey, &stale)
+	if err != nil {
+		t.Fatalf("ListCrawlPages: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("alpha stale pages = %d, want 3 (all alpha now stale)", len(got))
+	}
+
+	betaKey := "beta"
+	betaPages, err := store.ListCrawlPages(ctx, &betaKey, nil)
+	if err != nil {
+		t.Fatalf("ListCrawlPages beta: %v", err)
+	}
+	if len(betaPages) != 1 || betaPages[0].Status != domain.CrawlPageFetched {
+		t.Errorf("beta page must remain fetched, got %+v", betaPages)
+	}
+
+	// Idempotent: calling again on a key whose pages are all stale returns 0.
+	n, err = store.MarkPagesStaleBySourceKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("MarkPagesStaleBySourceKey second call: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second call affected rows = %d, want 0", n)
+	}
+
+	// Unknown key is a no-op, not an error.
+	n, err = store.MarkPagesStaleBySourceKey(ctx, "missing")
+	if err != nil {
+		t.Fatalf("MarkPagesStaleBySourceKey unknown: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("unknown key affected rows = %d, want 0", n)
+	}
+}
+
+func TestMarkOrphanPagesStale(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	pages := []*domain.CrawlPage{
+		{SourceKey: "alpha", URL: "https://example.com/a1", ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "beta", URL: "https://example.com/b1", ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "gamma", URL: "https://example.com/g1", ContentHash: "h3", Status: domain.CrawlPageFailed, LastCrawledAt: &now},
+		{SourceKey: "gamma", URL: "https://example.com/g2", ContentHash: "h4", Status: domain.CrawlPageStale, LastCrawledAt: &now},
+	}
+	for _, p := range pages {
+		if err := store.UpsertCrawlPage(ctx, p); err != nil {
+			t.Fatalf("upserting page %s: %v", p.URL, err)
+		}
+	}
+
+	// alpha + beta are known; gamma is orphaned. g2 is already stale and must
+	// not be re-counted; g1 (failed) should flip to stale.
+	n, err := store.MarkOrphanPagesStale(ctx, []string{"alpha", "beta"})
+	if err != nil {
+		t.Fatalf("MarkOrphanPagesStale: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("affected rows = %d, want 1 (only g1)", n)
+	}
+
+	for _, key := range []string{"alpha", "beta"} {
+		k := key
+		fetched := string(domain.CrawlPageFetched)
+		got, err := store.ListCrawlPages(ctx, &k, &fetched)
+		if err != nil {
+			t.Fatalf("ListCrawlPages %s: %v", k, err)
+		}
+		if len(got) != 1 {
+			t.Errorf("%s should still have 1 fetched page, got %d", k, len(got))
+		}
+	}
+
+	gammaKey := "gamma"
+	stale := string(domain.CrawlPageStale)
+	gammaStale, err := store.ListCrawlPages(ctx, &gammaKey, &stale)
+	if err != nil {
+		t.Fatalf("ListCrawlPages gamma stale: %v", err)
+	}
+	if len(gammaStale) != 2 {
+		t.Errorf("gamma stale pages = %d, want 2", len(gammaStale))
+	}
+
+	// Empty known-keys slice: every non-stale page becomes stale.
+	store2 := setupTestStore(t)
+	if err := store2.UpsertCrawlPage(ctx, &domain.CrawlPage{
+		SourceKey: "x", URL: "https://example.com/x", ContentHash: "hx",
+		Status: domain.CrawlPageFetched, LastCrawledAt: &now,
+	}); err != nil {
+		t.Fatalf("upserting x: %v", err)
+	}
+	n, err = store2.MarkOrphanPagesStale(ctx, nil)
+	if err != nil {
+		t.Fatalf("MarkOrphanPagesStale empty: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("empty knownKeys affected = %d, want 1", n)
 	}
 }
 

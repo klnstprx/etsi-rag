@@ -29,17 +29,20 @@ type Crawler struct {
 	logger   zerolog.Logger
 
 	mu       sync.RWMutex
+	sources  []domain.CrawlSource // current snapshot from sources.toml; mutate via SetSources
 	running  bool
 	cancel   context.CancelFunc
 	progress *RunProgress
 }
 
-// New creates a new crawler.
+// New creates a new crawler. sources is the initial snapshot loaded from
+// sources.toml; use SetSources to hot-reload after admin CRUD edits the file.
 func New(
 	st *store.SQLiteStore,
 	obj *objectstore.Client,
 	pip *rag.Pipeline,
 	cfg config.CrawlerConfig,
+	sources []domain.CrawlSource,
 	logger zerolog.Logger,
 ) *Crawler {
 	f := NewFetcher(cfg.RequestTimeout, cfg.RequestDelay, cfg.MaxBodySize)
@@ -51,6 +54,7 @@ func New(
 		pipeline: pip,
 		fetcher:  f,
 		config:   cfg,
+		sources:  append([]domain.CrawlSource(nil), sources...),
 		logger:   logger,
 	}
 
@@ -78,6 +82,23 @@ func (c *Crawler) SetConfig(cfg config.CrawlerConfig) {
 	c.fetcher.SetMaxBody(cfg.MaxBodySize)
 	c.fetcher.SetJSPatterns(cfg.JSPatterns)
 	c.mu.Unlock()
+}
+
+// SetSources replaces the in-memory sources snapshot. Called by the admin
+// handler after writing sources.toml so the next crawl run picks up edits
+// without a server restart. The slice is copied to insulate the crawler
+// from later mutation by callers.
+func (c *Crawler) SetSources(sources []domain.CrawlSource) {
+	c.mu.Lock()
+	c.sources = append([]domain.CrawlSource(nil), sources...)
+	c.mu.Unlock()
+}
+
+// snapshotSources returns a copy of the current sources for use during a run.
+func (c *Crawler) snapshotSources() []domain.CrawlSource {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]domain.CrawlSource(nil), c.sources...)
 }
 
 // Close releases browser resources.
@@ -146,10 +167,10 @@ func (c *Crawler) RunAll(ctx context.Context) (int64, error) {
 	})
 }
 
-// RunSource crawls a single source. Returns the run ID.
-func (c *Crawler) RunSource(ctx context.Context, sourceID int64) (int64, error) {
+// RunSource crawls a single source identified by its TOML key. Returns the run ID.
+func (c *Crawler) RunSource(ctx context.Context, sourceKey string) (int64, error) {
 	return c.withRunLock(ctx, func(ctx context.Context) (int64, error) {
-		return c.runCrawl(ctx, &sourceID)
+		return c.runCrawl(ctx, &sourceKey)
 	})
 }
 
@@ -246,16 +267,6 @@ func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
 		return runID, fmt.Errorf("listing crawl pages: %w", err)
 	}
 
-	// Build source lookup for category/language
-	sources, err := c.store.ListCrawlSources(ctx)
-	if err != nil {
-		return runID, fmt.Errorf("listing sources: %w", err)
-	}
-	sourceMap := make(map[int64]domain.CrawlSource, len(sources))
-	for _, s := range sources {
-		sourceMap[s.ID] = s
-	}
-
 	if len(pages) == 0 {
 		c.finishRun(ctx, runID, domain.CrawlRunCompleted, nil, 0, 0, 0, 0)
 		return runID, nil
@@ -291,16 +302,13 @@ func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
 			progress.Discovered.Add(1)
 			progress.Fetched.Add(1)
 
-			src := sourceMap[page.SourceID]
 			ci := CrawlItem{
 				URL:         page.URL,
 				ContentType: page.ContentType,
 				Body:        body,
 				ObjKey:      page.ObjectStoreKey,
 				Source: CrawlSourceRef{
-					ID:       page.SourceID,
-					Category: src.Category,
-					Language: src.Language,
+					Key: page.SourceKey,
 				},
 			}
 
@@ -367,7 +375,7 @@ func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
 	return runID, nil
 }
 
-func (c *Crawler) runCrawl(ctx context.Context, sourceID *int64) (int64, error) {
+func (c *Crawler) runCrawl(ctx context.Context, sourceKey *string) (int64, error) {
 	if err := c.pipeline.Preflight(ctx); err != nil {
 		return 0, fmt.Errorf("preflight: %w", err)
 	}
@@ -377,23 +385,20 @@ func (c *Crawler) runCrawl(ctx context.Context, sourceID *int64) (int64, error) 
 	cancel := c.cancel
 	c.mu.RUnlock()
 
-	runID, err := c.store.CreateCrawlRun(ctx, sourceID)
+	runID, err := c.store.CreateCrawlRun(ctx, sourceKey)
 	if err != nil {
 		return 0, fmt.Errorf("creating crawl run: %w", err)
 	}
 	runStartedAt := time.Now()
 
-	sources, err := c.store.ListCrawlSources(ctx)
-	if err != nil {
-		return runID, fmt.Errorf("listing sources: %w", err)
-	}
+	sources := c.snapshotSources()
 
 	var enabled []domain.CrawlSource
 	for _, s := range sources {
 		if !s.Enabled {
 			continue
 		}
-		if sourceID != nil && s.ID != *sourceID {
+		if sourceKey != nil && s.Key != *sourceKey {
 			continue
 		}
 		enabled = append(enabled, s)
@@ -634,10 +639,10 @@ func titleFromURL(u string) string {
 	return u
 }
 
-func (c *Crawler) recordFailedPage(ctx context.Context, sourceID int64, pageURL string, fetchErr error) {
+func (c *Crawler) recordFailedPage(ctx context.Context, sourceKey, pageURL string, fetchErr error) {
 	errMsg := fetchErr.Error()
 	page := &domain.CrawlPage{
-		SourceID:     sourceID,
+		SourceKey:    sourceKey,
 		URL:          pageURL,
 		Status:       domain.CrawlPageFailed,
 		ErrorMessage: &errMsg,

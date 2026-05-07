@@ -3,13 +3,22 @@ package domain
 import "time"
 
 // CrawlSource represents a seed URL and its configuration.
+//
+// Key is a stable slug (e.g. "grado-informatica") chosen by the operator in
+// sources.toml. It is the foreign key used by crawl_pages and crawl_runs, so
+// a source's seed_url or display name can change without orphaning history.
+//
+// Description and Tags are agent-facing scoping hints surfaced through the
+// list_sources tool. They are not persisted on documents and not used as SQL
+// filters; the agent reads them and decides whether to scope a search by
+// passing source_keys to semantic_search.
 type CrawlSource struct {
-	ID       int64
-	Name     string
-	SeedURL  string
-	Category string
-	Language string
-	Enabled  bool
+	Key         string   `koanf:"key"`
+	Name        string   `koanf:"name"`
+	SeedURL     string   `koanf:"seed_url"`
+	Description string   `koanf:"description"`
+	Tags        []string `koanf:"tags"`
+	Enabled     bool     `koanf:"enabled"`
 }
 
 // CrawlPageStatus represents the status of a crawled page.
@@ -25,7 +34,7 @@ const (
 // CrawlPage represents a discovered and potentially crawled page.
 type CrawlPage struct {
 	ID             int64
-	SourceID       int64
+	SourceKey      string
 	URL            string
 	ContentType    string // "html" or "pdf"
 	Title          string
@@ -51,7 +60,7 @@ const (
 // CrawlRun represents a single execution of the crawler.
 type CrawlRun struct {
 	ID              int64
-	SourceID        *int64 // nil = all sources
+	SourceKey       *string // nil = all sources
 	Status          CrawlRunStatus
 	PagesDiscovered int
 	PagesFetched    int

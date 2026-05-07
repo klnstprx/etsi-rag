@@ -1,8 +1,9 @@
 # Binary output
 bin/
 
-# User config (auto-generated from config.default.toml)
+# User config (auto-generated from *.default.toml on first run)
 config/config.toml
+config/sources.toml
 
 # Test coverage
 coverage.out
