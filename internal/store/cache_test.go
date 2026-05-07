@@ -577,3 +577,61 @@ func TestSearchSimilar_ParityWithLegacy(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddingCache_SearchTopK_AllowedSemantics locks the three branches of
+// the allowed-set parameter introduced for source_keys scoping. The empty
+// non-nil branch is currently unreachable through SearchSimilar (which
+// short-circuits when the resolved set is empty), so this test is the only
+// guard against a future caller reaching it with surprising results.
+func TestEmbeddingCache_SearchTopK_AllowedSemantics(t *testing.T) {
+	c := &embeddingCache{}
+	c.warm([]cachedVec{
+		{ChunkID: 1, DocID: "doc-a", Vec: []float32{1, 0, 0, 0}},
+		{ChunkID: 2, DocID: "doc-b", Vec: []float32{0, 1, 0, 0}},
+		{ChunkID: 3, DocID: "doc-c", Vec: []float32{0, 0, 1, 0}},
+	}, 4)
+
+	query := []float32{0.9, 0.5, 0.1, 0}
+
+	t.Run("nil allowed scores every vector", func(t *testing.T) {
+		results, useCache, err := c.searchTopK(query, 10, nil)
+		if err != nil {
+			t.Fatalf("searchTopK: %v", err)
+		}
+		if !useCache {
+			t.Fatal("useCache=false on a warmed cache")
+		}
+		if len(results) != 3 {
+			t.Fatalf("got %d results, want 3", len(results))
+		}
+	})
+
+	t.Run("non-nil empty allowed returns no results without error", func(t *testing.T) {
+		results, useCache, err := c.searchTopK(query, 10, map[string]struct{}{})
+		if err != nil {
+			t.Fatalf("searchTopK: %v", err)
+		}
+		if !useCache {
+			t.Error("useCache=false; an empty filter is still a cache hit, not a fallback signal")
+		}
+		if len(results) != 0 {
+			t.Errorf("got %d results, want 0 (empty allow-list permits nothing)", len(results))
+		}
+	})
+
+	t.Run("allowed subset returns only matching DocIDs", func(t *testing.T) {
+		results, useCache, err := c.searchTopK(query, 10, map[string]struct{}{"doc-b": {}})
+		if err != nil {
+			t.Fatalf("searchTopK: %v", err)
+		}
+		if !useCache {
+			t.Fatal("useCache=false on a warmed cache")
+		}
+		if len(results) != 1 {
+			t.Fatalf("got %d results, want 1", len(results))
+		}
+		if results[0].ChunkID != 2 {
+			t.Errorf("got ChunkID=%d, want 2 (doc-b)", results[0].ChunkID)
+		}
+	})
+}
