@@ -19,7 +19,6 @@ import (
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/diag"
-	"etsi-rag/internal/llm"
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
@@ -120,29 +119,19 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 
 	// Resolve embedding backend and create client (graceful: nil on failure).
 	// Re-runnable via rebuildClients on admin save.
-	embeddingClient, err := s.resolveEmbedClient(cfg.Embedding.Backend, llm.EmbedClientConfig{
-		Model:     cfg.Embedding.Model,
-		BatchSize: cfg.Embedding.BatchSize,
-	})
+	embedName, embedCfg := s.embedClientConfig()
+	embeddingClient, err := s.resolveEmbedClient(embedName, embedCfg)
 	if err != nil {
 		logger.Warn().Err(err).Msg("embedding backend not available")
-		s.diag.Set(diag.Issue{
-			ID: "embedding.backend", Component: "embedding", Severity: diag.SeverityError,
-			Message: "Embedding backend not available", Detail: err.Error(),
-			Hint: "Configure or fix the [embedding] backend at /admin/backends",
-		})
 	}
+	s.publishProbeResult(issueEmbeddingBackend, err)
 
 	// Initialize token counter, probe llama.cpp for auto-detection, then create chunker
 	embeddingCounter, err := s.resolveCounter(cfg.Embedding.Backend, cfg.Embedding.Model)
 	if err != nil {
 		logger.Warn().Err(err).Msg("token counter not available (fix via admin UI)")
-		s.diag.Set(diag.Issue{
-			ID: "embedding.counter", Component: "embedding", Severity: diag.SeverityWarn,
-			Message: "Embedding token counter not available", Detail: err.Error(),
-			Hint: "Configure tokenization for the embedding backend at /admin/backends",
-		})
 	}
+	s.publishProbeResult(issueEmbeddingCounter, err)
 	s.probeLlamaCppBackends()
 	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
 
@@ -199,19 +188,13 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	// The operator clears the rows by running Purge Stale. Skip on parse
 	// failure — we don't want a broken file to mass-stale the corpus.
 	if loadErr == nil {
-		if n, recErr := sqliteStore.MarkOrphanPagesStale(context.Background(), s.sources.KnownKeys()); recErr != nil {
+		n, recErr := sqliteStore.MarkOrphanPagesStale(context.Background(), s.sources.KnownKeys())
+		if recErr != nil {
 			logger.Warn().Err(recErr).Msg("reconciling orphan crawl pages")
-			s.diag.Set(diag.Issue{
-				ID: "sources.reconcile", Component: "sources", Severity: diag.SeverityWarn,
-				Message: "Failed to reconcile orphan crawl pages", Detail: recErr.Error(),
-				Hint: "Check the SQLite store; non-fatal but orphans accumulate.",
-			})
-		} else {
-			s.diag.Clear("sources.reconcile")
-			if n > 0 {
-				logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
-			}
+		} else if n > 0 {
+			logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
 		}
+		s.publishProbeResult(issueSourcesReconcile, recErr)
 	}
 
 	// Initialize crawler only if dependencies are available
@@ -236,35 +219,22 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	// Create agent (only if [agent] backend is configured)
 	var agentInstance *agent.Agent
 	if cfg.Agent.Backend != "" {
-		s.diag.Clear("agent.no_backend")
-		agentClient, err := s.resolveChatClient(cfg.Agent.Backend, llm.ChatClientConfig{
-			Model:       cfg.Agent.Model,
-			MaxTokens:   int64(cfg.Agent.MaxTokens),
-			Temperature: cfg.Agent.Temperature,
-		})
+		s.diag.Clear(issueAgentNoBackend.ID)
+		chatName, chatCfg := s.chatClientConfig()
+		agentClient, err := s.resolveChatClient(chatName, chatCfg)
 		if err != nil {
 			logger.Warn().Err(err).Msg("agent backend not available, agent disabled")
-			s.diag.Set(diag.Issue{
-				ID: "agent.backend", Component: "agent", Severity: diag.SeverityError,
-				Message: "Agent backend not available; chat disabled",
-				Detail:  err.Error(),
-				Hint:    "Fix the [agent] backend at /admin/backends or /admin/config",
-			})
 		} else {
 			agentInstance = s.buildAgent(agentClient)
-			s.diag.Clear("agent.backend")
 			logger.Info().Str("backend", cfg.Agent.Backend).
 				Bool("vision_enabled", cfg.Agent.Vision.Enabled).
 				Str("public_base_url", cfg.Agent.Vision.PublicBaseURL).
 				Msg("agent initialized")
 		}
+		s.publishProbeResult(issueAgentBackend, err)
 	} else {
 		logger.Warn().Msg("no [agent] backend configured, agent disabled")
-		s.diag.Set(diag.Issue{
-			ID: "agent.no_backend", Component: "agent", Severity: diag.SeverityError,
-			Message: "No [agent] backend configured; chat disabled",
-			Hint:    "Set [agent].backend at /admin/config",
-		})
+		s.diag.Set(issueAgentNoBackend)
 	}
 
 	// Create API handler and router

@@ -2,8 +2,6 @@ package server
 
 import (
 	"etsi-rag/internal/chunking"
-	"etsi-rag/internal/diag"
-	"etsi-rag/internal/llm"
 )
 
 // rebuildClients rebuilds all LLM clients from the live config and swaps them
@@ -24,36 +22,24 @@ func (s *Server) rebuildClients() {
 	}
 
 	// Embedding
-	if ec, err := s.resolveEmbedClient(s.cfg.Embedding.Backend, llm.EmbedClientConfig{
-		Model:     s.cfg.Embedding.Model,
-		BatchSize: s.cfg.Embedding.BatchSize,
-	}); err != nil {
+	embedName, embedCfg := s.embedClientConfig()
+	ec, err := s.resolveEmbedClient(embedName, embedCfg)
+	if err != nil {
 		s.logger.Warn().Err(err).Msg("embedding client rebuild failed")
 		s.pipeline.SetEmbedder(nil)
 		s.apiHandler.SetEmbeddingClient(nil)
-		s.diag.Set(diag.Issue{
-			ID: "embedding.backend", Component: "embedding", Severity: diag.SeverityError,
-			Message: "Embedding backend not available", Detail: err.Error(),
-			Hint: "Configure or fix the [embedding] backend at /admin/backends",
-		})
 	} else {
 		s.pipeline.SetEmbedder(ec)
 		s.apiHandler.SetEmbeddingClient(ec)
-		s.diag.Clear("embedding.backend")
 	}
+	s.publishProbeResult(issueEmbeddingBackend, err)
 
 	// Rebuild token counter and chunker
 	counter, err := s.resolveCounter(s.cfg.Embedding.Backend, s.cfg.Embedding.Model)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("token counter rebuild failed (fix via admin UI)")
-		s.diag.Set(diag.Issue{
-			ID: "embedding.counter", Component: "embedding", Severity: diag.SeverityWarn,
-			Message: "Embedding token counter not available", Detail: err.Error(),
-			Hint: "Configure tokenization for the embedding backend at /admin/backends",
-		})
-	} else {
-		s.diag.Clear("embedding.counter")
 	}
+	s.publishProbeResult(issueEmbeddingCounter, err)
 	s.probeLlamaCppBackends()
 	s.pipeline.SetCounter(counter)
 	s.apiHandler.SetCounter(counter)
@@ -64,35 +50,23 @@ func (s *Server) rebuildClients() {
 
 	// Agent (single chat client for agent)
 	if s.cfg.Agent.Backend != "" {
-		s.diag.Clear("agent.no_backend")
-		if ac, err := s.resolveChatClient(s.cfg.Agent.Backend, llm.ChatClientConfig{
-			Model:       s.cfg.Agent.Model,
-			MaxTokens:   int64(s.cfg.Agent.MaxTokens),
-			Temperature: s.cfg.Agent.Temperature,
-		}); err != nil {
+		s.diag.Clear(issueAgentNoBackend.ID)
+		chatName, chatCfg := s.chatClientConfig()
+		ac, err := s.resolveChatClient(chatName, chatCfg)
+		if err != nil {
 			s.logger.Warn().Err(err).Msg("agent client rebuild failed")
 			s.adminHandler.SetAgent(nil)
 			s.apiHandler.SetAgent(nil)
-			s.diag.Set(diag.Issue{
-				ID: "agent.backend", Component: "agent", Severity: diag.SeverityError,
-				Message: "Agent backend not available; chat disabled",
-				Detail:  err.Error(),
-				Hint:    "Fix the [agent] backend at /admin/backends or /admin/config",
-			})
 		} else {
 			a := s.buildAgent(ac)
 			s.adminHandler.SetAgent(a)
 			s.apiHandler.SetAgent(a)
-			s.diag.Clear("agent.backend")
 			s.logger.Info().Str("backend", s.cfg.Agent.Backend).Msg("agent rebuilt")
 		}
+		s.publishProbeResult(issueAgentBackend, err)
 	} else {
 		s.adminHandler.SetAgent(nil)
 		s.apiHandler.SetAgent(nil)
-		s.diag.Set(diag.Issue{
-			ID: "agent.no_backend", Component: "agent", Severity: diag.SeverityError,
-			Message: "No [agent] backend configured; chat disabled",
-			Hint:    "Set [agent].backend at /admin/config",
-		})
+		s.diag.Set(issueAgentNoBackend)
 	}
 }

@@ -25,6 +25,27 @@ const (
 	IssueEmpty = "sources.empty"
 )
 
+// IssueParseTemplate / IssueEmptyTemplate are the canonical Issue shapes for
+// the two diag IDs this package publishes. The Registry uses them in publish*
+// helpers; downstream packages (server, admin tests) reuse them so the
+// dashboard rendering and the recheck registration cannot drift apart.
+var (
+	IssueParseTemplate = diag.Issue{
+		ID:        IssueParse,
+		Component: "sources",
+		Severity:  diag.SeverityError,
+		Message:   "sources.toml failed to load",
+		Hint:      "Edit sources.toml and re-check, or fix at /admin/crawler",
+	}
+	IssueEmptyTemplate = diag.Issue{
+		ID:        IssueEmpty,
+		Component: "sources",
+		Severity:  diag.SeverityWarn,
+		Message:   "No crawl sources configured",
+		Hint:      "Add a source at /admin/crawler",
+	}
+)
+
 // Registry holds the canonical in-memory snapshot of crawl sources.
 //
 // Concurrent Snapshot/Replace is safe; readers see a consistent slice (a
@@ -120,14 +141,9 @@ func (r *Registry) publishParse(err error) {
 		d.Clear(IssueParse)
 		return
 	}
-	d.Set(diag.Issue{
-		ID:        IssueParse,
-		Component: "sources",
-		Severity:  diag.SeverityError,
-		Message:   "sources.toml failed to load",
-		Detail:    err.Error(),
-		Hint:      "Edit sources.toml and reload, or fix at /admin/crawler",
-	})
+	issue := IssueParseTemplate
+	issue.Detail = err.Error()
+	d.Set(issue)
 }
 
 // publishEmpty sets or clears IssueEmpty depending on whether the in-memory
@@ -143,13 +159,7 @@ func (r *Registry) publishEmpty(isEmpty bool) {
 		d.Clear(IssueEmpty)
 		return
 	}
-	d.Set(diag.Issue{
-		ID:        IssueEmpty,
-		Component: "sources",
-		Severity:  diag.SeverityWarn,
-		Message:   "No crawl sources configured",
-		Hint:      "Add a source at /admin/crawler",
-	})
+	d.Set(IssueEmptyTemplate)
 }
 
 // KnownKeys returns the keys of every source currently in the snapshot, used

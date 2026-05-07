@@ -13,6 +13,25 @@ import (
 	"etsi-rag/internal/tokencount"
 )
 
+// embedClientConfig pulls the [embedding] stage cfg out of the live config so
+// callers don't restate the field-by-field literal at every call site
+// (server.New, rebuildClients, recheck closures all need the same shape).
+func (s *Server) embedClientConfig() (string, llm.EmbedClientConfig) {
+	return s.cfg.Embedding.Backend, llm.EmbedClientConfig{
+		Model:     s.cfg.Embedding.Model,
+		BatchSize: s.cfg.Embedding.BatchSize,
+	}
+}
+
+// chatClientConfig is the agent-stage equivalent of embedClientConfig.
+func (s *Server) chatClientConfig() (string, llm.ChatClientConfig) {
+	return s.cfg.Agent.Backend, llm.ChatClientConfig{
+		Model:       s.cfg.Agent.Model,
+		MaxTokens:   int64(s.cfg.Agent.MaxTokens),
+		Temperature: s.cfg.Agent.Temperature,
+	}
+}
+
 // resolveEmbedClient resolves a backend by name and builds an embedding client.
 func (s *Server) resolveEmbedClient(backendName string, partialCfg llm.EmbedClientConfig) (*llm.EmbedClient, error) {
 	b := s.cfg.GetBackend(backendName)
