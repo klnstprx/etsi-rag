@@ -1,6 +1,9 @@
 package templates
 
-import "etsi-rag/internal/config"
+import (
+	"etsi-rag/internal/config"
+	"etsi-rag/internal/diag"
+)
 
 type DashboardData struct {
 	DocCount      int
@@ -9,6 +12,7 @@ type DashboardData struct {
 	BackendCount  int
 	Backends      []config.BackendConfig
 	HasObjStore   bool
+	Issues        []diag.Issue
 }
 
 type ServiceStatus struct {
@@ -31,6 +35,9 @@ templ DashboardContent(data DashboardData) {
 		@StatCardInt("Image Artifacts", data.ArtifactCount)
 		@StatCardInt("Backends", data.BackendCount)
 	</dl>
+	<div class="mb-6">
+		@IssuesCard(data.Issues)
+	</div>
 	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 		@CardWithHeader("Backends") {
 			if len(data.Backends) == 0 {

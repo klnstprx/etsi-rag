@@ -14,6 +14,7 @@ import (
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
+	"etsi-rag/internal/diag"
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
@@ -31,6 +32,7 @@ type Handler struct {
 	configPath   string
 	configDir    string // directory holding config.toml and sources.toml
 	sources      *sources.Registry
+	diag         *diag.Registry
 	sessionStore *session.Store
 	agent        atomic.Pointer[agent.Agent]
 	crawler      *crawler.Crawler
@@ -49,6 +51,7 @@ type HandlerConfig struct {
 	ConfigPath   string
 	ConfigDir    string
 	Sources      *sources.Registry
+	Diag         *diag.Registry
 	SessionStore *session.Store
 	Crawler      *crawler.Crawler
 	Pipeline     *rag.Pipeline
@@ -73,6 +76,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		configPath:   cfg.ConfigPath,
 		configDir:    cfg.ConfigDir,
 		sources:      cfg.Sources,
+		diag:         cfg.Diag,
 		sessionStore: cfg.SessionStore,
 		crawler:      cfg.Crawler,
 		pipeline:     cfg.Pipeline,
@@ -123,6 +127,10 @@ func (h *Handler) Routes() chi.Router {
 	r.Get("/documents/{id}", h.DocumentDetail)
 	r.Delete("/documents/{id}", h.DocumentDelete)
 
+	r.Get("/health/issues", h.HealthIssues)
+	r.Post("/health/recheck", h.HealthRecheck)
+	r.Get("/health/objectstore", h.HealthObjectStore)
+
 	r.Get("/crawler", h.CrawlerPage)
 	r.Post("/crawler/run", h.CrawlerRun)
 	r.Post("/crawler/reprocess", h.CrawlerReprocess)
@@ -137,8 +145,6 @@ func (h *Handler) Routes() chi.Router {
 	r.Post("/chat/send", h.ChatSend)
 	r.Get("/chat/stream/{sessionID}", h.ChatStream)
 	r.Post("/chat/reset", h.ChatReset)
-
-	r.Get("/health/objectstore", h.HealthObjectStore)
 
 	return r
 }

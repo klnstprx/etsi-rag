@@ -18,6 +18,7 @@ import (
 	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
+	"etsi-rag/internal/diag"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
@@ -39,6 +40,7 @@ type Server struct {
 	pipeline     *rag.Pipeline
 	sources      *sources.Registry
 	crawler      *crawler.Crawler
+	diag         *diag.Registry
 
 	apiHandler   *api.Handler
 	adminHandler *admin.Handler
@@ -77,13 +79,37 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 
 	sqliteStore := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
 
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	// IMPORTANT: any non-fatal startup error in this function should also call
+	// s.diag.Set so the admin dashboard surfaces it. Logging alone is no longer
+	// enough — operators don't tail logs to find a misconfigured backend.
+	s := &Server{
+		cfg:        cfg,
+		configPath: configPath,
+		logger:     logger,
+		store:      sqliteStore,
+		diag:       diag.New(),
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
+	}
+
 	// Warm the in-memory embedding cache so the first user query doesn't pay
 	// the ~300 ms full-table BLOB load. Failures are non-fatal: SearchSimilar
-	// transparently falls back to a SQL scan when the cache is unloaded.
+	// transparently falls back to a SQL scan when the cache is unloaded. The
+	// warm path is one-shot at boot — RequiresRestart=true on the dashboard.
 	{
 		warmStart := time.Now()
 		if n, err := sqliteStore.Warm(context.Background()); err != nil {
 			logger.Warn().Err(err).Msg("embedding cache warm failed; SearchSimilar will use SQL fallback")
+			s.diag.Set(diag.Issue{
+				ID:              "embedding.warm",
+				Component:       "embedding",
+				Severity:        diag.SeverityWarn,
+				Message:         "Embedding cache failed to warm; falling back to SQL scan",
+				Detail:          err.Error(),
+				Hint:            "Restart the server to retry the cache warm.",
+				RequiresRestart: true,
+			})
 		} else {
 			logger.Info().
 				Int("chunks", n).
@@ -92,29 +118,30 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		}
 	}
 
-	baseCtx, baseCancel := context.WithCancel(context.Background())
-	s := &Server{
-		cfg:        cfg,
-		configPath: configPath,
-		logger:     logger,
-		store:      sqliteStore,
-		baseCtx:    baseCtx,
-		baseCancel: baseCancel,
-	}
-
-	// Resolve embedding backend and create client (graceful: nil on failure)
+	// Resolve embedding backend and create client (graceful: nil on failure).
+	// Re-runnable via rebuildClients on admin save.
 	embeddingClient, err := s.resolveEmbedClient(cfg.Embedding.Backend, llm.EmbedClientConfig{
 		Model:     cfg.Embedding.Model,
 		BatchSize: cfg.Embedding.BatchSize,
 	})
 	if err != nil {
 		logger.Warn().Err(err).Msg("embedding backend not available")
+		s.diag.Set(diag.Issue{
+			ID: "embedding.backend", Component: "embedding", Severity: diag.SeverityError,
+			Message: "Embedding backend not available", Detail: err.Error(),
+			Hint: "Configure or fix the [embedding] backend at /admin/backends",
+		})
 	}
 
 	// Initialize token counter, probe llama.cpp for auto-detection, then create chunker
 	embeddingCounter, err := s.resolveCounter(cfg.Embedding.Backend, cfg.Embedding.Model)
 	if err != nil {
 		logger.Warn().Err(err).Msg("token counter not available (fix via admin UI)")
+		s.diag.Set(diag.Issue{
+			ID: "embedding.counter", Component: "embedding", Severity: diag.SeverityWarn,
+			Message: "Embedding token counter not available", Detail: err.Error(),
+			Hint: "Configure tokenization for the embedding backend at /admin/backends",
+		})
 	}
 	s.probeLlamaCppBackends()
 	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
@@ -126,11 +153,21 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	// retrieval to the un-reranked path without crashing the server.
 	s.attachReranker()
 
-	// Initialize object store (graceful: nil on failure)
+	// Initialize object store (graceful: nil on failure). Built once at boot;
+	// no in-process re-init path today, hence RequiresRestart on the issue.
 	objStore, err := objectstore.New(cfg.ObjectStore)
 	if err != nil {
 		logger.Warn().Err(err).Msg("object store not available")
 		objStore = nil
+		s.diag.Set(diag.Issue{
+			ID:              "objectstore.unavailable",
+			Component:       "objectstore",
+			Severity:        diag.SeverityError,
+			Message:         "Object store (RustFS) not available; crawler and image artifacts disabled",
+			Detail:          err.Error(),
+			Hint:            "Start RustFS, then restart the server.",
+			RequiresRestart: true,
+		})
 	}
 
 	// Load crawl sources from config/sources.toml. The Registry is the single
@@ -140,8 +177,17 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	configDir := filepath.Dir(configPath)
 	if err := config.EnsureSourcesFile(configDir); err != nil {
 		logger.Warn().Err(err).Msg("ensuring sources.toml")
+		s.diag.Set(diag.Issue{
+			ID: "sources.ensure", Component: "sources", Severity: diag.SeverityError,
+			Message: "Could not seed sources.toml from sources.default.toml",
+			Detail:  err.Error(),
+			Hint:    "Verify the config directory is writable and the default file exists.",
+		})
+	} else {
+		s.diag.Clear("sources.ensure")
 	}
 	s.sources = sources.New(config.SourcesPath(configDir), logger)
+	s.sources.SetDiag(s.diag) // sources.parse / sources.empty are published from here on
 	loadErr := s.sources.Load()
 	if loadErr != nil {
 		logger.Warn().Err(loadErr).Msg("loading sources.toml; crawler will start with no sources")
@@ -155,16 +201,33 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	if loadErr == nil {
 		if n, recErr := sqliteStore.MarkOrphanPagesStale(context.Background(), s.sources.KnownKeys()); recErr != nil {
 			logger.Warn().Err(recErr).Msg("reconciling orphan crawl pages")
-		} else if n > 0 {
-			logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
+			s.diag.Set(diag.Issue{
+				ID: "sources.reconcile", Component: "sources", Severity: diag.SeverityWarn,
+				Message: "Failed to reconcile orphan crawl pages", Detail: recErr.Error(),
+				Hint: "Check the SQLite store; non-fatal but orphans accumulate.",
+			})
+		} else {
+			s.diag.Clear("sources.reconcile")
+			if n > 0 {
+				logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
+			}
 		}
 	}
 
 	// Initialize crawler only if dependencies are available
 	if embeddingClient != nil && objStore != nil {
 		s.crawler = crawler.New(sqliteStore, objStore, s.pipeline, cfg.Crawler, s.sources, logger)
+		s.diag.Clear("crawler.disabled")
 	} else {
 		logger.Warn().Msg("crawler disabled (requires embedding backend + object store)")
+		s.diag.Set(diag.Issue{
+			ID:              "crawler.disabled",
+			Component:       "crawler",
+			Severity:        diag.SeverityWarn,
+			Message:         "Crawler disabled (requires embedding backend + object store)",
+			Hint:            "Fix the embedding backend and object store, then restart.",
+			RequiresRestart: true,
+		})
 	}
 
 	// Initialize session store
@@ -173,6 +236,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	// Create agent (only if [agent] backend is configured)
 	var agentInstance *agent.Agent
 	if cfg.Agent.Backend != "" {
+		s.diag.Clear("agent.no_backend")
 		agentClient, err := s.resolveChatClient(cfg.Agent.Backend, llm.ChatClientConfig{
 			Model:       cfg.Agent.Model,
 			MaxTokens:   int64(cfg.Agent.MaxTokens),
@@ -180,8 +244,15 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		})
 		if err != nil {
 			logger.Warn().Err(err).Msg("agent backend not available, agent disabled")
+			s.diag.Set(diag.Issue{
+				ID: "agent.backend", Component: "agent", Severity: diag.SeverityError,
+				Message: "Agent backend not available; chat disabled",
+				Detail:  err.Error(),
+				Hint:    "Fix the [agent] backend at /admin/backends or /admin/config",
+			})
 		} else {
 			agentInstance = s.buildAgent(agentClient)
+			s.diag.Clear("agent.backend")
 			logger.Info().Str("backend", cfg.Agent.Backend).
 				Bool("vision_enabled", cfg.Agent.Vision.Enabled).
 				Str("public_base_url", cfg.Agent.Vision.PublicBaseURL).
@@ -189,6 +260,11 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		}
 	} else {
 		logger.Warn().Msg("no [agent] backend configured, agent disabled")
+		s.diag.Set(diag.Issue{
+			ID: "agent.no_backend", Component: "agent", Severity: diag.SeverityError,
+			Message: "No [agent] backend configured; chat disabled",
+			Hint:    "Set [agent].backend at /admin/config",
+		})
 	}
 
 	// Create API handler and router
@@ -211,6 +287,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		ConfigPath:   configPath,
 		ConfigDir:    configDir,
 		Sources:      s.sources,
+		Diag:         s.diag,
 		SessionStore: s.sessionStore,
 		Crawler:      s.crawler,
 		Pipeline:     s.pipeline,
@@ -220,6 +297,10 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	})
 	s.adminHandler.SetAgent(agentInstance)
 	s.adminHandler.SetOnConfigSave(s.rebuildClients)
+
+	// Register diag rechecks so the dashboard "Re-check" button has work to do
+	// for the issues whose underlying probes can be re-run in-process.
+	s.registerDiagRechecks()
 
 	// Mount admin routes
 	router.Mount("/admin", s.adminHandler.Routes())

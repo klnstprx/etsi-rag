@@ -36,6 +36,7 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		BackendCount:  len(h.config.Backends),
 		Backends:      h.config.Backends,
 		HasObjStore:   h.objStore != nil,
+		Issues:        h.snapshotIssues(),
 	}
 
 	page := templates.DashboardPage(data)

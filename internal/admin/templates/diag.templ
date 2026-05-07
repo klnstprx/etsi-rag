@@ -1,0 +1,83 @@
+package templates
+
+import (
+	"etsi-rag/internal/diag"
+	"strings"
+)
+
+// IssuesCard renders the "System issues" surface above the Backends card on
+// the dashboard. Empty state reassures the operator nothing is broken; rows
+// distinguish recheckable issues from those that require a restart.
+templ IssuesCard(issues []diag.Issue) {
+	<div id="issues-card" class="bg-white rounded-lg shadow">
+		<div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+			<h3 class="text-lg font-medium text-gray-900">System issues</h3>
+			<button
+				type="button"
+				hx-post="/admin/health/recheck"
+				hx-target="#issues-card"
+				hx-swap="outerHTML"
+				class="text-sm text-blue-600 hover:underline"
+			>Re-check now</button>
+		</div>
+		if len(issues) == 0 {
+			<div class="px-6 py-4 text-sm text-gray-500">No issues — all green.</div>
+		} else {
+			<div class="divide-y divide-gray-200">
+				for _, i := range issues {
+					@IssueRow(i)
+				}
+			</div>
+		}
+	</div>
+}
+
+templ IssueRow(i diag.Issue) {
+	<div class="px-6 py-4 flex items-start gap-4">
+		<div class="flex-none pt-0.5">
+			@severityBadge(i.Severity, i.RequiresRestart)
+		</div>
+		<div class="flex-1 min-w-0">
+			<div class="flex items-center gap-2">
+				<span class="text-xs font-mono text-gray-500">{ i.Component }</span>
+				<span class="text-xs font-mono text-gray-400">{ i.ID }</span>
+			</div>
+			<p class="text-sm font-medium text-gray-900 mt-0.5">{ i.Message }</p>
+			if i.Detail != "" {
+				<p class="text-xs text-gray-600 mt-1 break-words">{ i.Detail }</p>
+			}
+			if i.Hint != "" {
+				@issueHint(i.Hint)
+			}
+		</div>
+	</div>
+}
+
+// severityBadge picks the pill color. RequiresRestart wins over severity so
+// the operator sees the action they need to take, not just how bad it is.
+templ severityBadge(s diag.Severity, requiresRestart bool) {
+	if requiresRestart {
+		@Badge("Restart required", "gray")
+	} else if s == diag.SeverityError {
+		@Badge("Error", "red")
+	} else {
+		@Badge("Warn", "yellow")
+	}
+}
+
+// issueHint renders the hint as an HTMX-compatible link if it begins with
+// /admin/, otherwise as plain helper text. Lets us pull operators directly
+// into the right config page without reinventing every link.
+templ issueHint(hint string) {
+	if strings.HasPrefix(hint, "/admin/") {
+		<a
+			href={ templ.URL(hint) }
+			hx-get={ hint }
+			hx-target="#main"
+			hx-push-url="true"
+			class="text-xs text-blue-600 hover:underline mt-1 inline-block"
+		>Go to { hint }</a>
+	} else {
+		<p class="text-xs text-gray-500 mt-1">{ hint }</p>
+	}
+}
