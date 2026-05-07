@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/toml"
@@ -30,12 +31,12 @@ type sourcesFile struct {
 
 // SourcesPath returns the full path to the user sources file within configDir.
 func SourcesPath(configDir string) string {
-	return configDir + "/" + SourcesFileName
+	return filepath.Join(configDir, SourcesFileName)
 }
 
 // DefaultSourcesPath returns the full path to the default sources template.
 func DefaultSourcesPath(configDir string) string {
-	return configDir + "/" + DefaultSourcesFileName
+	return filepath.Join(configDir, DefaultSourcesFileName)
 }
 
 // EnsureSourcesFile copies the default sources file to the user path if the
