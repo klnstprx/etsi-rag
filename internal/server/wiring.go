@@ -3,12 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/backend"
-	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/prompts"
@@ -226,17 +224,14 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 	readDocTool := agent.NewReadDocumentTool(s.pipeline, s.store)
 	readDocTool.SetDefaultTopK(s.cfg.Retrieval.TopK)
 
-	// list_sources reads sources.toml fresh on every call, so admin edits
-	// (which persist to the file before calling Crawler.SetSources) take
-	// effect for the next agent turn without a server restart.
-	configDir := filepath.Dir(s.configPath)
+	// list_sources reads from the in-memory Registry, which the admin handler
+	// updates atomically when the operator saves an edit. No file I/O on the
+	// agent's per-turn hot path.
 	listSourcesTool := agent.NewListSourcesTool(func() []domain.CrawlSource {
-		sources, err := config.LoadSources(configDir)
-		if err != nil {
-			s.logger.Warn().Err(err).Msg("list_sources: loading sources.toml")
+		if s.sources == nil {
 			return nil
 		}
-		return sources
+		return s.sources.Snapshot()
 	})
 
 	tools := []agent.Tool{searchTool, readDocTool, listSourcesTool}

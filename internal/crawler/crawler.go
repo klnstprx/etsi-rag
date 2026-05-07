@@ -8,6 +8,7 @@ import (
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
+	"etsi-rag/internal/sources"
 	"etsi-rag/internal/store"
 	"fmt"
 	"net/url"
@@ -26,23 +27,24 @@ type Crawler struct {
 	fetcher  *Fetcher
 	browser  *Browser
 	config   config.CrawlerConfig
+	sources  *sources.Registry
 	logger   zerolog.Logger
 
 	mu       sync.RWMutex
-	sources  []domain.CrawlSource // current snapshot from sources.toml; mutate via SetSources
 	running  bool
 	cancel   context.CancelFunc
 	progress *RunProgress
 }
 
-// New creates a new crawler. sources is the initial snapshot loaded from
-// sources.toml; use SetSources to hot-reload after admin CRUD edits the file.
+// New creates a new crawler. The Registry holds the live source snapshot;
+// admin edits to sources.toml flow through the same Registry so the next
+// crawl run sees them without a server restart.
 func New(
 	st *store.SQLiteStore,
 	obj *objectstore.Client,
 	pip *rag.Pipeline,
 	cfg config.CrawlerConfig,
-	sources []domain.CrawlSource,
+	srcs *sources.Registry,
 	logger zerolog.Logger,
 ) *Crawler {
 	f := NewFetcher(cfg.RequestTimeout, cfg.RequestDelay, cfg.MaxBodySize)
@@ -54,7 +56,7 @@ func New(
 		pipeline: pip,
 		fetcher:  f,
 		config:   cfg,
-		sources:  append([]domain.CrawlSource(nil), sources...),
+		sources:  srcs,
 		logger:   logger,
 	}
 
@@ -84,21 +86,13 @@ func (c *Crawler) SetConfig(cfg config.CrawlerConfig) {
 	c.mu.Unlock()
 }
 
-// SetSources replaces the in-memory sources snapshot. Called by the admin
-// handler after writing sources.toml so the next crawl run picks up edits
-// without a server restart. The slice is copied to insulate the crawler
-// from later mutation by callers.
-func (c *Crawler) SetSources(sources []domain.CrawlSource) {
-	c.mu.Lock()
-	c.sources = append([]domain.CrawlSource(nil), sources...)
-	c.mu.Unlock()
-}
-
-// snapshotSources returns a copy of the current sources for use during a run.
+// snapshotSources returns the current sources for use during a run. The
+// Registry returns a defensive copy on every call.
 func (c *Crawler) snapshotSources() []domain.CrawlSource {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return append([]domain.CrawlSource(nil), c.sources...)
+	if c.sources == nil {
+		return nil
+	}
+	return c.sources.Snapshot()
 }
 
 // Close releases browser resources.

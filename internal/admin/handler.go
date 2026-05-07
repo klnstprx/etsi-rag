@@ -17,6 +17,7 @@ import (
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
+	"etsi-rag/internal/sources"
 	"etsi-rag/internal/store"
 )
 
@@ -29,6 +30,7 @@ type Handler struct {
 	config       *config.Config
 	configPath   string
 	configDir    string // directory holding config.toml and sources.toml
+	sources      *sources.Registry
 	sessionStore *session.Store
 	agent        atomic.Pointer[agent.Agent]
 	crawler      *crawler.Crawler
@@ -46,6 +48,7 @@ type HandlerConfig struct {
 	Config       *config.Config
 	ConfigPath   string
 	ConfigDir    string
+	Sources      *sources.Registry
 	SessionStore *session.Store
 	Crawler      *crawler.Crawler
 	Pipeline     *rag.Pipeline
@@ -69,6 +72,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		config:       cfg.Config,
 		configPath:   cfg.ConfigPath,
 		configDir:    cfg.ConfigDir,
+		sources:      cfg.Sources,
 		sessionStore: cfg.SessionStore,
 		crawler:      cfg.Crawler,
 		pipeline:     cfg.Pipeline,

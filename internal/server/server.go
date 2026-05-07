@@ -22,6 +22,7 @@ import (
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
+	"etsi-rag/internal/sources"
 	"etsi-rag/internal/store"
 
 	"github.com/rs/zerolog"
@@ -36,6 +37,7 @@ type Server struct {
 	store        *store.SQLiteStore
 	sessionStore *session.Store
 	pipeline     *rag.Pipeline
+	sources      *sources.Registry
 	crawler      *crawler.Crawler
 
 	apiHandler   *api.Handler
@@ -131,28 +133,27 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		objStore = nil
 	}
 
-	// Load crawl sources from config/sources.toml. The file is the single
-	// source of truth; admin CRUD writes back to it and hot-reloads the
-	// crawler via SetSources. The first run copies sources.default.toml.
+	// Load crawl sources from config/sources.toml. The Registry is the single
+	// in-memory source of truth at runtime; admin CRUD calls Replace, the
+	// crawler reads Snapshot on each run, the agent's list_sources reads
+	// Snapshot on each turn. The first boot copies sources.default.toml.
 	configDir := filepath.Dir(configPath)
 	if err := config.EnsureSourcesFile(configDir); err != nil {
 		logger.Warn().Err(err).Msg("ensuring sources.toml")
 	}
-	sources, err := config.LoadSources(configDir)
-	if err != nil {
-		logger.Warn().Err(err).Msg("loading sources.toml; crawler will start with no sources")
+	s.sources = sources.New(config.SourcesPath(configDir), logger)
+	loadErr := s.sources.Load()
+	if loadErr != nil {
+		logger.Warn().Err(loadErr).Msg("loading sources.toml; crawler will start with no sources")
 	}
 
 	// Reconcile crawl_pages with the loaded sources: any page whose source_key
 	// no longer appears in sources.toml gets marked stale, so a hand-edit that
 	// removes a source has the same effect as deleting it via the admin UI.
-	// The operator clears the rows by running Purge Stale.
-	if err == nil {
-		knownKeys := make([]string, 0, len(sources))
-		for _, s := range sources {
-			knownKeys = append(knownKeys, s.Key)
-		}
-		if n, recErr := sqliteStore.MarkOrphanPagesStale(context.Background(), knownKeys); recErr != nil {
+	// The operator clears the rows by running Purge Stale. Skip on parse
+	// failure — we don't want a broken file to mass-stale the corpus.
+	if loadErr == nil {
+		if n, recErr := sqliteStore.MarkOrphanPagesStale(context.Background(), s.sources.KnownKeys()); recErr != nil {
 			logger.Warn().Err(recErr).Msg("reconciling orphan crawl pages")
 		} else if n > 0 {
 			logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
@@ -161,7 +162,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 
 	// Initialize crawler only if dependencies are available
 	if embeddingClient != nil && objStore != nil {
-		s.crawler = crawler.New(sqliteStore, objStore, s.pipeline, cfg.Crawler, sources, logger)
+		s.crawler = crawler.New(sqliteStore, objStore, s.pipeline, cfg.Crawler, s.sources, logger)
 	} else {
 		logger.Warn().Msg("crawler disabled (requires embedding backend + object store)")
 	}
@@ -209,6 +210,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Config:       cfg,
 		ConfigPath:   configPath,
 		ConfigDir:    configDir,
+		Sources:      s.sources,
 		SessionStore: s.sessionStore,
 		Crawler:      s.crawler,
 		Pipeline:     s.pipeline,

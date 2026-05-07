@@ -10,7 +10,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"etsi-rag/internal/admin/templates"
-	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/domain"
 )
@@ -58,7 +57,10 @@ func (h *Handler) crawlerData(ctx context.Context) templates.CrawlerData {
 	running := h.crawler != nil && h.crawler.IsRunning()
 
 	docCount, _ := h.store.CountDocuments(ctx)
-	sources, _ := config.LoadSources(h.configDir)
+	var sources []domain.CrawlSource
+	if h.sources != nil {
+		sources = h.sources.Snapshot()
+	}
 	runs, _ := h.store.ListCrawlRuns(ctx, 10)
 
 	var progress *templates.ProgressSnapshot
@@ -171,8 +173,12 @@ func (h *Handler) CrawlerStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // SourceCreate handles POST /admin/crawler/sources. Appends a new entry to
-// sources.toml and hot-reloads the running crawler.
+// sources.toml; the next crawl run picks up the change without a restart.
 func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
+	if h.sources == nil {
+		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -187,20 +193,16 @@ func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
 		Enabled:     r.FormValue("enabled") == "true",
 	}
 
-	sources, err := config.LoadSources(h.configDir)
-	if err != nil {
-		h.sourceError(w, r, "load sources", err)
-		return
-	}
-	for _, existing := range sources {
+	current := h.sources.Snapshot()
+	for _, existing := range current {
 		if existing.Key == src.Key {
 			h.sourceError(w, r, "create source", fmt.Errorf("key %q already exists", src.Key))
 			return
 		}
 	}
-	sources = append(sources, src)
+	current = append(current, src)
 
-	if err := h.persistSources(sources); err != nil {
+	if err := h.sources.Replace(current); err != nil {
 		h.sourceError(w, r, "create source", err)
 		return
 	}
@@ -214,20 +216,19 @@ func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if h.sources == nil {
+		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
+		return
+	}
 
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
 
-	sources, err := config.LoadSources(h.configDir)
-	if err != nil {
-		h.sourceError(w, r, "load sources", err)
-		return
-	}
-
+	current := h.sources.Snapshot()
 	idx := -1
-	for i, s := range sources {
+	for i, s := range current {
 		if s.Key == key {
 			idx = i
 			break
@@ -238,13 +239,13 @@ func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sources[idx].Name = r.FormValue("name")
-	sources[idx].SeedURL = r.FormValue("seed_url")
-	sources[idx].Description = strings.TrimSpace(r.FormValue("description"))
-	sources[idx].Tags = parseTags(r.FormValue("tags"))
-	sources[idx].Enabled = r.FormValue("enabled") == "true"
+	current[idx].Name = r.FormValue("name")
+	current[idx].SeedURL = r.FormValue("seed_url")
+	current[idx].Description = strings.TrimSpace(r.FormValue("description"))
+	current[idx].Tags = parseTags(r.FormValue("tags"))
+	current[idx].Enabled = r.FormValue("enabled") == "true"
 
-	if err := h.persistSources(sources); err != nil {
+	if err := h.sources.Replace(current); err != nil {
 		h.sourceError(w, r, "update source", err)
 		return
 	}
@@ -258,25 +259,24 @@ func (h *Handler) SourceDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	sources, err := config.LoadSources(h.configDir)
-	if err != nil {
-		h.sourceError(w, r, "load sources", err)
+	if h.sources == nil {
+		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
 		return
 	}
 
-	filtered := sources[:0]
-	for _, s := range sources {
+	current := h.sources.Snapshot()
+	filtered := make([]domain.CrawlSource, 0, len(current))
+	for _, s := range current {
 		if s.Key != key {
 			filtered = append(filtered, s)
 		}
 	}
-	if len(filtered) == len(sources) {
+	if len(filtered) == len(current) {
 		http.Error(w, "source not found", http.StatusNotFound)
 		return
 	}
 
-	if err := h.persistSources(filtered); err != nil {
+	if err := h.sources.Replace(filtered); err != nil {
 		h.sourceError(w, r, "delete source", err)
 		return
 	}
@@ -293,18 +293,6 @@ func (h *Handler) SourceDelete(w http.ResponseWriter, r *http.Request) {
 		msg = fmt.Sprintf("Source deleted; %d pages marked stale, run Purge Stale to remove", staleCount)
 	}
 	h.renderCrawler(w, r, msg, "success")
-}
-
-// persistSources writes sources.toml and hot-reloads the running crawler so
-// the next run picks up edits without a server restart.
-func (h *Handler) persistSources(sources []domain.CrawlSource) error {
-	if err := config.WriteSources(sources, config.SourcesPath(h.configDir)); err != nil {
-		return err
-	}
-	if h.crawler != nil {
-		h.crawler.SetSources(sources)
-	}
-	return nil
 }
 
 // sourceError logs and returns a toast for a failed source operation.

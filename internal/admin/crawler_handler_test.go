@@ -9,22 +9,31 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
+
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/sources"
 )
 
 // setupTestHandlerWithSources extends setupTestAdminHandler with a writable
-// configDir seeded with one source, so the source CRUD handlers have somewhere
-// to read and write.
+// configDir seeded with one source AND a wired sources.Registry, matching
+// what server.New does in production.
 func setupTestHandlerWithSources(t *testing.T, seed []domain.CrawlSource) *Handler {
 	t.Helper()
 	h, _ := setupTestAdminHandler(t)
 
 	dir := t.TempDir()
 	h.configDir = dir
-	if err := config.WriteSources(seed, config.SourcesPath(dir)); err != nil {
+	path := config.SourcesPath(dir)
+	if err := config.WriteSources(seed, path); err != nil {
 		t.Fatalf("seeding sources.toml: %v", err)
 	}
+	reg := sources.New(path, zerolog.New(os.Stderr).Level(zerolog.Disabled))
+	if err := reg.Load(); err != nil {
+		t.Fatalf("loading test registry: %v", err)
+	}
+	h.sources = reg
 	return h
 }
 
