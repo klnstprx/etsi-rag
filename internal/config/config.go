@@ -27,12 +27,18 @@ const (
 )
 
 // BackendConfig represents an LLM server endpoint.
+//
+// MaxRetries is the per-call retry budget for transient 5xx responses (e.g.
+// llama-server crash + llama-swap restart). 0 = use llm.DefaultMaxRetries;
+// negative is treated as 0. Applies to all clients targeting this backend
+// (embed, chat, token counter).
 type BackendConfig struct {
 	Name       string `koanf:"name"`
 	BaseURL    string `koanf:"base_url"`
 	APIKey     string `koanf:"api_key"`
 	Enabled    bool   `koanf:"enabled"`
 	IsLlamaCpp bool   `koanf:"is_llama_cpp"`
+	MaxRetries int    `koanf:"max_retries"`
 }
 
 // Config holds all application configuration.

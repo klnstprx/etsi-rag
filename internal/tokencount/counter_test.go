@@ -5,8 +5,35 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
+
+func TestLlamaCppCounterRetriesOn5xx(t *testing.T) {
+	// Flaky upstream: first 2 calls return 500, 3rd succeeds. Mirrors a
+	// llama-server crash window where llama-swap restarts the upstream.
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(tokenizeResponse{Tokens: []int{1, 2, 3}})
+	}))
+	defer srv.Close()
+
+	c := NewLlamaCppCounter(srv.URL, "test-model", nil)
+	tokens, err := c.Tokenize(context.Background(), "anything")
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got: %v", err)
+	}
+	if len(tokens) != 3 {
+		t.Errorf("expected 3 tokens after retry, got %d", len(tokens))
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("expected 3 attempts, got %d", got)
+	}
+}
 
 func TestLlamaCppCounter(t *testing.T) {
 	// Mock llama.cpp server
@@ -94,7 +121,8 @@ func TestLlamaCppCounterError(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	c := NewLlamaCppCounter(srv.URL, "test-model", nil)
+	// Disable retries so the test fails fast instead of waiting through backoff.
+	c := NewLlamaCppCounter(srv.URL, "test-model", nil).WithMaxRetries(0)
 
 	_, err := c.Count(ctx, "test")
 	if err == nil {

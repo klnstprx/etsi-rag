@@ -44,6 +44,25 @@ func newTestChatClient(url string) *ChatClient {
 	}
 }
 
+func TestResolveMaxRetries(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"zero falls back to default", 0, DefaultMaxRetries},
+		{"negative disables retries", -1, 0},
+		{"positive passes through", 7, 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveMaxRetries(tt.in); got != tt.want {
+				t.Errorf("resolveMaxRetries(%d) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // chatResponse builds a raw chat completion JSON response.
 func chatResponse(content string) map[string]any {
 	return map[string]any{

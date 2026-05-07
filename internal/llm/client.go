@@ -12,12 +12,32 @@ import (
 // Compile-time check.
 var _ Embedder = (*EmbedClient)(nil)
 
+// DefaultMaxRetries is the fallback retry count for transient 5xx responses
+// when a backend doesn't override it. ~120s exponential-backoff budget at
+// openai-go's default cadence — long enough to outlast a llama-swap restart
+// with cold model reload.
+const DefaultMaxRetries = 10
+
+// resolveMaxRetries normalizes a configured retry count: 0 means "use default",
+// negative is treated as 0 retries (i.e. one attempt, no retries).
+func resolveMaxRetries(n int) int {
+	switch {
+	case n == 0:
+		return DefaultMaxRetries
+	case n < 0:
+		return 0
+	default:
+		return n
+	}
+}
+
 // EmbedClientConfig holds everything needed to construct an embedding client.
 type EmbedClientConfig struct {
-	BaseURL   string
-	APIKey    string
-	Model     string
-	BatchSize int
+	BaseURL    string
+	APIKey     string
+	Model      string
+	BatchSize  int
+	MaxRetries int
 }
 
 // EmbedClient wraps the OpenAI client for embedding operations.
@@ -28,6 +48,11 @@ type EmbedClient struct {
 }
 
 // NewEmbedClient creates a new embedding client from an EmbedClientConfig.
+//
+// Retries on transient upstream 5xx (e.g. llama-server crash + llama-swap
+// restart) absorb backend flakiness so the crawler's consecutive-fail circuit
+// breaker doesn't trip on a recoverable outage. openai-go uses exponential
+// backoff with jitter. See DefaultMaxRetries for the fallback budget.
 func NewEmbedClient(cfg EmbedClientConfig) *EmbedClient {
 	apiKey := cfg.APIKey
 	if apiKey == "" {
@@ -37,6 +62,7 @@ func NewEmbedClient(cfg EmbedClientConfig) *EmbedClient {
 	client := openai.NewClient(
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(apiKey),
+		option.WithMaxRetries(resolveMaxRetries(cfg.MaxRetries)),
 	)
 
 	batchSize := cfg.BatchSize
@@ -114,6 +140,7 @@ type ChatClientConfig struct {
 	Model       string
 	MaxTokens   int64
 	Temperature float64
+	MaxRetries  int
 }
 
 // ChatClient wraps the OpenAI client for chat operations.
@@ -125,6 +152,8 @@ type ChatClient struct {
 }
 
 // NewChatClient creates a new chat client from a ChatClientConfig.
+//
+// See NewEmbedClient for retry rationale.
 func NewChatClient(cfg ChatClientConfig) *ChatClient {
 	apiKey := cfg.APIKey
 	if apiKey == "" {
@@ -134,6 +163,7 @@ func NewChatClient(cfg ChatClientConfig) *ChatClient {
 	client := openai.NewClient(
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(apiKey),
+		option.WithMaxRetries(resolveMaxRetries(cfg.MaxRetries)),
 	)
 
 	return &ChatClient{

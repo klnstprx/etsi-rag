@@ -41,6 +41,7 @@ func (s *Server) resolveEmbedClient(backendName string, partialCfg llm.EmbedClie
 
 	partialCfg.BaseURL = b.BaseURL
 	partialCfg.APIKey = b.APIKey
+	partialCfg.MaxRetries = b.MaxRetries
 	s.logger.Info().Str("stage", "embedding").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
 	return llm.NewEmbedClient(partialCfg), nil
 }
@@ -54,6 +55,7 @@ func (s *Server) resolveChatClient(backendName string, partialCfg llm.ChatClient
 
 	partialCfg.BaseURL = b.BaseURL
 	partialCfg.APIKey = b.APIKey
+	partialCfg.MaxRetries = b.MaxRetries
 	s.logger.Info().Str("stage", "agent").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
 	return llm.NewChatClient(partialCfg), nil
 }
@@ -132,7 +134,11 @@ func (s *Server) resolveCounter(backendName, model string) (tokencount.Counter, 
 	if b.IsLlamaCpp {
 		base := strings.TrimSuffix(b.BaseURL, "/v1")
 		s.logger.Info().Str("backend", b.Name).Msg("using llama.cpp token counter")
-		return tokencount.NewLlamaCppCounter(base, model, nil), nil
+		counter := tokencount.NewLlamaCppCounter(base, model, nil)
+		if b.MaxRetries != 0 {
+			counter = counter.WithMaxRetries(b.MaxRetries)
+		}
+		return counter, nil
 	}
 	tc, err := tokencount.NewTiktokenCounter(model)
 	if err != nil {
