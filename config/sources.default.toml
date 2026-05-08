@@ -18,7 +18,7 @@ key = 'grado-informatica'
 name = 'Grado en Ingeniería Informática'
 seed_url = 'https://www.uma.es/grado-en-ingenieria-informatica/'
 description = 'Plan de estudios, asignaturas y guías docentes del Grado en Ingeniería Informática.'
-tags = ['degree-cs']
+tags = ['grado-informatica']
 enabled = true
 
 [[sources]]
@@ -26,7 +26,7 @@ key = 'grado-software'
 name = 'Grado en Ingeniería del Software'
 seed_url = 'https://www.uma.es/grado-en-ingenieria-del-software/'
 description = 'Plan de estudios, asignaturas y guías docentes del Grado en Ingeniería del Software.'
-tags = ['degree-software']
+tags = ['grado-software']
 enabled = true
 
 [[sources]]
@@ -34,7 +34,7 @@ key = 'grado-computadores'
 name = 'Grado en Ingeniería de Computadores'
 seed_url = 'https://www.uma.es/grado-en-ingenieria-de-computadores/'
 description = 'Plan de estudios, asignaturas y guías docentes del Grado en Ingeniería de Computadores.'
-tags = ['degree-computers']
+tags = ['grado-computadores']
 enabled = true
 
 [[sources]]
@@ -42,7 +42,7 @@ key = 'grado-salud'
 name = 'Grado en Ingeniería de la Salud'
 seed_url = 'https://www.uma.es/grado-en-ingenieria-de-la-salud/'
 description = 'Plan de estudios, asignaturas y guías docentes del Grado en Ingeniería de la Salud.'
-tags = ['degree-health']
+tags = ['grado-salud']
 enabled = true
 
 [[sources]]
@@ -50,7 +50,7 @@ key = 'doble-informatica-matematicas'
 name = 'Doble Grado Informática-Matemáticas'
 seed_url = 'https://www.uma.es/informatica-matematicas/'
 description = 'Plan de estudios y asignaturas del Doble Grado en Informática y Matemáticas.'
-tags = ['degree-math-cs-double']
+tags = ['doble-grado-informatica-matematicas']
 enabled = true
 
 [[sources]]
@@ -58,7 +58,7 @@ key = 'grado-ciberseguridad-ia'
 name = 'Grado en Ciberseguridad e IA'
 seed_url = 'https://www.uma.es/grado-en-ciberseguridad-e-inteligencia-artificial/'
 description = 'Plan de estudios y asignaturas del Grado en Ciberseguridad e Inteligencia Artificial.'
-tags = ['degree-cybersecurity-ai']
+tags = ['grado-ciberseguridad-ia']
 enabled = true
 
 [[sources]]
@@ -90,7 +90,7 @@ key = 'doctorado-informatica'
 name = 'Doctorado en Informática'
 seed_url = 'https://www.uma.es/doctorado-informatica/'
 description = 'Programa de doctorado en Informática: líneas de investigación, acceso, fechas importantes.'
-tags = ['phd']
+tags = ['doctorado']
 enabled = true
 
 [[sources]]
@@ -98,7 +98,7 @@ key = 'etsi-informatica'
 name = 'ETSI Informática'
 seed_url = 'https://www.uma.es/etsi-informatica/'
 description = 'Sede de la Escuela: secretaría, dirección, normativa, conserjería, eventos y servicios propios.'
-tags = ['school']
+tags = ['escuela']
 enabled = true
 
 # UMA-wide hubs that complement the ETSI-specific seeds. The crawler's BFS is
@@ -111,7 +111,7 @@ key = 'becas'
 name = 'Becas y ayudas UMA'
 seed_url = 'https://www.uma.es/becas/'
 description = 'Convocatorias MEFPYD, becas UMA, becas de movilidad y ayudas Santander.'
-tags = ['financial-aid', 'mobility', 'enrollment']
+tags = ['becas', 'movilidad', 'matricula']
 enabled = true
 
 [[sources]]
@@ -119,7 +119,7 @@ key = 'doctorado-uma'
 name = 'Doctorado UMA'
 seed_url = 'https://www.uma.es/doctorado/'
 description = 'Procedimientos comunes a todos los programas de doctorado: admisión, normativa, tesis, precios.'
-tags = ['phd', 'procedures']
+tags = ['doctorado', 'tramites']
 enabled = true
 
 [[sources]]
@@ -127,7 +127,7 @@ key = 'empleabilidad'
 name = 'Empleabilidad y Emprendimiento'
 seed_url = 'https://www.uma.es/empleabilidad-emprendimiento/'
 description = 'Servicio de carreras: Agencia de Colocación, prácticas en empresa, orientación laboral.'
-tags = ['employment', 'internships']
+tags = ['empleo', 'practicas']
 enabled = true
 
 [[sources]]
@@ -135,7 +135,7 @@ key = 'oficina-estudiante'
 name = 'Oficina de Atención al Estudiante'
 seed_url = 'https://www.uma.es/oficina-de-atencion-al-estudiante/'
 description = 'Punto único de información y apoyo al estudiantado en aspectos académicos, sociales y personales.'
-tags = ['student-life', 'wellbeing', 'accessibility']
+tags = ['vida-estudiantil', 'bienestar', 'accesibilidad']
 enabled = true
 
 [[sources]]
@@ -143,7 +143,7 @@ key = 'relaciones-internacionales'
 name = 'Relaciones Internacionales (Erasmus, KA171)'
 seed_url = 'https://www.uma.es/relaciones-internacionales/'
 description = 'Movilidad internacional: Erasmus+, KA171, prácticas internacionales y estudiantes entrantes.'
-tags = ['mobility', 'international']
+tags = ['movilidad', 'internacional']
 enabled = true
 
 [[sources]]
@@ -151,7 +151,7 @@ key = 'biblioteca'
 name = 'Biblioteca Universitaria UMA'
 seed_url = 'https://www.uma.es/biblioteca-universitaria-uma/'
 description = 'Servicios de biblioteca: catálogo, préstamo, salas de estudio, recursos electrónicos.'
-tags = ['library']
+tags = ['biblioteca']
 enabled = true
 
 [[sources]]
@@ -159,7 +159,7 @@ key = 'sci'
 name = 'Servicio Central de Informática'
 seed_url = 'https://www.uma.es/servicio-central-de-informatica/'
 description = 'TI corporativa de la UMA: Campus Virtual, correo, wifi (eduroam), software, soporte.'
-tags = ['it-services']
+tags = ['servicios-ti']
 enabled = true
 
 [[sources]]
@@ -167,7 +167,7 @@ key = 'seccion-estudiantes'
 name = 'Sección de Estudiantes'
 seed_url = 'https://www.uma.es/seccion-de-estudiantes/'
 description = 'Trámites administrativos del estudiante: matrícula, certificaciones, títulos.'
-tags = ['procedures', 'enrollment']
+tags = ['tramites', 'matricula']
 enabled = true
 
 [[sources]]
@@ -175,7 +175,7 @@ key = 'acceso'
 name = 'Acceso a la UMA'
 seed_url = 'https://www.uma.es/acceso/'
 description = 'Admisión y preinscripción: PEvAU, mayores de 25/45, traslados de expediente.'
-tags = ['enrollment']
+tags = ['matricula']
 enabled = true
 
 [[sources]]
@@ -183,7 +183,7 @@ key = 'calidad'
 name = 'Calidad y Sistema de Garantía (SGC)'
 seed_url = 'https://www.uma.es/calidad/'
 description = 'Sistema de Garantía de Calidad UMA, Manual de Calidad, comisiones académicas.'
-tags = ['quality-assurance']
+tags = ['calidad']
 enabled = true
 
 [[sources]]
@@ -191,7 +191,7 @@ key = 'accion-social'
 name = 'Acción Social UMA'
 seed_url = 'https://www.uma.es/accion-social/'
 description = 'Programas sociales: emergencias, escuela infantil, vivienda asequible, voluntariado.'
-tags = ['student-life', 'accessibility', 'housing']
+tags = ['vida-estudiantil', 'accesibilidad', 'alojamiento']
 enabled = true
 
 [[sources]]
@@ -199,7 +199,7 @@ key = 'alojamiento'
 name = 'Alojamiento UMA'
 seed_url = 'https://www.uma.es/alojamiento/'
 description = 'Información sobre residencias universitarias y opciones de alojamiento.'
-tags = ['housing']
+tags = ['alojamiento']
 enabled = true
 
 [[sources]]
@@ -207,7 +207,7 @@ key = 'sicue'
 name = 'SICUE (movilidad nacional)'
 seed_url = 'https://www.uma.es/sicue/'
 description = 'Programa de movilidad entre universidades españolas (SICUE).'
-tags = ['mobility']
+tags = ['movilidad']
 enabled = true
 
 [[sources]]
@@ -215,7 +215,7 @@ key = 'orientacion-universitaria'
 name = 'Orientación Universitaria'
 seed_url = 'https://www.uma.es/orientacion-universitaria/'
 description = 'Apoyo a futuros estudiantes y orientación académica para los matriculados.'
-tags = ['student-life', 'enrollment']
+tags = ['vida-estudiantil', 'matricula']
 enabled = true
 
 [[sources]]
@@ -223,7 +223,7 @@ key = 'discapacidad'
 name = 'Oficina de Atención a la Discapacidad'
 seed_url = 'https://www.uma.es/oficina-de-atencion-a-la-discapacidad/'
 description = 'Adaptaciones académicas, accesibilidad y apoyo al estudiantado con discapacidad.'
-tags = ['accessibility']
+tags = ['accesibilidad']
 enabled = true
 
 [[sources]]
@@ -231,7 +231,7 @@ key = 'uda-psicologia'
 name = 'UDA Psicología (apoyo psicológico)'
 seed_url = 'https://www.uma.es/uda-psicologia/'
 description = 'Unidad de apoyo psicológico para estudiantes y comunidad universitaria.'
-tags = ['wellbeing']
+tags = ['bienestar']
 enabled = true
 
 [[sources]]
@@ -239,7 +239,7 @@ key = 'consejo-estudiantes'
 name = 'Consejo de Estudiantes'
 seed_url = 'https://www.uma.es/consejo-de-estudiantes/'
 description = 'Órgano de representación estudiantil: composición, normativa, comunicaciones.'
-tags = ['student-life']
+tags = ['vida-estudiantil']
 enabled = true
 
 [[sources]]
@@ -247,7 +247,7 @@ key = 'defensoria'
 name = 'Defensoría Universitaria'
 seed_url = 'https://www.uma.es/defensoria-universitaria/'
 description = 'Defensoría/ombudsperson universitaria: derechos del estudiante, mediación, reclamaciones.'
-tags = ['student-life']
+tags = ['vida-estudiantil']
 enabled = true
 
 [[sources]]
@@ -255,7 +255,7 @@ key = 'oferta-grado'
 name = 'Oferta de Grado UMA'
 seed_url = 'https://www.uma.es/oferta-de-grado/'
 description = 'Catálogo completo de grados oficiales de la UMA con notas de corte y plazas.'
-tags = ['enrollment']
+tags = ['matricula']
 enabled = true
 
 [[sources]]
@@ -263,5 +263,5 @@ key = 'international-hub'
 name = 'International Hub UMA'
 seed_url = 'https://www.uma.es/international-hub/'
 description = 'Portal en inglés para estudiantes internacionales entrantes.'
-tags = ['international']
+tags = ['internacional']
 enabled = true

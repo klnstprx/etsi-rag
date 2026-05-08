@@ -63,9 +63,6 @@ type DocumentInput struct {
 	// Language is "es" or "en".
 	Language string `json:"language"`
 
-	// Category classifies the document (degree, course, procedure, staff, news, general).
-	Category string `json:"category"`
-
 	// Metadata contains optional key-value pairs.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }

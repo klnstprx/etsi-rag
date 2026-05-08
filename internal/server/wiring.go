@@ -242,22 +242,26 @@ func (s *Server) probeLlamaCppBackends() {
 // agent's switch distinguishes these two failure modes in its diagnostic
 // logging.
 func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
-	searchTool := agent.NewSemanticSearchTool(s.pipeline)
-	searchTool.SetStore(s.store)
-	searchTool.SetMaxImages(s.cfg.Agent.Vision.MaxImagesPerCall)
-
-	readDocTool := agent.NewReadDocumentTool(s.pipeline, s.store)
-	readDocTool.SetDefaultTopK(s.cfg.Retrieval.TopK)
-
-	// list_sources reads from the in-memory Registry, which the admin handler
-	// updates atomically when the operator saves an edit. No file I/O on the
-	// agent's per-turn hot path.
-	listSourcesTool := agent.NewListSourcesTool(func() []domain.CrawlSource {
+	// Both list_sources and semantic_search read from the in-memory Registry
+	// (the admin handler swaps it atomically on edits). One closure, two
+	// callers — keeps the agent decoupled from the registry concretes and
+	// avoids file I/O on the per-turn hot path.
+	sourceSnapshot := func() []domain.CrawlSource {
 		if s.sources == nil {
 			return nil
 		}
 		return s.sources.Snapshot()
-	})
+	}
+
+	searchTool := agent.NewSemanticSearchTool(s.pipeline)
+	searchTool.SetStore(s.store)
+	searchTool.SetMaxImages(s.cfg.Agent.Vision.MaxImagesPerCall)
+	searchTool.SetSnapshot(sourceSnapshot)
+
+	readDocTool := agent.NewReadDocumentTool(s.pipeline, s.store)
+	readDocTool.SetDefaultTopK(s.cfg.Retrieval.TopK)
+
+	listSourcesTool := agent.NewListSourcesTool(sourceSnapshot)
 
 	tools := []agent.Tool{searchTool, readDocTool, listSourcesTool}
 

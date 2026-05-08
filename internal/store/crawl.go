@@ -61,6 +61,25 @@ func (s *SQLiteStore) GetCrawlPageByURL(ctx context.Context, url string) (*domai
 	return &page, nil
 }
 
+// GetSourceKeyByDocID returns the source_key of the oldest crawl_page that
+// references the given document (i.e. the source that originally introduced
+// the content), or an empty string when none does (e.g. API-ingested
+// documents that never went through the crawler). The deterministic ORDER BY
+// matters when a doc is reached from multiple sources — the admin Document
+// detail view would otherwise flicker between sources across requests.
+func (s *SQLiteStore) GetSourceKeyByDocID(ctx context.Context, docID string) (string, error) {
+	var key string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT source_key FROM crawl_pages WHERE doc_id = ? ORDER BY id LIMIT 1`, docID).Scan(&key)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("getting source_key by doc_id: %w", err)
+	}
+	return key, nil
+}
+
 // ListCrawlPages returns crawl pages, optionally filtered by source and/or status.
 func (s *SQLiteStore) ListCrawlPages(ctx context.Context, sourceKey *string, status *string) ([]domain.CrawlPage, error) {
 	query := `SELECT id, source_key, url, content_type, title, content_hash,

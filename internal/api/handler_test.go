@@ -103,7 +103,7 @@ func TestGetArtifact_TokenStripsPngSuffix(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-1", Title: "x", Content: "x",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(context.Background(), doc); err != nil {
 		t.Fatalf("CreateDocument: %v", err)
@@ -164,7 +164,6 @@ func TestIngestAndListDocuments(t *testing.T) {
 				Title:    "Test Doc",
 				Content:  "Test content for ingestion.",
 				Language: "es",
-				Category: "general",
 			},
 		},
 	})
@@ -216,7 +215,6 @@ func TestDeleteDocument(t *testing.T) {
 		Title:    "Test",
 		Content:  "Content",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -265,8 +263,8 @@ func TestRAGQuery_HappyPath(t *testing.T) {
 	urlB := "https://example.com/b"
 	body, _ := json.Marshal(IngestRequest{
 		Documents: []DocumentInput{
-			{ID: "doc-a", Title: "Doc A", Content: "alpha bravo charlie delta", URL: &urlA, Language: "es", Category: "general"},
-			{ID: "doc-b", Title: "Doc B", Content: "echo foxtrot golf hotel", URL: &urlB, Language: "es", Category: "general"},
+			{ID: "doc-a", Title: "Doc A", Content: "alpha bravo charlie delta", URL: &urlA, Language: "es"},
+			{ID: "doc-b", Title: "Doc B", Content: "echo foxtrot golf hotel", URL: &urlB, Language: "es"},
 		},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/rag/ingest", bytes.NewReader(body))
@@ -348,7 +346,6 @@ func TestIngestInvalidLanguage(t *testing.T) {
 				Title:    "Test",
 				Content:  "Content",
 				Language: "fr",
-				Category: "general",
 			},
 		},
 	})

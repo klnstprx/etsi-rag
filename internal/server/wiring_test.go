@@ -353,7 +353,7 @@ func TestProbeSyncsStoreDimension(t *testing.T) {
 	ctx := context.Background()
 	doc := &domain.Document{
 		ID: "d1", Title: "T", Content: "C",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	s.store.CreateDocument(ctx, doc)
 
@@ -373,7 +373,7 @@ func TestConfigDimensionChange_SeenByStore(t *testing.T) {
 	ctx := context.Background()
 	doc := &domain.Document{
 		ID: "d1", Title: "T", Content: "C",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	s.store.CreateDocument(ctx, doc)
 

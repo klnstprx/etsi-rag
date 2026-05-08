@@ -38,9 +38,9 @@ func seedSearchCorpus(t *testing.T, s *SQLiteStore) {
 	ctx := context.Background()
 
 	docs := []*domain.Document{
-		{ID: "doc-a", Title: "Alpha", Content: "alpha", Language: domain.LanguageES, Category: domain.CategoryGeneral},
-		{ID: "doc-b", Title: "Bravo", Content: "bravo", Language: domain.LanguageES, Category: domain.CategoryGeneral},
-		{ID: "doc-c", Title: "Charlie", Content: "charlie", Language: domain.LanguageEN, Category: domain.CategoryGeneral},
+		{ID: "doc-a", Title: "Alpha", Content: "alpha", Language: domain.LanguageES},
+		{ID: "doc-b", Title: "Bravo", Content: "bravo", Language: domain.LanguageES},
+		{ID: "doc-c", Title: "Charlie", Content: "charlie", Language: domain.LanguageEN},
 	}
 	for _, d := range docs {
 		if err := s.CreateDocument(ctx, d); err != nil {
@@ -97,7 +97,7 @@ func TestCreateChunks_AppendsToCache(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-x", Title: "X", Content: "x",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestPurgeOrphanDocuments_InvalidatesCache(t *testing.T) {
 	for _, sp := range specs {
 		if err := s.CreateDocument(ctx, &domain.Document{
 			ID: sp.id, Title: sp.id, Content: "c",
-			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+			Language: domain.LanguageES,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -239,7 +239,7 @@ func TestPurgeStaleDocuments_InvalidatesCache(t *testing.T) {
 	for _, sp := range specs {
 		if err := s.CreateDocument(ctx, &domain.Document{
 			ID: sp.id, Title: sp.id, Content: "c",
-			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+			Language: domain.LanguageES,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -321,7 +321,7 @@ func TestConcurrent_SearchAndCreateChunks(t *testing.T) {
 	// Seed enough rows that the search loop has real work to do.
 	doc := &domain.Document{
 		ID: "doc-seed", Title: "seed", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -346,7 +346,7 @@ func TestConcurrent_SearchAndCreateChunks(t *testing.T) {
 		writerDocs[i] = id
 		if err := s.CreateDocument(ctx, &domain.Document{
 			ID: id, Title: id, Content: "c",
-			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+			Language: domain.LanguageES,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -417,7 +417,7 @@ func TestCreateChunks_DimensionMismatchDoesNotPoisonCache(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-1", Title: "T", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -478,7 +478,7 @@ func TestCreateChunks_DimChangeReprocess(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-old", Title: "Old", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -502,7 +502,7 @@ func TestCreateChunks_DimChangeReprocess(t *testing.T) {
 	}
 	doc2 := &domain.Document{
 		ID: "doc-new", Title: "New", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc2); err != nil {
 		t.Fatal(err)

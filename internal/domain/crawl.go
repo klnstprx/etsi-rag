@@ -21,6 +21,39 @@ type CrawlSource struct {
 	Enabled     bool     `koanf:"enabled"`
 }
 
+// SourceKeysWithAnyTag returns the keys of every source whose Tags slice
+// contains at least one of `tags` (OR semantics). Empty-string tags are
+// ignored. Returns nil when no tags are supplied or no source matches.
+//
+// Shared by the admin Documents filter (single-tag intersection downstream)
+// and the agent's semantic_search scope resolver (multi-tag union upstream)
+// — both walk the same primitive: source.Tags membership.
+func SourceKeysWithAnyTag(sources []CrawlSource, tags ...string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	want := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		if t == "" {
+			continue
+		}
+		want[t] = struct{}{}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	var out []string
+	for _, s := range sources {
+		for _, st := range s.Tags {
+			if _, ok := want[st]; ok {
+				out = append(out, s.Key)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // CrawlPageStatus represents the status of a crawled page.
 type CrawlPageStatus string
 

@@ -24,26 +24,26 @@ key = 'becas'                    # stable slug; used as FK in crawl_pages/crawl_
 name = 'Becas y ayudas UMA'
 seed_url = 'https://www.uma.es/becas/'
 description = 'Convocatorias MEFPYD, becas UMA, becas de movilidad y ayudas Santander.'
-tags = ['financial-aid', 'mobility', 'enrollment']
+tags = ['becas', 'movilidad', 'matricula']
 enabled = true
 ```
 
-Source records carry only what's needed for crawl scoping plus agent-facing scoping hints. Per-document `category` (course/procedure/staff/general) is computed at ingest by `crawler.Categorize()` from URL patterns; per-page `language` is detected from `<html lang>` and falls back to Spanish (the project is UMA-only Spanish).
+Source records carry only what's needed for crawl scoping plus agent-facing scoping hints. Per-page `language` is detected from `<html lang>` and falls back to Spanish (the project is UMA-only Spanish). Documents themselves carry no taxonomy — classification is inherited from the source: the admin Documents view joins through `crawl_pages` to surface the source name and tag pills, and the Source/Tag dropdowns let operators filter the list.
 
-`description` and `tags` are surfaced through the `list_sources` agent tool so the agent can decide whether to scope a search by passing `source_keys` to `semantic_search`. They are **not** persisted on documents and **not** used as SQL filters.
+`description` and `tags` are surfaced through the `list_sources` agent tool so the agent can decide whether to scope a search by passing `source_keys` to `semantic_search`. Tags are **not** persisted on documents (they are read off the source registry on demand).
 
 ### Tag vocabulary
 
-A controlled-but-extensible set; operators may invent new tags but should prefer existing ones for cross-source consistency:
+A controlled-but-extensible set; operators may invent new tags but should prefer existing ones for cross-source consistency. Tags are in Spanish (slug-style, no accents) so the agent doesn't get language-mixing cues that would push retrieval off the Spanish-only corpus:
 
-- **Degree-specific**: `degree-cs`, `degree-software`, `degree-computers`, `degree-health`, `degree-cybersecurity-ai`, `degree-math-cs-double`
-- **Level**: `master`, `phd`
-- **Academic procedures**: `enrollment`, `procedures`, `academic-calendar`, `exams`
-- **Mobility & funding**: `mobility`, `international`, `financial-aid`
-- **Career**: `internships`, `employment`
-- **Wellbeing & support**: `accessibility`, `wellbeing`, `student-life`, `housing`, `sports`
-- **Services**: `library`, `it-services`, `quality-assurance`
-- **Institution**: `school`
+- **Degree-specific**: `grado-informatica`, `grado-software`, `grado-computadores`, `grado-salud`, `grado-ciberseguridad-ia`, `doble-grado-informatica-matematicas`
+- **Level**: `master`, `doctorado`
+- **Academic procedures**: `matricula`, `tramites`, `calendario-academico`, `examenes`
+- **Mobility & funding**: `movilidad`, `internacional`, `becas`
+- **Career**: `practicas`, `empleo`
+- **Wellbeing & support**: `accesibilidad`, `bienestar`, `vida-estudiantil`, `alojamiento`, `deportes`
+- **Services**: `biblioteca`, `servicios-ti`, `calidad`
+- **Institution**: `escuela`
 
 `LoadSources` validates that `key` is non-empty and unique and that `seed_url` parses as an absolute URL. The admin UI at `/admin/crawler` performs CRUD against this file via `WriteSources` (atomic temp+rename) and calls `Crawler.SetSources` so the running crawler picks up edits without a server restart.
 

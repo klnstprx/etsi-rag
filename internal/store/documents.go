@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"etsi-rag/internal/domain"
 )
@@ -11,11 +12,11 @@ import (
 // CreateDocument inserts a new document.
 func (s *SQLiteStore) CreateDocument(ctx context.Context, doc *domain.Document) error {
 	query := `
-		INSERT INTO documents (id, title, content, url, language, category)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO documents (id, title, content, url, language)
+		VALUES (?, ?, ?, ?, ?)
 	`
 	_, err := s.db.ExecContext(ctx, query,
-		doc.ID, doc.Title, doc.Content, doc.URL, doc.Language, doc.Category,
+		doc.ID, doc.Title, doc.Content, doc.URL, doc.Language,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting document: %w", err)
@@ -86,14 +87,14 @@ func (s *SQLiteStore) GetDocumentByURL(ctx context.Context, url string) (*domain
 		return nil, fmt.Errorf("document with empty url: %w", ErrNotFound)
 	}
 	query := `
-		SELECT id, title, content, url, language, category
+		SELECT id, title, content, url, language
 		FROM documents
 		WHERE url = ?
 		LIMIT 1
 	`
 	var doc domain.Document
 	err := s.db.QueryRowContext(ctx, query, url).Scan(
-		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language, &doc.Category,
+		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("document with url %q: %w", url, ErrNotFound)
@@ -107,13 +108,13 @@ func (s *SQLiteStore) GetDocumentByURL(ctx context.Context, url string) (*domain
 // GetDocument retrieves a document by ID.
 func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Document, error) {
 	query := `
-		SELECT id, title, content, url, language, category
+		SELECT id, title, content, url, language
 		FROM documents
 		WHERE id = ?
 	`
 	var doc domain.Document
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
-		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language, &doc.Category,
+		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("document %s: %w", id, ErrNotFound)
@@ -131,7 +132,7 @@ func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) 
 
 	if lang != nil {
 		query := `
-			SELECT id, title, content, url, language, category
+			SELECT id, title, content, url, language
 			FROM documents
 			WHERE language = ?
 			ORDER BY created_at DESC
@@ -139,7 +140,7 @@ func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) 
 		rows, err = s.db.QueryContext(ctx, query, *lang)
 	} else {
 		query := `
-			SELECT id, title, content, url, language, category
+			SELECT id, title, content, url, language
 			FROM documents
 			ORDER BY created_at DESC
 		`
@@ -155,7 +156,7 @@ func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) 
 	for rows.Next() {
 		var doc domain.Document
 		if err := rows.Scan(
-			&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language, &doc.Category,
+			&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language,
 		); err != nil {
 			return nil, fmt.Errorf("scanning document: %w", err)
 		}
@@ -170,14 +171,30 @@ func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) 
 }
 
 // DocumentSummary holds document metadata without full content.
+//
+// SourceKey is the source slug from crawl_pages.source_key. It is nil when
+// the document was ingested via /v1/ingest (no crawl page) or when the
+// crawl page row was deleted. When a document is reachable from multiple
+// crawl_pages, SourceKey reflects the oldest one (the source that
+// originally introduced the content).
 type DocumentSummary struct {
 	ID         string
 	Title      string
 	URL        *string
 	Language   domain.Language
-	Category   domain.Category
+	SourceKey  *string
 	ChunkCount int
 	ContentLen int
+}
+
+// DocumentListFilter constrains ListDocumentsSummary results.
+//
+// Search filters by title/URL substring (LIKE). SourceKeys, when non-empty,
+// restricts to documents linked to at least one crawl_page whose source_key is
+// in the set; an empty/nil slice means no source filter.
+type DocumentListFilter struct {
+	Search     string
+	SourceKeys []string
 }
 
 // CountDocuments returns the total number of documents.
@@ -200,33 +217,35 @@ func (s *SQLiteStore) CountChunks(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// ListDocumentsSummary returns paginated document summaries (no content).
-func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset int, search string) ([]DocumentSummary, int, error) {
-	// Count total (with optional search filter)
-	var total int
-	var countArgs []any
-	countQuery := `SELECT COUNT(*) FROM documents`
-	if search != "" {
-		countQuery += ` WHERE title LIKE ? OR url LIKE ?`
-		like := "%" + search + "%"
-		countArgs = append(countArgs, like, like)
+// ListDocumentsSummary returns paginated document summaries (no content),
+// optionally filtered by search text and/or source keys.
+func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset int, filter DocumentListFilter) ([]DocumentSummary, int, error) {
+	whereClauses, whereArgs := buildDocumentFilterWhere(filter)
+
+	countQuery := `SELECT COUNT(*) FROM documents d`
+	if whereClauses != "" {
+		countQuery += ` WHERE ` + whereClauses
 	}
-	if err := s.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting documents: %w", err)
 	}
 
-	// Fetch page
+	// Fetch page. SourceKey comes from the oldest crawl_page (ORDER BY cp.id
+	// LIMIT 1) — when a doc is reached from multiple sources we surface the
+	// one that originally introduced the content, rather than letting SQLite
+	// pick whichever row the planner walks first (which would flicker across
+	// requests).
 	query := `
-		SELECT d.id, d.title, d.url, d.language, d.category,
+		SELECT d.id, d.title, d.url, d.language,
 			LENGTH(d.content) as content_len,
-			(SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) as chunk_count
+			(SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) as chunk_count,
+			(SELECT cp.source_key FROM crawl_pages cp WHERE cp.doc_id = d.id ORDER BY cp.id LIMIT 1) as source_key
 		FROM documents d
 	`
-	var args []any
-	if search != "" {
-		query += ` WHERE d.title LIKE ? OR d.url LIKE ?`
-		like := "%" + search + "%"
-		args = append(args, like, like)
+	args := append([]any(nil), whereArgs...)
+	if whereClauses != "" {
+		query += ` WHERE ` + whereClauses
 	}
 	query += ` ORDER BY d.created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -240,8 +259,13 @@ func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset in
 	var docs []DocumentSummary
 	for rows.Next() {
 		var d DocumentSummary
-		if err := rows.Scan(&d.ID, &d.Title, &d.URL, &d.Language, &d.Category, &d.ContentLen, &d.ChunkCount); err != nil {
+		var sourceKey sql.NullString
+		if err := rows.Scan(&d.ID, &d.Title, &d.URL, &d.Language, &d.ContentLen, &d.ChunkCount, &sourceKey); err != nil {
 			return nil, 0, fmt.Errorf("scanning document summary: %w", err)
+		}
+		if sourceKey.Valid {
+			s := sourceKey.String
+			d.SourceKey = &s
 		}
 		docs = append(docs, d)
 	}
@@ -250,6 +274,35 @@ func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset in
 	}
 
 	return docs, total, nil
+}
+
+// buildDocumentFilterWhere assembles the WHERE clause and bind args for the
+// shared filter shape used by both the count and the page query in
+// ListDocumentsSummary. Returns ("", nil) when no filter is active.
+func buildDocumentFilterWhere(filter DocumentListFilter) (string, []any) {
+	var clauses []string
+	var args []any
+
+	if filter.Search != "" {
+		clauses = append(clauses, "(d.title LIKE ? OR d.url LIKE ?)")
+		like := "%" + filter.Search + "%"
+		args = append(args, like, like)
+	}
+
+	if len(filter.SourceKeys) > 0 {
+		placeholders := make([]string, len(filter.SourceKeys))
+		for i, k := range filter.SourceKeys {
+			placeholders[i] = "?"
+			args = append(args, k)
+		}
+		clauses = append(clauses,
+			"EXISTS (SELECT 1 FROM crawl_pages cp WHERE cp.doc_id = d.id AND cp.source_key IN ("+strings.Join(placeholders, ",")+"))")
+	}
+
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return strings.Join(clauses, " AND "), args
 }
 
 // DeleteDocument deletes a document and its chunks + embeddings (via CASCADE),

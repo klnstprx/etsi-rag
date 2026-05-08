@@ -38,7 +38,6 @@ func TestDocumentCRUD(t *testing.T) {
 		Content:  "This is test content",
 		URL:      &url,
 		Language: domain.LanguageES,
-		Category: domain.CategoryDegree,
 	}
 
 	t.Run("create", func(t *testing.T) {
@@ -135,7 +134,6 @@ func TestGetDocumentByURL(t *testing.T) {
 		Content:  "Contenido completo del documento",
 		URL:      &url,
 		Language: domain.LanguageES,
-		Category: domain.CategoryCourse,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -179,7 +177,6 @@ func TestGetDocumentByURL(t *testing.T) {
 			Content:  "x",
 			URL:      nil,
 			Language: domain.LanguageES,
-			Category: domain.CategoryGeneral,
 		}
 		if err := s.CreateDocument(ctx, nullDoc); err != nil {
 			t.Fatalf("creating URL-less document: %v", err)
@@ -202,7 +199,6 @@ func TestChunksWithEmbeddings(t *testing.T) {
 		Title:    "Test Document",
 		Content:  "Full content here",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -249,14 +245,12 @@ func TestVectorSearch(t *testing.T) {
 		Title:    "Spanish Doc",
 		Content:  "Content in Spanish",
 		Language: domain.LanguageES,
-		Category: domain.CategoryDegree,
 	}
 	docEN := &domain.Document{
 		ID:       "doc-en",
 		Title:    "English Doc",
 		Content:  "Content in English",
 		Language: domain.LanguageEN,
-		Category: domain.CategoryDegree,
 	}
 
 	if err := store.CreateDocument(ctx, docES); err != nil {
@@ -305,7 +299,7 @@ func TestSearchSimilar_TopKLimit(t *testing.T) {
 	// Create one document with 5 chunks, each pointing in a slightly different direction.
 	doc := &domain.Document{
 		ID: "doc-1", Title: "Multi-chunk", Content: "content",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -377,7 +371,7 @@ func TestSearchSimilar_ScoreOrdering(t *testing.T) {
 	for _, d := range docs {
 		if err := s.CreateDocument(ctx, &domain.Document{
 			ID: d.id, Title: d.title, Content: "c",
-			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+			Language: domain.LanguageES,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +417,7 @@ func TestSearchSimilar_ChunkMetadata(t *testing.T) {
 	url := "https://example.com/test"
 	doc := &domain.Document{
 		ID: "doc-1", Title: "Test Doc", Content: "full content",
-		URL: &url, Language: domain.LanguageEN, Category: domain.CategoryCourse,
+		URL: &url, Language: domain.LanguageEN,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -479,9 +473,6 @@ func TestSearchSimilar_ChunkMetadata(t *testing.T) {
 	if r.Document.Language != domain.LanguageEN {
 		t.Errorf("doc language = %q, want %q", r.Document.Language, domain.LanguageEN)
 	}
-	if r.Document.Category != domain.CategoryCourse {
-		t.Errorf("doc category = %q, want %q", r.Document.Category, domain.CategoryCourse)
-	}
 	if r.Document.Content != "" {
 		t.Errorf("doc content should be empty (not fetched), got %d bytes", len(r.Document.Content))
 	}
@@ -493,7 +484,7 @@ func TestSearchSimilar_MultipleChunksSameDocument(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-1", Title: "Big Doc", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -554,7 +545,6 @@ func TestEmbeddingDimensionValidation(t *testing.T) {
 		Title:    "Test",
 		Content:  "Test content",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -588,7 +578,6 @@ func TestDeleteDocumentCascadesChunks(t *testing.T) {
 		Title:    "Test",
 		Content:  "Test content",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -624,7 +613,6 @@ func TestDocumentExists(t *testing.T) {
 		Title:    "Test",
 		Content:  "x",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -662,14 +650,13 @@ func TestGetDocumentURL(t *testing.T) {
 		Content:  "x",
 		URL:      &url,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating doc: %v", err)
 	}
 	docNoURL := &domain.Document{
 		ID: "doc-no-url", Title: "T", Content: "x",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := store.CreateDocument(ctx, docNoURL); err != nil {
 		t.Fatalf("creating doc-no-url: %v", err)
@@ -708,7 +695,7 @@ func TestUpdateDocumentURL(t *testing.T) {
 	original := "https://www.uma.es/grado-en-ingenieria-informatica/cms/menu/informacion-grado/"
 	doc := &domain.Document{
 		ID: "doc-1", Title: "T", Content: "x", URL: &original,
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating doc: %v", err)
@@ -743,9 +730,9 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 
 	// Three docs: referenced, orphan, shared-by-two.
 	docs := []*domain.Document{
-		{ID: "doc-ref", Title: "referenced", Content: "x", Language: domain.LanguageES, Category: domain.CategoryGeneral},
-		{ID: "doc-orphan", Title: "orphan", Content: "x", Language: domain.LanguageES, Category: domain.CategoryGeneral},
-		{ID: "doc-shared", Title: "shared", Content: "x", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+		{ID: "doc-ref", Title: "referenced", Content: "x", Language: domain.LanguageES},
+		{ID: "doc-orphan", Title: "orphan", Content: "x", Language: domain.LanguageES},
+		{ID: "doc-shared", Title: "shared", Content: "x", Language: domain.LanguageES},
 	}
 	for _, d := range docs {
 		if err := store.CreateDocument(ctx, d); err != nil {
@@ -812,9 +799,9 @@ func setupSourceKeyFilterFixture(t *testing.T) *SQLiteStore {
 	ctx := context.Background()
 
 	docs := []*domain.Document{
-		{ID: "doc-alpha", Title: "Alpha", Content: "alpha unique-alpha-token", Language: domain.LanguageES, Category: domain.CategoryGeneral},
-		{ID: "doc-beta", Title: "Beta", Content: "beta unique-beta-token", Language: domain.LanguageES, Category: domain.CategoryGeneral},
-		{ID: "doc-shared", Title: "Shared", Content: "shared unique-shared-token", Language: domain.LanguageES, Category: domain.CategoryGeneral},
+		{ID: "doc-alpha", Title: "Alpha", Content: "alpha unique-alpha-token", Language: domain.LanguageES},
+		{ID: "doc-beta", Title: "Beta", Content: "beta unique-beta-token", Language: domain.LanguageES},
+		{ID: "doc-shared", Title: "Shared", Content: "shared unique-shared-token", Language: domain.LanguageES},
 	}
 	for _, d := range docs {
 		if err := s.CreateDocument(ctx, d); err != nil {

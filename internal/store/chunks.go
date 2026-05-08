@@ -243,7 +243,7 @@ func (s *SQLiteStore) fetchSearchResults(ctx context.Context, scored []cacheScor
 	fetchQuery := `
 		SELECT
 			c.id, c.doc_id, c.content, c.chunk_index, c.section_title,
-			d.id, d.title, d.url, d.language, d.category
+			d.id, d.title, d.url, d.language
 		FROM chunks c
 		JOIN documents d ON d.id = c.doc_id
 		WHERE c.id IN (` + strings.Join(placeholders, ",") + `)
@@ -259,7 +259,7 @@ func (s *SQLiteStore) fetchSearchResults(ctx context.Context, scored []cacheScor
 		var r SearchResult
 		if err := rows.Scan(
 			&r.Chunk.ID, &r.Chunk.DocID, &r.Chunk.Content, &r.Chunk.ChunkIndex, &r.Chunk.SectionTitle,
-			&r.Document.ID, &r.Document.Title, &r.Document.URL, &r.Document.Language, &r.Document.Category,
+			&r.Document.ID, &r.Document.Title, &r.Document.URL, &r.Document.Language,
 		); err != nil {
 			return nil, fmt.Errorf("scanning result: %w", err)
 		}

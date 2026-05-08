@@ -17,7 +17,6 @@ func TestArtifactCRUD(t *testing.T) {
 		Title:    "Test Document",
 		Content:  "x",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -118,7 +117,6 @@ func TestArtifactCascadesOnDocDelete(t *testing.T) {
 		Title:    "x",
 		Content:  "x",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)
@@ -153,7 +151,6 @@ func TestPublicTokensAreUnique(t *testing.T) {
 		Title:    "x",
 		Content:  "x",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document: %v", err)

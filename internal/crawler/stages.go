@@ -352,7 +352,6 @@ func (c *Crawler) embedStage(
 		}
 
 		docID := StableDocID(item.ContentHash)
-		category := Categorize(item.URL, "")
 		// Prefer the per-page <html lang> when the parser extracted a supported
 		// language; fall back to Spanish (project is UMA-only Spanish content).
 		language := domain.LanguageES
@@ -424,7 +423,6 @@ func (c *Crawler) embedStage(
 			Content:  item.Text,
 			URL:      &urlStr,
 			Language: language,
-			Category: category,
 		}
 
 		if _, _, err := c.pipeline.Ingest(ctx, []domain.Document{doc}); err != nil {
@@ -524,4 +522,11 @@ func (c *Crawler) storeArtifacts(ctx context.Context, pageURL, docID string, art
 			c.logger.Warn().Err(err).Str("url", pageURL).Str("ref", art.Ref).Msg("artifact upsert failed")
 		}
 	}
+}
+
+// StableDocID generates a content-addressed document ID from the SHA-256
+// content hash hex string. Two URLs with identical extracted text map to the
+// same ID, so duplicate content is stored once and shared across crawl_pages.
+func StableDocID(contentHash string) string {
+	return "crawl-" + contentHash[:min(len(contentHash), 24)]
 }

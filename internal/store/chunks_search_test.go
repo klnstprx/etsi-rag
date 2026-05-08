@@ -19,7 +19,6 @@ func seedChunks(t *testing.T, store *SQLiteStore, docID string, contents []strin
 		Title:    "Test " + docID,
 		Content:  "joined content",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := store.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("creating document %s: %v", docID, err)
@@ -190,7 +189,7 @@ func TestSearchInDocument_RanksByCosine(t *testing.T) {
 	// Two docs, three chunks each, distinct embeddings.
 	doc1 := &domain.Document{
 		ID: "doc-1", Title: "Doc 1", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc1); err != nil {
 		t.Fatal(err)
@@ -213,7 +212,7 @@ func TestSearchInDocument_RanksByCosine(t *testing.T) {
 	// top-K. SearchInDocument must ignore them.
 	doc2 := &domain.Document{
 		ID: "doc-2", Title: "Doc 2", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc2); err != nil {
 		t.Fatal(err)
@@ -259,7 +258,7 @@ func TestSearchInDocument_TopKLimit(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-1", Title: "Doc", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -328,7 +327,7 @@ func TestSearchInDocument_EmbeddingDimMismatch(t *testing.T) {
 
 	doc := &domain.Document{
 		ID: "doc-1", Title: "Doc", Content: "c",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)

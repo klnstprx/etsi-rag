@@ -53,7 +53,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `chunking` | StructureAwareChunker (heading-boundary splitting), RecursiveTokenChunker (fallback), RecursiveCharacterChunker (char-based fallback) |
 | `tokencount` | Token counting: LlamaCppCounter (HTTP /tokenize), TiktokenCounter (tiktoken-go), EstimateCounter (len/4 fallback) |
 | `session` | Conversation state with TTL expiration |
-| `domain` | Core types: Document, Chunk, SourceReference, Language, Category |
+| `domain` | Core types: Document, Chunk, SourceReference, Language, CrawlSource, Artifact |
 | `backend` | LLM backend discovery (llama.cpp props, model listing) |
 | `prompts` | `text/template` system prompt rendering with data injection (doc/chunk counts) |
 | `markers` | Inline `[[image:ref]]` marker syntax used by the parser, embedder, and retrieval to link chunks to image artifacts |
@@ -106,8 +106,8 @@ The agent is the single entry point for all conversations. It owns the system pr
 
 | Tool | Purpose |
 |------|---------|
-| `semantic_search` | Top-K dense / hybrid retrieval. Optional `source_keys` array scopes retrieval to documents reachable via the listed crawl-source keys (joined through `crawl_pages.source_key`). Resolves `[[image:ref]]` markers to image artifacts when the backend supports vision. |
-| `list_sources` | Returns the operator-curated source catalogue (`{key, name, description, tags}` for every enabled source) so the agent can pick `source_keys` to scope a follow-up `semantic_search` for narrow topical queries. Reads `config/sources.toml` fresh on every call so admin edits propagate without a server restart. |
+| `semantic_search` | Top-K dense / hybrid retrieval. Optional `source_keys` (explicit) and `tags` (resolved against the registry; OR within the list) scope retrieval to a subset of the corpus; when both are supplied they UNION (additive scoping). Empty union under a non-empty filter returns an actionable error rather than falling back to a full-corpus search. Resolves `[[image:ref]]` markers to image artifacts when the backend supports vision. |
+| `list_sources` | Returns the operator-curated source catalogue (`{key, name, description, tags}` for every enabled source) so the agent can pick `source_keys` and/or `tags` to scope a follow-up `semantic_search` for narrow topical queries. Reads the in-memory registry, which the admin handler swaps atomically on edits — no file I/O on the hot path. |
 | `read_document` | Fetch a full document by URL (for follow-up after a too-narrow snippet). Optional `query` runs a doc-scoped dense search and returns the top-K chunks within that document. Reuses `documents.content` and the per-doc chunk vectors — RustFS is not on the read path. |
 
 ```

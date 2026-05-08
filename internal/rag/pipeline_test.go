@@ -86,7 +86,6 @@ func TestIngest(t *testing.T) {
 			Title:    "Test Doc",
 			Content:  "This is test content for ingestion.",
 			Language: domain.LanguageES,
-			Category: domain.CategoryGeneral,
 		},
 	}
 
@@ -132,7 +131,6 @@ func TestIngest_StripsImageMarkersFromEmbedText(t *testing.T) {
 		Title:    "imgdoc",
 		Content:  "[[image:p1]] some text body before the embed call",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}}
 
 	if _, _, err := p.Ingest(ctx, docs); err != nil {
@@ -177,7 +175,6 @@ func TestIngest_ChunkingFailureIsIdentifiable(t *testing.T) {
 		ID:       "doc-x",
 		Content:  "anything",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}})
 	if err == nil {
 		t.Fatal("expected chunking error, got nil")
@@ -197,7 +194,6 @@ func TestRetrieve(t *testing.T) {
 		Title:    "Test Doc",
 		Content:  "Relevant content",
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatal(err)
@@ -234,7 +230,7 @@ func TestRetrieveInDocument(t *testing.T) {
 	for _, id := range []string{"doc-a", "doc-b"} {
 		if err := s.CreateDocument(ctx, &domain.Document{
 			ID: id, Title: "Doc " + id, Content: "c",
-			Language: domain.LanguageES, Category: domain.CategoryGeneral,
+			Language: domain.LanguageES,
 		}); err != nil {
 			t.Fatal(err)
 		}

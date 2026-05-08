@@ -28,7 +28,6 @@ func Migrate(db *sql.DB) error {
 			content TEXT NOT NULL,
 			url TEXT,
 			language TEXT NOT NULL CHECK (language IN ('es', 'en')),
-			category TEXT NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 
@@ -71,6 +70,7 @@ func Migrate(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_crawl_pages_source ON crawl_pages(source_key);
 		CREATE INDEX IF NOT EXISTS idx_crawl_pages_status ON crawl_pages(status);
+		CREATE INDEX IF NOT EXISTS idx_crawl_pages_doc_id ON crawl_pages(doc_id);
 
 		CREATE TABLE IF NOT EXISTS crawl_runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

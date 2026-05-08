@@ -3,17 +3,32 @@ package templates
 import (
 	"fmt"
 	"net/url"
-	"etsi-rag/internal/store"
+
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/store"
 )
 
 // DocumentsData bundles data for the documents list page.
+//
+// SourceOptions is the full source list (key + display name) used to populate
+// the Source filter dropdown. SourceLabels maps source keys → display names so
+// each row can render the source as text without having to scan the slice.
+// SourceTags maps each source key → its tags, used to render per-row tag
+// pills (the source's tags are the document's tags by inheritance).
+// AllTags is the deduplicated, sorted set of tags across all sources, used to
+// populate the Tag filter dropdown.
 type DocumentsData struct {
-	Documents []store.DocumentSummary
-	Total     int
-	Page      int
-	PageSize  int
-	Search    string
+	Documents     []store.DocumentSummary
+	Total         int
+	Page          int
+	PageSize      int
+	Search        string
+	Source        string
+	Tag           string
+	SourceOptions []domain.CrawlSource
+	SourceLabels  map[string]string
+	SourceTags    map[string][]string
+	AllTags       []string
 }
 
 // TotalPages returns the number of pages.
@@ -24,10 +39,35 @@ func (d DocumentsData) TotalPages() int {
 	return (d.Total + d.PageSize - 1) / d.PageSize
 }
 
+// sourceLabel returns the display name for a source key, falling back to the
+// key itself when the source is no longer in the registry (e.g. removed from
+// sources.toml after the document was ingested).
+func (d DocumentsData) sourceLabel(key string) string {
+	if d.SourceLabels == nil {
+		return key
+	}
+	if name, ok := d.SourceLabels[key]; ok && name != "" {
+		return name
+	}
+	return key
+}
+
+// rowTags returns the tags for the source the document belongs to, or nil
+// when the document has no source or the source is unknown.
+func (d DocumentsData) rowTags(sourceKey *string) []string {
+	if sourceKey == nil || d.SourceTags == nil {
+		return nil
+	}
+	return d.SourceTags[*sourceKey]
+}
+
 // DocumentDetailData bundles data for a single document view.
 type DocumentDetailData struct {
-	Document domain.Document
-	Chunks   []domain.Chunk
+	Document   domain.Document
+	Chunks     []domain.Chunk
+	SourceKey  *string // nil when the document has no associated crawl_page
+	SourceName string  // display name resolved from the registry; empty when unknown
+	Tags       []string
 }
 
 templ DocumentsPage(data DocumentsData) {
@@ -38,11 +78,11 @@ templ DocumentsPage(data DocumentsData) {
 
 templ DocumentsContent(data DocumentsData) {
 	@PageHeader("Documents")
-	<!-- Search + Stats -->
-	<div class="flex items-center justify-between mb-6">
+	<!-- Filter Bar -->
+	<div class="flex items-center justify-between mb-6 gap-4 flex-wrap">
 		<p class="text-sm text-gray-500">{ fmt.Sprintf("%d documents total", data.Total) }</p>
 		<form
-			class="flex gap-2"
+			class="flex gap-2 flex-wrap"
 			hx-get="/admin/documents"
 			hx-target="#main"
 			hx-push-url="true"
@@ -54,8 +94,34 @@ templ DocumentsContent(data DocumentsData) {
 				placeholder="Search by title or URL..."
 				class="rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm px-3 py-2"
 			/>
-			@BtnPrimary("Search", templ.Attributes{"type": "submit"})
-			if data.Search != "" {
+			<select
+				name="source"
+				class="rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm px-3 py-2 bg-white"
+			>
+				<option value="">All sources</option>
+				for _, src := range data.SourceOptions {
+					if src.Key == data.Source {
+						<option value={ src.Key } selected>{ src.Name }</option>
+					} else {
+						<option value={ src.Key }>{ src.Name }</option>
+					}
+				}
+			</select>
+			<select
+				name="tag"
+				class="rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm px-3 py-2 bg-white"
+			>
+				<option value="">All tags</option>
+				for _, tag := range data.AllTags {
+					if tag == data.Tag {
+						<option value={ tag } selected>{ tag }</option>
+					} else {
+						<option value={ tag }>{ tag }</option>
+					}
+				}
+			</select>
+			@BtnPrimary("Apply", templ.Attributes{"type": "submit"})
+			if data.Search != "" || data.Source != "" || data.Tag != "" {
 				<a
 					href="/admin/documents"
 					hx-get="/admin/documents"
@@ -76,7 +142,8 @@ templ DocumentsContent(data DocumentsData) {
 					@Th("Title")
 					@Th("URL")
 					@Th("Lang")
-					@Th("Category")
+					@Th("Source")
+					@Th("Tags")
 					@Th("Chunks")
 					@Th("Size")
 					@Th("Actions")
@@ -106,7 +173,16 @@ templ DocumentsContent(data DocumentsData) {
 							}
 						</td>
 						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ string(doc.Language) }</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ string(doc.Category) }</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+							if doc.SourceKey != nil {
+								{ data.sourceLabel(*doc.SourceKey) }
+							} else {
+								<span class="text-gray-400">—</span>
+							}
+						</td>
+						<td class="px-6 py-4">
+							@TagPills(data.rowTags(doc.SourceKey))
+						</td>
 						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ fmt.Sprintf("%d", doc.ChunkCount) }</td>
 						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{ formatSize(doc.ContentLen) }</td>
 						<td class="px-6 py-4 whitespace-nowrap">
@@ -120,10 +196,10 @@ templ DocumentsContent(data DocumentsData) {
 					</tr>
 				}
 				if len(data.Documents) == 0 {
-					if data.Search != "" {
-						@EmptyRow(7, "No documents match your search.")
+					if data.Search != "" || data.Source != "" || data.Tag != "" {
+						@EmptyRow(8, "No documents match your filters.")
 					} else {
-						@EmptyRow(7, "No documents indexed yet.")
+						@EmptyRow(8, "No documents indexed yet.")
 					}
 				}
 			</tbody>
@@ -138,8 +214,8 @@ templ DocumentsContent(data DocumentsData) {
 			<div class="flex gap-2">
 				if data.Page > 1 {
 					<a
-						href={ templ.SafeURL(paginationURL(data.Page-1, data.Search)) }
-						hx-get={ paginationURL(data.Page-1, data.Search) }
+						href={ templ.SafeURL(documentsPaginationURL(data.Page-1, data.Search, data.Source, data.Tag)) }
+						hx-get={ documentsPaginationURL(data.Page-1, data.Search, data.Source, data.Tag) }
 						hx-target="#main"
 						hx-push-url="true"
 						class="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
@@ -149,8 +225,8 @@ templ DocumentsContent(data DocumentsData) {
 				}
 				if data.Page < data.TotalPages() {
 					<a
-						href={ templ.SafeURL(paginationURL(data.Page+1, data.Search)) }
-						hx-get={ paginationURL(data.Page+1, data.Search) }
+						href={ templ.SafeURL(documentsPaginationURL(data.Page+1, data.Search, data.Source, data.Tag)) }
+						hx-get={ documentsPaginationURL(data.Page+1, data.Search, data.Source, data.Tag) }
 						hx-target="#main"
 						hx-push-url="true"
 						class="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
@@ -184,10 +260,25 @@ templ DocumentDetailContent(data DocumentDetailData) {
 	</div>
 	<div class="mb-8">
 		<h2 class="text-2xl font-bold text-gray-900">{ data.Document.Title }</h2>
-		<div class="mt-2 flex flex-wrap gap-4 text-sm text-gray-500">
+		<div class="mt-2 flex flex-wrap gap-4 text-sm text-gray-500 items-center">
 			<span>ID: <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">{ data.Document.ID }</code></span>
 			<span>Language: { string(data.Document.Language) }</span>
-			<span>Category: { string(data.Document.Category) }</span>
+			if data.SourceKey != nil {
+				<span>
+					Source:&nbsp;
+					if data.SourceName != "" {
+						{ data.SourceName }
+					} else {
+						{ *data.SourceKey }
+					}
+				</span>
+			}
+			if len(data.Tags) > 0 {
+				<span class="flex items-center gap-2">
+					Tags:&nbsp;
+					@TagPills(data.Tags)
+				</span>
+			}
 			if data.Document.URL != nil {
 				<a href={ templ.SafeURL(*data.Document.URL) } target="_blank" class="text-blue-600 hover:underline">
 					Source URL
@@ -257,10 +348,19 @@ func formatSize(bytes int) string {
 	return fmt.Sprintf("%.1f MB", mb)
 }
 
-// paginationURL builds a pagination link preserving search.
-func paginationURL(page int, search string) string {
+// documentsPaginationURL builds a pagination link preserving the active
+// search, source, and tag filters so navigating pages does not reset state.
+func documentsPaginationURL(page int, search, source, tag string) string {
+	q := url.Values{}
+	q.Set("page", fmt.Sprintf("%d", page))
 	if search != "" {
-		return fmt.Sprintf("/admin/documents?page=%d&q=%s", page, url.QueryEscape(search))
+		q.Set("q", search)
 	}
-	return fmt.Sprintf("/admin/documents?page=%d", page)
+	if source != "" {
+		q.Set("source", source)
+	}
+	if tag != "" {
+		q.Set("tag", tag)
+	}
+	return "/admin/documents?" + q.Encode()
 }

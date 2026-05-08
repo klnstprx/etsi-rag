@@ -75,7 +75,7 @@ func setupDensePipeline(t *testing.T, topK int) (*Pipeline, *store.SQLiteStore) 
 
 	doc := &domain.Document{
 		ID: "doc-1", Title: "Test", Content: "joined",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("create doc: %v", err)

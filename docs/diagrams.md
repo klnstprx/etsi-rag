@@ -279,7 +279,6 @@ erDiagram
         text content
         text url
         text language "es | en"
-        text category
         datetime created_at
     }
 

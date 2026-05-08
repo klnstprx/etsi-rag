@@ -8,6 +8,7 @@ import (
 
 	"github.com/openai/openai-go"
 
+	"etsi-rag/internal/domain"
 	"etsi-rag/internal/markers"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
@@ -27,6 +28,13 @@ type SemanticSearchTool struct {
 	// MaxImages caps the number of image_url parts the agent attaches per
 	// tool call. <= 0 disables image attachment.
 	MaxImages int
+
+	// Snapshot returns the current source registry, used to resolve a `tags`
+	// argument to a set of source keys. Closure-based to keep the agent
+	// package decoupled from the registry concretes (same pattern as
+	// ListSourcesTool). When nil, the `tags` parameter cannot be resolved
+	// and a non-empty `tags` arg falls into the empty-filter error path.
+	Snapshot func() []domain.CrawlSource
 }
 
 // NewSemanticSearchTool constructs a semantic_search tool backed by the given
@@ -41,16 +49,22 @@ func (t *SemanticSearchTool) SetStore(s *store.SQLiteStore) { t.Store = s }
 // SetMaxImages caps how many image artifacts a single tool call attaches.
 func (t *SemanticSearchTool) SetMaxImages(n int) { t.MaxImages = n }
 
+// SetSnapshot wires in the source-registry accessor used to resolve `tags`
+// to source keys. Pass nil to disable tag-based scoping (callers can still
+// pass explicit source_keys).
+func (t *SemanticSearchTool) SetSnapshot(fn func() []domain.CrawlSource) { t.Snapshot = fn }
+
 type semanticSearchArgs struct {
 	Query      string   `json:"query"`
 	TopK       *int     `json:"top_k,omitempty"`
 	SourceKeys []string `json:"source_keys,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
 }
 
 func (*SemanticSearchTool) Name() string { return "semantic_search" }
 
 func (*SemanticSearchTool) Description() string {
-	return "Semantic search over indexed documents. Use this to find information about ETSI courses, degrees, procedures, or other university information. For narrow topical questions, optionally pass source_keys (from list_sources) to scope retrieval to a relevant subset of the corpus."
+	return "Semantic search over indexed documents. Use this to find information about ETSI courses, degrees, procedures, or other university information. For narrow topical questions, optionally scope retrieval by passing `source_keys` (specific sources) and/or `tags` (topic groups). Both come from list_sources; when both are provided their effects union (the search covers any source that matches either filter)."
 }
 
 func (*SemanticSearchTool) Parameters() openai.FunctionParameters {
@@ -68,7 +82,12 @@ func (*SemanticSearchTool) Parameters() openai.FunctionParameters {
 			"source_keys": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Optional. Restrict the search to documents reachable from any of these crawl-source keys (use list_sources to discover them). Omit to search the full corpus.",
+				"description": "Optional. Restrict the search to documents reachable from any of these crawl-source keys (use list_sources to discover them). Combined with `tags` via union.",
+			},
+			"tags": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Optional. Restrict the search to documents whose source carries any of these tags (use list_sources to discover available tags). Multiple tags are ORed. Combined with `source_keys` via union.",
 			},
 		},
 		"required": []string{"query"},
@@ -81,9 +100,17 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		return ToolResult{}, fmt.Errorf("parsing args: %w", err)
 	}
 
+	scoped, ok := t.resolveScope(args.SourceKeys, args.Tags)
+	if !ok {
+		// User asked for a scope filter but it resolved to no sources. Don't
+		// fall back to a full-corpus search — surface the mismatch so the
+		// agent can correct the tags or drop the filter.
+		return ToolResult{Text: emptyScopeMessage(args.SourceKeys, args.Tags)}, nil
+	}
+
 	results, err := t.Pipeline.Retrieve(ctx, args.Query, rag.RetrieveOpts{
 		TopK:       args.TopK,
-		SourceKeys: args.SourceKeys,
+		SourceKeys: scoped,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("RAG search: %w", err)
@@ -175,4 +202,59 @@ func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.Ret
 		}
 	}
 	return out
+}
+
+// resolveScope merges explicit source keys with the keys of every source
+// whose Tags slice matches at least one of the requested tags (OR within
+// `tags`, UNION between `tags` and `sourceKeys` — see the tool description
+// for the rationale; this differs from the admin Documents page, which
+// intersects).
+//
+// The boolean return flags whether the call should proceed. It is `false`
+// only when the caller asked for a scope filter (one or both lists
+// non-empty) but the union resolved to no sources — the caller should
+// short-circuit instead of silently widening to a full-corpus search.
+//
+// (nil, true) means "no filter": pass through to the unscoped pipeline.
+func (t *SemanticSearchTool) resolveScope(sourceKeys, tags []string) ([]string, bool) {
+	if len(sourceKeys) == 0 && len(tags) == 0 {
+		return nil, true
+	}
+
+	merged := make(map[string]struct{}, len(sourceKeys))
+	for _, k := range sourceKeys {
+		if k == "" {
+			continue
+		}
+		merged[k] = struct{}{}
+	}
+
+	if len(tags) > 0 && t.Snapshot != nil {
+		for _, k := range domain.SourceKeysWithAnyTag(t.Snapshot(), tags...) {
+			merged[k] = struct{}{}
+		}
+	}
+
+	if len(merged) == 0 {
+		return nil, false
+	}
+	out := make([]string, 0, len(merged))
+	for k := range merged {
+		out = append(out, k)
+	}
+	return out, true
+}
+
+// emptyScopeMessage produces the agent-facing error text when a scope
+// filter resolved to zero sources. The text names the offending args so
+// the model can correct itself on the next turn.
+func emptyScopeMessage(sourceKeys, tags []string) string {
+	switch {
+	case len(tags) > 0 && len(sourceKeys) > 0:
+		return fmt.Sprintf("No sources match tags=%v and source_keys=%v. Call list_sources to see available keys and tags, or omit these parameters to search the full corpus.", tags, sourceKeys)
+	case len(tags) > 0:
+		return fmt.Sprintf("No sources match tags=%v. Call list_sources to see available tags, or omit `tags` to search the full corpus.", tags)
+	default:
+		return fmt.Sprintf("No sources match source_keys=%v. Call list_sources to see available keys, or omit `source_keys` to search the full corpus.", sourceKeys)
+	}
 }

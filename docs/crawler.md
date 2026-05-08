@@ -165,7 +165,6 @@ Consequences:
 | `parser.go` | HTML -> markdown + links (readability + html walker) |
 | `pdf.go` | PDF -> markdown via pdftotext + pdfinfo + heading detection; per-page PNG renders via pdftoppm |
 | `filter.go` | Content quality filtering (`isLowQualityContent`) + subject URL dedup (`subjectCode`) |
-| `categorizer.go` | URL-based document categorization + content-hash-based `StableDocID` |
 
 ## System Dependencies
 

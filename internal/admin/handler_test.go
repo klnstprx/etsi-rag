@@ -773,7 +773,7 @@ func TestDocumentList(t *testing.T) {
 
 	s.CreateDocument(ctx, &domain.Document{
 		ID: "doc-1", Title: "Test", Content: "content",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/documents", nil)
@@ -806,7 +806,7 @@ func TestDocumentDelete(t *testing.T) {
 
 	s.CreateDocument(ctx, &domain.Document{
 		ID: "doc-del", Title: "Del", Content: "content",
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	})
 
 	req := httptest.NewRequest(http.MethodDelete, "/admin/documents/doc-del", nil)

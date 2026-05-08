@@ -75,7 +75,6 @@ func seedDoc(t *testing.T, s *store.SQLiteStore, id, url, title string, contents
 		Content:  full,
 		URL:      &u,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := s.CreateDocument(ctx, doc); err != nil {
 		t.Fatalf("create doc %s: %v", id, err)
@@ -213,7 +212,7 @@ func TestReadDocument_QueryNoHitsReturnsText(t *testing.T) {
 	url := "https://uma.es/empty"
 	doc := &domain.Document{
 		ID: "empty", Title: "Empty", Content: "", URL: &url,
-		Language: domain.LanguageES, Category: domain.CategoryGeneral,
+		Language: domain.LanguageES,
 	}
 	if err := s.CreateDocument(context.Background(), doc); err != nil {
 		t.Fatal(err)
@@ -240,7 +239,6 @@ func TestReadDocument_StripsImageMarkers(t *testing.T) {
 		Content:  "Antes [[image:p1]] del párrafo y después [[image:p2]].",
 		URL:      &url,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}
 	if err := s.CreateDocument(context.Background(), doc); err != nil {
 		t.Fatal(err)

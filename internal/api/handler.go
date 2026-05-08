@@ -308,18 +308,12 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 			ErrInvalidLanguage(d.Language).WriteJSON(w, r)
 			return
 		}
-		cat := domain.Category(d.Category)
-		if !cat.Valid() {
-			ErrBadRequest("invalid category: "+d.Category).WriteJSON(w, r)
-			return
-		}
 		docs[i] = domain.Document{
 			ID:       d.ID,
 			Title:    d.Title,
 			Content:  d.Content,
 			URL:      d.URL,
 			Language: lang,
-			Category: cat,
 		}
 	}
 

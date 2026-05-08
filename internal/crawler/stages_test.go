@@ -87,7 +87,6 @@ func TestEmbedStage_Force_DeletesAndReingestsExistingDocument(t *testing.T) {
 		Content:  "stale content",
 		URL:      &urlStr,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}); err != nil {
 		t.Fatalf("seed CreateDocument: %v", err)
 	}
@@ -164,7 +163,6 @@ func TestEmbedStage_DedupSwapsToCanonicalURL(t *testing.T) {
 		Content:  "x",
 		URL:      &subPageURL,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}); err != nil {
 		t.Fatalf("seed CreateDocument: %v", err)
 	}
@@ -213,7 +211,6 @@ func TestEmbedStage_DedupKeepsCanonicalURL(t *testing.T) {
 		Content:  "x",
 		URL:      &bareURL,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}); err != nil {
 		t.Fatalf("seed CreateDocument: %v", err)
 	}
@@ -259,7 +256,6 @@ func TestEmbedStage_NoForce_SkipsExistingDocument(t *testing.T) {
 		Content:  "kept content",
 		URL:      &urlStr,
 		Language: domain.LanguageES,
-		Category: domain.CategoryGeneral,
 	}); err != nil {
 		t.Fatalf("seed CreateDocument: %v", err)
 	}
