@@ -148,13 +148,8 @@ func (p *Pipeline) Preflight(ctx context.Context) error {
 // value selects the configured defaults and searches the full corpus.
 //
 // TopK overrides the configured top-k when non-nil.
-//
-// SourceKeys, when non-empty, restricts retrieval to chunks whose document is
-// referenced from at least one crawl_pages row matching the given source key
-// — the agent's list_sources / source_keys scoping path.
 type RetrieveOpts struct {
-	TopK       *int
-	SourceKeys []string
+	TopK *int
 }
 
 // Retrieve finds relevant chunks for a query.
@@ -179,7 +174,6 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, opts RetrieveOpts
 	if opts.TopK != nil {
 		k = *opts.TopK
 	}
-	sourceKeys := opts.SourceKeys
 
 	reranker, rerankerPool := p.getReranker()
 
@@ -197,7 +191,7 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, opts RetrieveOpts
 		if err != nil {
 			return nil, fmt.Errorf("embedding query: %w", err)
 		}
-		results, err := p.store.SearchSimilar(ctx, embedding, fetch, sourceKeys...)
+		results, err := p.store.SearchSimilar(ctx, embedding, fetch)
 		if err != nil {
 			return nil, fmt.Errorf("searching: %w", err)
 		}
@@ -217,11 +211,11 @@ func (p *Pipeline) Retrieve(ctx context.Context, query string, opts RetrieveOpts
 		if err != nil {
 			return nil, fmt.Errorf("embedding query: %w", err)
 		}
-		dense, err := p.store.SearchSimilar(ctx, embedding, kEach, sourceKeys...)
+		dense, err := p.store.SearchSimilar(ctx, embedding, kEach)
 		if err != nil {
 			return nil, fmt.Errorf("dense search: %w", err)
 		}
-		sparse, err := p.store.SearchKeyword(ctx, query, kEach, sourceKeys...)
+		sparse, err := p.store.SearchKeyword(ctx, query, kEach)
 		if err != nil {
 			return nil, fmt.Errorf("keyword search: %w", err)
 		}
