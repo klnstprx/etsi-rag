@@ -2,22 +2,19 @@ package chunking
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"etsi-rag/internal/config"
 )
 
-// TestImageMarkersPassthrough verifies that the chunker preserves [[image:p1]]
-// markers in chunk content. The markers carry image references for
-// vision-capable retrieval and must survive chunking unaltered.
-//
-// Critically, this test mirrors the parser's dense placement (one marker per
-// non-heading content line) so that EVERY chunk produced — not just the
-// first one in a section — contains a marker. The naive once-per-page
-// placement broke when the chunker sliced sections mid-page; the fix is
-// dense per-line marker prefixing in the parser.
-func TestImageMarkersPassthrough(t *testing.T) {
+// TestImageMarkers verifies the parser→chunker handoff: page markers in the
+// input drive each chunk's ImageRefs, and the markers themselves are stripped
+// from the user-facing chunk content. The parser emits one marker per page
+// top; the chunker stamps each emitted chunk with the union of refs whose
+// page range overlaps the chunk's source section.
+func TestImageMarkers(t *testing.T) {
 	cfg := config.ChunkingConfig{
 		MaxChunkSize: 200,
 		ChunkOverlap: 0,
@@ -25,13 +22,77 @@ func TestImageMarkersPassthrough(t *testing.T) {
 	}
 	chunker := NewStructureAwareChunker(cfg, &mockCounter{}, 512)
 
-	content := "## Heading One\n\n" +
-		"[[image:p1]] Some content for page 1, line 1.\n" +
-		"[[image:p1]] Some content for page 1, line 2.\n\n" +
+	content := "[[image:p1]]\n" +
+		"## Heading One\n\n" +
+		"Some content for page 1.\n\n" +
+		"[[image:p2]]\n" +
 		"## Heading Two\n\n" +
-		"[[image:p2]] Some content for page 2, line 1.\n" +
-		"[[image:p2]] Some content for page 2, line 2."
+		"Some content for page 2."
 
+	chunks, err := chunker.Chunk(context.Background(), content)
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+
+	for i, c := range chunks {
+		if strings.Contains(c.Content, "[[image:") {
+			t.Errorf("chunk[%d] still contains a marker: %q", i, c.Content)
+		}
+	}
+
+	if got := chunks[0].ImageRefs; !reflect.DeepEqual(got, []string{"p1"}) {
+		t.Errorf("chunk[0].ImageRefs = %v, want [p1]", got)
+	}
+	if got := chunks[1].ImageRefs; !reflect.DeepEqual(got, []string{"p2"}) {
+		t.Errorf("chunk[1].ImageRefs = %v, want [p2]", got)
+	}
+}
+
+// TestImageMarkersSpanningSection covers a section whose body straddles a
+// page boundary: every emitted chunk should carry both refs.
+func TestImageMarkersSpanningSection(t *testing.T) {
+	cfg := config.ChunkingConfig{
+		MaxChunkSize: 200,
+		ChunkOverlap: 0,
+		MinChunkSize: 5,
+	}
+	chunker := NewStructureAwareChunker(cfg, &mockCounter{}, 512)
+
+	content := "[[image:p1]]\n" +
+		"## Long Section\n\n" +
+		"First half on page 1.\n\n" +
+		"[[image:p2]]\n" +
+		"Second half on page 2."
+
+	chunks, err := chunker.Chunk(context.Background(), content)
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk (section fits), got %d", len(chunks))
+	}
+	if got := chunks[0].ImageRefs; !reflect.DeepEqual(got, []string{"p1", "p2"}) {
+		t.Errorf("chunk[0].ImageRefs = %v, want [p1 p2]", got)
+	}
+	if strings.Contains(chunks[0].Content, "[[image:") {
+		t.Errorf("chunk content should be marker-free: %q", chunks[0].Content)
+	}
+}
+
+// TestImageMarkersFallback covers the no-headings path: every emitted chunk
+// gets the union of all refs in the input.
+func TestImageMarkersFallback(t *testing.T) {
+	cfg := config.ChunkingConfig{
+		MaxChunkSize: 200,
+		ChunkOverlap: 0,
+		MinChunkSize: 5,
+	}
+	chunker := NewStructureAwareChunker(cfg, &mockCounter{}, 512)
+
+	content := "[[image:full]]\nSome plain content with no headings at all."
 	chunks, err := chunker.Chunk(context.Background(), content)
 	if err != nil {
 		t.Fatalf("Chunk: %v", err)
@@ -39,14 +100,43 @@ func TestImageMarkersPassthrough(t *testing.T) {
 	if len(chunks) == 0 {
 		t.Fatal("expected at least one chunk")
 	}
-
-	// Every chunk that has any non-heading content should contain at least
-	// one marker — this is the invariant we need for vision retrieval.
 	for i, c := range chunks {
-		hasContent := strings.Contains(c.Content, "content for page")
-		hasMarker := strings.Contains(c.Content, "[[image:")
-		if hasContent && !hasMarker {
-			t.Errorf("chunk[%d] has body content but no marker: %q", i, c.Content)
+		if !reflect.DeepEqual(c.ImageRefs, []string{"full"}) {
+			t.Errorf("chunk[%d].ImageRefs = %v, want [full]", i, c.ImageRefs)
+		}
+		if strings.Contains(c.Content, "[[image:") {
+			t.Errorf("chunk[%d] still contains a marker: %q", i, c.Content)
+		}
+	}
+}
+
+// TestImageMarkersOversizedSplit covers a section that exceeds maxTokens and
+// gets split into multiple chunks: each sub-chunk inherits the section refs.
+func TestImageMarkersOversizedSplit(t *testing.T) {
+	cfg := config.ChunkingConfig{
+		MaxChunkSize: 8,
+		ChunkOverlap: 0,
+		MinChunkSize: 4,
+		Separators:   []string{" ", ""},
+	}
+	chunker := NewStructureAwareChunker(cfg, &mockCounter{}, 512)
+
+	content := "[[image:p1]]\n" +
+		"## Big\n\n" +
+		strings.Repeat("word ", 30) +
+		"\n\n[[image:p2]]\n" +
+		strings.Repeat("blob ", 30)
+
+	chunks, err := chunker.Chunk(context.Background(), content)
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected oversized section to split, got %d chunks", len(chunks))
+	}
+	for i, c := range chunks {
+		if !reflect.DeepEqual(c.ImageRefs, []string{"p1", "p2"}) {
+			t.Errorf("chunk[%d].ImageRefs = %v, want [p1 p2]", i, c.ImageRefs)
 		}
 	}
 }
@@ -264,7 +354,7 @@ func TestHardSplitByTokensGuards(t *testing.T) {
 	// maxTokens <= 0: must return empty without error and without touching the
 	// tokenizer (mockCounter would return tokens regardless; we only care the
 	// loop doesn't execute).
-	chunks, err := chunker.hardSplitByTokens(ctx, "some text here", "Breadcrumb", 0, &idx)
+	chunks, err := chunker.hardSplitByTokens(ctx, "some text here", "Breadcrumb", nil, 0, &idx)
 	if err != nil {
 		t.Fatalf("maxTokens=0: %v", err)
 	}
@@ -273,7 +363,7 @@ func TestHardSplitByTokensGuards(t *testing.T) {
 	}
 
 	// empty text → Tokenize returns []; second guard kicks in.
-	chunks, err = chunker.hardSplitByTokens(ctx, "", "Breadcrumb", 10, &idx)
+	chunks, err = chunker.hardSplitByTokens(ctx, "", "Breadcrumb", nil, 10, &idx)
 	if err != nil {
 		t.Fatalf("empty text: %v", err)
 	}

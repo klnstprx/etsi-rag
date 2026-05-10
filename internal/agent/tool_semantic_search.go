@@ -8,7 +8,6 @@ import (
 
 	"github.com/openai/openai-go"
 
-	"etsi-rag/internal/markers"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
 )
@@ -114,20 +113,19 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		citations = append(citations, c)
 	}
 
-	// Resolve image markers from the retrieved chunks to artifact URLs. The
-	// LLM-visible text gets markers stripped (clean prose for the model);
-	// the URLs are attached to ToolResult.Images for the agent loop to inject
-	// as a synthetic user message when the backend supports vision.
+	// Chunk content is already marker-free (the chunker strips markers during
+	// emission); ImageRefs lives on the chunk record. Resolve refs to artifact
+	// URLs so the agent loop can inject them as a synthetic user message when
+	// the backend supports vision.
 	images := t.collectImages(ctx, results)
-	llmText := markers.Strip(ragContext)
 
-	return ToolResult{Text: llmText, Citations: citations, Images: images}, nil
+	return ToolResult{Text: ragContext, Citations: citations, Images: images}, nil
 }
 
-// collectImages walks retrieved chunks for [[image:ref]] markers, looks up
-// the matching artifact in the store, and builds path-only URLs that the
-// agent can absolutize at injection time. Duplicates (same doc_id+ref) are
-// deduped; total count is capped by MaxImages.
+// collectImages walks retrieved chunks' ImageRefs (stamped by the chunker at
+// ingest time), looks up each (doc_id, ref) pair in the store, and builds
+// path-only URLs that the agent can absolutize at injection time. Duplicates
+// (same doc_id+ref) are deduped; total count is capped by MaxImages.
 func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.RetrievalResult) []ImageRef {
 	if t.Store == nil || t.MaxImages <= 0 {
 		return nil
@@ -138,7 +136,7 @@ func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.Ret
 	var out []ImageRef
 
 	for _, sc := range results.Chunks {
-		for _, ref := range markers.Extract(sc.Chunk.Content) {
+		for _, ref := range sc.Chunk.ImageRefs {
 			k := key{doc: sc.Chunk.DocID, ref: ref}
 			if _, dup := picked[k]; dup {
 				continue
@@ -152,7 +150,7 @@ func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.Ret
 					// useful, the agent layer just sees fewer images.
 					continue
 				}
-				// Marker without artifact: pdftoppm probably failed for this
+				// Ref without artifact: pdftoppm probably failed for this
 				// page, or backfill hasn't run yet. Skip silently.
 				continue
 			}
@@ -169,4 +167,3 @@ func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.Ret
 	}
 	return out
 }
-

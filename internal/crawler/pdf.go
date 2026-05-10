@@ -85,20 +85,14 @@ func extractPDFTitle(ctx context.Context, pdfPath string) string {
 	return ""
 }
 
-// pdfTextToMarkdown converts raw pdftotext output to structured markdown
-// with `[[image:pN]]` markers densely prefixed onto each non-heading content
-// line of page N. Dense placement (rather than once-per-page) is necessary
-// because the structure-aware chunker may split sections mid-page; we want
-// every chunk that contains page-N content to carry at least one marker so
-// retrieval can attach the corresponding pdftoppm page image. The embedder
-// strips markers in-flight via markers.Strip, so they don't contaminate the
-// embedding space.
+// pdfTextToMarkdown converts raw pdftotext output to structured markdown with
+// a single `[[image:pN]]` line emitted at the top of each page block. The
+// chunker treats markers as page boundaries (see markers.ExtractBoundaries),
+// stamps each emitted chunk with the refs it covers, and strips markers from
+// final chunk content — so markers are an internal parser→chunker protocol,
+// never user-facing.
 //
-// Headings are emitted without a marker to keep chunk boundaries clean —
-// the structure-aware chunker keys off `## ` lines.
-//
-// Pipeline: strip page headers → detect headings per page → prefix markers
-// onto content lines → normalize.
+// Pipeline: strip page headers → emit page marker → detect headings → normalize.
 func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 	if raw == "" {
 		return ""
@@ -114,7 +108,8 @@ func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 		if i > 0 {
 			sb.WriteString("\n\n")
 		}
-		marker := markers.Format(fmt.Sprintf("p%d", i+1))
+		sb.WriteString(markers.Format(fmt.Sprintf("p%d", i+1)))
+		sb.WriteByte('\n')
 		for line := range strings.SplitSeq(page, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" {
@@ -127,8 +122,6 @@ func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 				sb.WriteByte('\n')
 				continue
 			}
-			sb.WriteString(marker)
-			sb.WriteByte(' ')
 			sb.WriteString(line)
 			sb.WriteByte('\n')
 		}

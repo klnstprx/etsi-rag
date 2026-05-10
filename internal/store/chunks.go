@@ -60,8 +60,8 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 	defer tx.Rollback()
 
 	chunkStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO chunks (doc_id, content, chunk_index, section_title)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO chunks (doc_id, content, chunk_index, section_title, image_refs)
+		VALUES (?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("preparing chunk statement: %w", err)
@@ -84,7 +84,7 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 				i, dim, len(embeddings[i]))
 		}
 
-		result, err := chunkStmt.ExecContext(ctx, docID, chunk.Content, chunk.ChunkIndex, chunk.SectionTitle)
+		result, err := chunkStmt.ExecContext(ctx, docID, chunk.Content, chunk.ChunkIndex, chunk.SectionTitle, encodeImageRefs(chunk.ImageRefs))
 		if err != nil {
 			return fmt.Errorf("inserting chunk %d: %w", i, err)
 		}
@@ -123,7 +123,7 @@ func (s *SQLiteStore) CreateChunks(ctx context.Context, docID string, chunks []d
 // GetChunksByDocument retrieves all chunks for a document.
 func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]domain.Chunk, error) {
 	query := `
-		SELECT id, doc_id, content, chunk_index, section_title
+		SELECT id, doc_id, content, chunk_index, section_title, image_refs
 		FROM chunks
 		WHERE doc_id = ?
 		ORDER BY chunk_index
@@ -136,10 +136,14 @@ func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]
 
 	var chunks []domain.Chunk
 	for rows.Next() {
-		var chunk domain.Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.DocID, &chunk.Content, &chunk.ChunkIndex, &chunk.SectionTitle); err != nil {
+		var (
+			chunk     domain.Chunk
+			imageRefs string
+		)
+		if err := rows.Scan(&chunk.ID, &chunk.DocID, &chunk.Content, &chunk.ChunkIndex, &chunk.SectionTitle, &imageRefs); err != nil {
 			return nil, fmt.Errorf("scanning chunk: %w", err)
 		}
+		chunk.ImageRefs = decodeImageRefs(imageRefs)
 		chunks = append(chunks, chunk)
 	}
 
@@ -148,6 +152,22 @@ func (s *SQLiteStore) GetChunksByDocument(ctx context.Context, docID string) ([]
 	}
 
 	return chunks, nil
+}
+
+// encodeImageRefs serializes a ref slice to the comma-separated form stored in
+// the chunks.image_refs column. Empty/nil → "". Refs are constrained to the
+// [a-zA-Z0-9-]+ alphabet (see internal/markers), so no escaping is needed.
+func encodeImageRefs(refs []string) string {
+	return strings.Join(refs, ",")
+}
+
+// decodeImageRefs parses the column value back into a slice. Empty string maps
+// to nil so callers can use len() == 0 uniformly.
+func decodeImageRefs(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 // SearchSimilar performs brute-force cosine similarity search. When the
@@ -242,7 +262,7 @@ func (s *SQLiteStore) fetchSearchResults(ctx context.Context, scored []cacheScor
 
 	fetchQuery := `
 		SELECT
-			c.id, c.doc_id, c.content, c.chunk_index, c.section_title,
+			c.id, c.doc_id, c.content, c.chunk_index, c.section_title, c.image_refs,
 			d.id, d.title, d.url, d.language
 		FROM chunks c
 		JOIN documents d ON d.id = c.doc_id
@@ -256,13 +276,17 @@ func (s *SQLiteStore) fetchSearchResults(ctx context.Context, scored []cacheScor
 
 	results := make([]SearchResult, 0, len(scored))
 	for rows.Next() {
-		var r SearchResult
+		var (
+			r         SearchResult
+			imageRefs string
+		)
 		if err := rows.Scan(
-			&r.Chunk.ID, &r.Chunk.DocID, &r.Chunk.Content, &r.Chunk.ChunkIndex, &r.Chunk.SectionTitle,
+			&r.Chunk.ID, &r.Chunk.DocID, &r.Chunk.Content, &r.Chunk.ChunkIndex, &r.Chunk.SectionTitle, &imageRefs,
 			&r.Document.ID, &r.Document.Title, &r.Document.URL, &r.Document.Language,
 		); err != nil {
 			return nil, fmt.Errorf("scanning result: %w", err)
 		}
+		r.Chunk.ImageRefs = decodeImageRefs(imageRefs)
 		r.Score = scoreMap[r.Chunk.ID]
 		results = append(results, r)
 	}

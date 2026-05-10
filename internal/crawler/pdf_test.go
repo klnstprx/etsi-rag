@@ -174,36 +174,36 @@ func TestPdfTextToMarkdown(t *testing.T) {
 		want string
 	}{
 		{
-			name: "single page prefixes p1 marker on every content line",
+			name: "single page emits one p1 marker at top",
 			raw: "DESCRIPCION DE LA ASIGNATURA\n\n" +
 				"This is a course about programming.\n\n" +
 				"OBJETIVOS Y RESULTADOS DE APRENDIZAJE\n\n" +
 				"Students will learn to code.",
-			want: "## Descripcion de la Asignatura\n\n" +
-				"[[image:p1]] This is a course about programming.\n\n" +
+			want: "[[image:p1]]\n## Descripcion de la Asignatura\n\n" +
+				"This is a course about programming.\n\n" +
 				"## Objetivos y Resultados de Aprendizaje\n\n" +
-				"[[image:p1]] Students will learn to code.",
+				"Students will learn to code.",
 		},
 		{
-			name: "multi-page uses page-specific marker per content line",
+			name: "multi-page emits one marker per page top",
 			raw: "GUÍA DOCENTE\nDESCRIPCION DE LA ASIGNATURA\n\nContent page 1\nPágina 1 de 2\f" +
 				"GUÍA DOCENTE\nOBJETIVOS\n\nContent page 2\nPágina 2 de 2",
-			want: "## Descripcion de la Asignatura\n\n[[image:p1]] Content page 1\n\n" +
-				"## Objetivos\n\n[[image:p2]] Content page 2",
+			want: "[[image:p1]]\n## Descripcion de la Asignatura\n\nContent page 1\n\n" +
+				"[[image:p2]]\n## Objetivos\n\nContent page 2",
 		},
 		{
-			name: "plain text without headings: every line prefixed",
+			name: "plain text without headings still gets one marker at top",
 			raw:  "Just some regular text.\n\nWith paragraph breaks.",
-			want: "[[image:p1]] Just some regular text.\n\n[[image:p1]] With paragraph breaks.",
+			want: "[[image:p1]]\nJust some regular text.\n\nWith paragraph breaks.",
 		},
 		{
-			name: "professor names not promoted to headings still prefixed",
+			name: "professor names not promoted to headings stay as content",
 			raw: "EQUIPO DOCENTE\n\nCOORDINADOR/A\n\n" +
 				"FRANCISCO JAVIER\nHORMIGO AGUILAR\n\n" +
 				"ARQUITECTURA DE COMPUTADORES",
-			want: "## Equipo Docente\n\n[[image:p1]] COORDINADOR/A\n\n" +
-				"[[image:p1]] FRANCISCO JAVIER\n[[image:p1]] HORMIGO AGUILAR\n\n" +
-				"[[image:p1]] ARQUITECTURA DE COMPUTADORES",
+			want: "[[image:p1]]\n## Equipo Docente\n\nCOORDINADOR/A\n\n" +
+				"FRANCISCO JAVIER\nHORMIGO AGUILAR\n\n" +
+				"ARQUITECTURA DE COMPUTADORES",
 		},
 		{
 			name: "empty input",

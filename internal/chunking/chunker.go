@@ -7,8 +7,23 @@ import (
 	"strings"
 
 	"etsi-rag/internal/config"
+	"etsi-rag/internal/markers"
 	"etsi-rag/internal/tokencount"
 )
+
+// stampImageRefs assigns the same ref slice to every chunk and returns the
+// (possibly modified) chunks. Used by chunkers that don't track section-level
+// page boundaries — they take the union of all refs in the input as a
+// best-effort attribution.
+func stampImageRefs(chunks []Chunk, refs []string) []Chunk {
+	if len(refs) == 0 || len(chunks) == 0 {
+		return chunks
+	}
+	for i := range chunks {
+		chunks[i].ImageRefs = cloneRefs(refs)
+	}
+	return chunks
+}
 
 // Chunk represents a text chunk with metadata.
 type Chunk struct {
@@ -26,6 +41,12 @@ type Chunk struct {
 
 	// SectionTitle is the heading breadcrumb for structure-aware chunks (e.g. "Plan de estudios > Primer curso").
 	SectionTitle string
+
+	// ImageRefs lists image-artifact references whose page range overlaps this
+	// chunk's source span (e.g. ["p1"], ["p1","p2"], ["full"]). Populated by
+	// the chunker from inline [[image:ref]] markers; the markers themselves
+	// are stripped from Content before emission.
+	ImageRefs []string
 }
 
 // Chunker splits document content into chunks for embedding.
@@ -64,8 +85,10 @@ func (c *RecursiveCharacterChunker) Chunk(_ context.Context, content string) ([]
 		return nil, nil
 	}
 
-	splits := c.splitText(content, 0)
-	return c.mergeWithOverlap(splits, content), nil
+	cleaned, boundaries := markers.ExtractBoundaries(content)
+	splits := c.splitText(cleaned, 0)
+	chunks := c.mergeWithOverlap(splits, cleaned)
+	return stampImageRefs(chunks, dedupRefs(boundaries)), nil
 }
 
 // splitText recursively splits text using separators at the given depth.
@@ -228,21 +251,31 @@ func (c *RecursiveTokenChunker) Chunk(ctx context.Context, content string) ([]Ch
 		return nil, fmt.Errorf("token counter not configured")
 	}
 
+	cleaned, boundaries := markers.ExtractBoundaries(content)
+	refs := dedupRefs(boundaries)
+
 	maxTokens := c.effectiveMaxTokens()
 
-	totalTokens, err := c.counter.Count(ctx, content)
+	totalTokens, err := c.counter.Count(ctx, cleaned)
 	if err != nil {
 		return nil, fmt.Errorf("counting tokens: %w", err)
 	}
 
 	// If it fits in one chunk, return immediately
 	if totalTokens <= maxTokens {
-		return []Chunk{{Content: content, Index: 0, StartChar: 0, EndChar: len(content)}}, nil
+		return stampImageRefs(
+			[]Chunk{{Content: cleaned, Index: 0, StartChar: 0, EndChar: len(cleaned)}},
+			refs,
+		), nil
 	}
 
 	// Split text by separators (character-level), then merge respecting token limits
-	segments := c.splitBySeparators(content, 0)
-	return c.mergeSegments(ctx, segments, content, maxTokens)
+	segments := c.splitBySeparators(cleaned, 0)
+	chunks, err := c.mergeSegments(ctx, segments, cleaned, maxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return stampImageRefs(chunks, refs), nil
 }
 
 // splitBySeparators recursively splits text using the separator hierarchy.

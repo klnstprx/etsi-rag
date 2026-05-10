@@ -102,10 +102,10 @@ func TestIngest(t *testing.T) {
 }
 
 // TestIngest_StripsImageMarkersFromEmbedText asserts that image markers in
-// chunk content are removed before being passed to the embedder, while the
-// chunk content stored in the DB still carries the markers (verified
-// separately by retrieval). The motivation is that embedding bracketed
-// pseudo-tokens like [[image:p1]] would pollute the embedding space.
+// the parser output are stripped from chunk content (so they never pollute
+// the embedding space and are never user-visible) and that the chunker
+// captures the corresponding refs onto the chunk's ImageRefs field for the
+// vision attachment path.
 func TestIngest_StripsImageMarkersFromEmbedText(t *testing.T) {
 	p, s := setupTestPipeline(t)
 	ctx := context.Background()
@@ -146,7 +146,9 @@ func TestIngest_StripsImageMarkersFromEmbedText(t *testing.T) {
 		}
 	}
 
-	// Stored chunk content should keep the marker so retrieval can extract it.
+	// Stored chunk content is marker-free; the page ref lives on ImageRefs
+	// (separate column) so the agent's vision path can attach the artifact
+	// without re-extracting markers from text.
 	stored, err := s.GetChunksByDocument(ctx, "doc-img")
 	if err != nil {
 		t.Fatalf("GetChunksByDocument: %v", err)
@@ -154,12 +156,13 @@ func TestIngest_StripsImageMarkersFromEmbedText(t *testing.T) {
 	if len(stored) == 0 {
 		t.Fatal("expected stored chunks")
 	}
-	all := ""
-	for _, c := range stored {
-		all += c.Content
+	for i, c := range stored {
+		if strings.Contains(c.Content, "[[image:") {
+			t.Errorf("stored chunk[%d] should be marker-free; got: %q", i, c.Content)
+		}
 	}
-	if !strings.Contains(all, "[[image:p1]]") {
-		t.Errorf("stored chunk content lost marker; got: %q", all)
+	if got := stored[0].ImageRefs; len(got) != 1 || got[0] != "p1" {
+		t.Errorf("stored[0].ImageRefs = %v, want [p1]", got)
 	}
 }
 

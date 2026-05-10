@@ -56,7 +56,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `domain` | Core types: Document, Chunk, SourceReference, Language, CrawlSource, Artifact |
 | `backend` | LLM backend discovery (llama.cpp props, model listing) |
 | `prompts` | `text/template` system prompt rendering with data injection (doc/chunk counts) |
-| `markers` | Inline `[[image:ref]]` marker syntax used by the parser, embedder, and retrieval to link chunks to image artifacts |
+| `markers` | `[[image:ref]]` syntax + `ExtractBoundaries` helper used by the parser→chunker handoff to map each chunk's source span to image artifact refs (stored separately on `chunks.image_refs`, not in chunk text) |
 | `server` | Application wiring (backend resolution, client construction, hot-rebuild on config save), HTTP server lifecycle |
 
 ## Data Flow
@@ -106,7 +106,7 @@ The agent is the single entry point for all conversations. It owns the system pr
 
 | Tool | Purpose |
 |------|---------|
-| `semantic_search` | Top-K dense / hybrid retrieval. Optional `source_keys` (explicit) and `tags` (resolved against the registry; OR within the list) scope retrieval to a subset of the corpus; when both are supplied they UNION (additive scoping). Empty union under a non-empty filter returns an actionable error rather than falling back to a full-corpus search. Resolves `[[image:ref]]` markers to image artifacts when the backend supports vision. |
+| `semantic_search` | Top-K dense / hybrid retrieval. Optional `source_keys` (explicit) and `tags` (resolved against the registry; OR within the list) scope retrieval to a subset of the corpus; when both are supplied they UNION (additive scoping). Empty union under a non-empty filter returns an actionable error rather than falling back to a full-corpus search. Reads each retrieved chunk's `ImageRefs` to attach the matching artifacts when the backend supports vision. |
 | `list_sources` | Returns the operator-curated source catalogue (`{key, name, description, tags}` for every enabled source) so the agent can pick `source_keys` and/or `tags` to scope a follow-up `semantic_search` for narrow topical queries. Reads the in-memory registry, which the admin handler swaps atomically on edits — no file I/O on the hot path. |
 | `read_document` | Fetch a full document by URL (for follow-up after a too-narrow snippet). Optional `query` runs a doc-scoped dense search and returns the top-K chunks within that document. Reuses `documents.content` and the per-doc chunk vectors — RustFS is not on the read path. |
 
@@ -124,7 +124,7 @@ User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
 ```
 
 Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
-Vision: when `[agent.vision].enabled = true` and `public_base_url` is set, the agent inspects retrieved chunks for `[[image:ref]]` markers, resolves them to artifact URLs, and injects a synthetic user message carrying `image_url` parts on the next turn (see [ADR-006](decisions/006-multimodal-artifacts.md)).
+Vision: when `[agent.vision].enabled = true` and `public_base_url` is set, the agent reads each retrieved chunk's `ImageRefs` (stamped at chunk time from the parser's page markers), resolves them to artifact URLs, and injects a synthetic user message carrying `image_url` parts on the next turn (see [ADR-006](decisions/006-multimodal-artifacts.md)).
 Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime. Agent construction (search-tool wiring, vision getter, reranker wiring) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
 
 ## Key Design Patterns
@@ -164,4 +164,4 @@ Crawl sources live in `config/sources.toml`, not the database. `crawl_pages.sour
 
 ## Multimodal artifacts
 
-Image artifacts (PDF pages via `pdftoppm`, HTML full-page screenshots via go-rod) are rendered during crawl and stored under `crawl/img/{url_sha256}/{ref}.png` in RustFS, with a `document_artifacts` row linking them to the parent document by `doc_id`. The parser embeds inline `[[image:ref]]` markers in chunk text; embeddings strip them in-flight, retrieval scans them to attach `image_url` parts to a synthetic user message when the configured backend is vision-capable. See [ADR-006](decisions/006-multimodal-artifacts.md) for the full design.
+Image artifacts (PDF pages via `pdftoppm`, HTML full-page screenshots via go-rod) are rendered during crawl and stored under `crawl/img/{url_sha256}/{ref}.png` in RustFS, with a `document_artifacts` row linking them to the parent document by `doc_id`. The parser emits one `[[image:ref]]` page-boundary line per page top; the chunker consumes those markers as a parser→chunker protocol, stamps each emitted chunk with the refs whose page range overlaps the chunk's source section (stored on `chunks.image_refs`), and strips the markers from final chunk content. Retrieval reads `ImageRefs` directly to attach `image_url` parts to a synthetic user message when the configured backend is vision-capable. See [ADR-006](decisions/006-multimodal-artifacts.md) for the full design.

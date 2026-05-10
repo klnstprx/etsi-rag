@@ -157,7 +157,7 @@ func (t *ReadDocumentTool) scopedQuery(ctx context.Context, doc *domain.Document
 		fmt.Fprintf(&b, "[%d] %s:\n%s\n\n", i+1, header, sc.Chunk.Content)
 	}
 	return ToolResult{
-		Text:      markers.Strip(b.String()),
+		Text:      b.String(),
 		Citations: []Citation{citationFor(doc)},
 	}, nil
 }

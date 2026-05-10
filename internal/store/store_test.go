@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -204,10 +205,12 @@ func TestChunksWithEmbeddings(t *testing.T) {
 		t.Fatalf("creating document: %v", err)
 	}
 
-	// Create chunks with embeddings
+	// Create chunks with embeddings. Image refs round-trip via the
+	// chunks.image_refs column so the agent's vision path can attach
+	// artifacts without re-extracting markers from the chunk text.
 	chunks := []domain.Chunk{
-		{Content: "First chunk", ChunkIndex: 0},
-		{Content: "Second chunk", ChunkIndex: 1},
+		{Content: "First chunk", ChunkIndex: 0, ImageRefs: []string{"p1"}},
+		{Content: "Second chunk", ChunkIndex: 1, ImageRefs: []string{"p1", "p2"}},
 	}
 	embeddings := [][]float32{
 		{1.0, 0.0, 0.0, 0.0},
@@ -231,6 +234,12 @@ func TestChunksWithEmbeddings(t *testing.T) {
 	}
 	if retrieved[1].ChunkIndex != 1 {
 		t.Errorf("second chunk index mismatch: %d", retrieved[1].ChunkIndex)
+	}
+	if got, want := retrieved[0].ImageRefs, []string{"p1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("first chunk ImageRefs = %v, want %v", got, want)
+	}
+	if got, want := retrieved[1].ImageRefs, []string{"p1", "p2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("second chunk ImageRefs = %v, want %v", got, want)
 	}
 }
 

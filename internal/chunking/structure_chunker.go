@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"etsi-rag/internal/config"
+	"etsi-rag/internal/markers"
 	"etsi-rag/internal/tokencount"
 )
 
@@ -14,9 +15,12 @@ var headingRe = regexp.MustCompile(`(?m)^(#{1,6})\s+(.+)$`)
 
 // section represents a parsed markdown section with its heading hierarchy.
 type section struct {
-	level int    // heading level (1-6), 0 for content before first heading
-	title string // heading text
-	body  string // content below the heading (excluding sub-headings)
+	level     int      // heading level (1-6), 0 for content before first heading
+	title     string   // heading text
+	body      string   // content below the heading (excluding sub-headings)
+	start     int      // byte offset (in cleaned text) where the section begins
+	end       int      // byte offset where the section ends (exclusive)
+	imageRefs []string // refs whose page range overlaps [start, end)
 }
 
 // StructureAwareChunker splits markdown text on heading boundaries, then uses
@@ -57,10 +61,16 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 		return nil, fmt.Errorf("token counter not configured")
 	}
 
-	sections := parseSections(content)
+	// Pull image markers out of the input up front. The cleaned text drives all
+	// section parsing; boundaries map back to which page each section's byte
+	// range overlaps. Each emitted chunk inherits its source section's refs.
+	cleaned, boundaries := markers.ExtractBoundaries(content)
+
+	sections := parseSections(cleaned)
 	if len(sections) == 0 {
 		return nil, nil
 	}
+	attachImageRefs(sections, boundaries)
 
 	// If no headings found (all content in section with level 0), fall back to token splitting
 	hasHeadings := false
@@ -71,7 +81,7 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 		}
 	}
 	if !hasHeadings {
-		return c.fallbackTokenSplit(ctx, content)
+		return c.fallbackTokenSplit(ctx, cleaned, dedupRefs(boundaries))
 	}
 
 	maxTokens := c.effectiveMaxTokens()
@@ -93,6 +103,7 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 		}
 
 		breadcrumb := breadcrumbs[i]
+		refs := s.imageRefs
 
 		// Build full section content (heading + body)
 		var sectionContent string
@@ -129,6 +140,7 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 				// Merge: replace current content and skip next section
 				sectionContent = merged
 				tokens = mergedTokens
+				refs = unionRefs(refs, sections[i+1].imageRefs)
 				// Combine breadcrumbs
 				if breadcrumbs[i+1] != "" && breadcrumbs[i+1] != breadcrumb {
 					breadcrumb = breadcrumb + " + " + sections[i+1].title
@@ -147,11 +159,12 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 				Content:      embeddingContent,
 				Index:        idx,
 				SectionTitle: breadcrumb,
+				ImageRefs:    cloneRefs(refs),
 			})
 			idx++
 		} else {
 			// Split oversized section with token-based splitting
-			subChunks, err := c.splitOversizedSection(ctx, sectionContent, breadcrumb, maxTokens, &idx)
+			subChunks, err := c.splitOversizedSection(ctx, sectionContent, breadcrumb, refs, maxTokens, &idx)
 			if err != nil {
 				return nil, fmt.Errorf("splitting oversized section: %w", err)
 			}
@@ -162,7 +175,97 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 	return chunks, nil
 }
 
-// parseSections splits markdown text on heading boundaries.
+// attachImageRefs stamps each section with the refs whose page range overlaps
+// the section's [start, end) byte span in the cleaned text. A boundary at
+// offset B covers the half-open range [B, nextB) (or [B, +∞) for the last).
+func attachImageRefs(sections []section, boundaries []markers.Boundary) {
+	if len(boundaries) == 0 {
+		return
+	}
+	for i := range sections {
+		s := &sections[i]
+		seen := make(map[string]struct{})
+		for j, b := range boundaries {
+			rangeEnd := -1
+			if j+1 < len(boundaries) {
+				rangeEnd = boundaries[j+1].Start
+			}
+			// Section [s.start, s.end) overlaps page range [b.Start, rangeEnd)?
+			if rangeEnd != -1 && rangeEnd <= s.start {
+				continue
+			}
+			if b.Start >= s.end {
+				continue
+			}
+			if _, dup := seen[b.Ref]; dup {
+				continue
+			}
+			seen[b.Ref] = struct{}{}
+			s.imageRefs = append(s.imageRefs, b.Ref)
+		}
+	}
+}
+
+// dedupRefs returns the unique ref strings from boundaries, preserving order
+// of first occurrence.
+func dedupRefs(boundaries []markers.Boundary) []string {
+	if len(boundaries) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(boundaries))
+	out := make([]string, 0, len(boundaries))
+	for _, b := range boundaries {
+		if _, dup := seen[b.Ref]; dup {
+			continue
+		}
+		seen[b.Ref] = struct{}{}
+		out = append(out, b.Ref)
+	}
+	return out
+}
+
+// unionRefs returns the dedup-union of two ref slices, preserving order
+// (a's order first, then any new entries from b).
+func unionRefs(a, b []string) []string {
+	if len(a) == 0 {
+		return cloneRefs(b)
+	}
+	if len(b) == 0 {
+		return cloneRefs(a)
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, r := range a {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	for _, r := range b {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	return out
+}
+
+// cloneRefs returns a copy of the slice (or nil for empty input) so each chunk
+// owns its own ImageRefs storage.
+func cloneRefs(refs []string) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, len(refs))
+	copy(out, refs)
+	return out
+}
+
+// parseSections splits markdown text on heading boundaries. Each returned
+// section records its [start, end) byte range in `text` so callers can map
+// other offset-keyed metadata (e.g. image-marker boundaries) back to sections.
 func parseSections(text string) []section {
 	locs := headingRe.FindAllStringIndex(text, -1)
 	if len(locs) == 0 {
@@ -171,7 +274,7 @@ func parseSections(text string) []section {
 		if body == "" {
 			return nil
 		}
-		return []section{{level: 0, body: body}}
+		return []section{{level: 0, body: body, start: 0, end: len(text)}}
 	}
 
 	var sections []section
@@ -180,7 +283,10 @@ func parseSections(text string) []section {
 	if locs[0][0] > 0 {
 		pre := strings.TrimSpace(text[:locs[0][0]])
 		if pre != "" {
-			sections = append(sections, section{level: 0, body: pre})
+			sections = append(sections, section{
+				level: 0, body: pre,
+				start: 0, end: locs[0][0],
+			})
 		}
 	}
 
@@ -203,6 +309,8 @@ func parseSections(text string) []section {
 			level: level,
 			title: title,
 			body:  body,
+			start: loc[0],
+			end:   bodyEnd,
 		})
 	}
 
@@ -241,7 +349,7 @@ func buildBreadcrumbs(sections []section) []string {
 }
 
 // splitOversizedSection splits a section that exceeds maxTokens using separator-based splitting.
-func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, content, breadcrumb string, maxTokens int, idx *int) ([]Chunk, error) {
+func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, content, breadcrumb string, refs []string, maxTokens int, idx *int) ([]Chunk, error) {
 	// Use separator-based splitting (paragraph, newline, sentence, word)
 	segments := splitBySeparators(content, c.config.Separators, 0)
 
@@ -283,12 +391,12 @@ func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, conte
 		if segTokens > effectiveMax {
 			// Flush current
 			if current.Len() > 0 {
-				chunks = append(chunks, c.makeStructuredChunk(current.String(), breadcrumb, idx))
+				chunks = append(chunks, c.makeStructuredChunk(current.String(), breadcrumb, refs, idx))
 				current.Reset()
 				currentTokens = 0
 			}
 			// Hard split oversized segment
-			subChunks, err := c.hardSplitByTokens(ctx, seg, breadcrumb, effectiveMax, idx)
+			subChunks, err := c.hardSplitByTokens(ctx, seg, breadcrumb, refs, effectiveMax, idx)
 			if err != nil {
 				return nil, err
 			}
@@ -297,7 +405,7 @@ func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, conte
 		}
 
 		if currentTokens+segTokens > effectiveMax && current.Len() > 0 {
-			chunks = append(chunks, c.makeStructuredChunk(current.String(), breadcrumb, idx))
+			chunks = append(chunks, c.makeStructuredChunk(current.String(), breadcrumb, refs, idx))
 			current.Reset()
 			currentTokens = 0
 		}
@@ -307,7 +415,7 @@ func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, conte
 	}
 
 	if current.Len() > 0 {
-		chunks = append(chunks, c.makeStructuredChunk(current.String(), breadcrumb, idx))
+		chunks = append(chunks, c.makeStructuredChunk(current.String(), breadcrumb, refs, idx))
 	}
 
 	return chunks, nil
@@ -344,7 +452,7 @@ func splitBySeparators(text string, separators []string, sepIdx int) []string {
 }
 
 // makeStructuredChunk creates a chunk with section title and breadcrumb prefix.
-func (c *StructureAwareChunker) makeStructuredChunk(text, breadcrumb string, idx *int) Chunk {
+func (c *StructureAwareChunker) makeStructuredChunk(text, breadcrumb string, refs []string, idx *int) Chunk {
 	content := strings.TrimSpace(text)
 	if breadcrumb != "" {
 		content = breadcrumb + ":\n" + content
@@ -353,6 +461,7 @@ func (c *StructureAwareChunker) makeStructuredChunk(text, breadcrumb string, idx
 		Content:      content,
 		Index:        *idx,
 		SectionTitle: breadcrumb,
+		ImageRefs:    cloneRefs(refs),
 	}
 	*idx++
 	return chunk
@@ -362,7 +471,7 @@ func (c *StructureAwareChunker) makeStructuredChunk(text, breadcrumb string, idx
 // Returns an empty slice (no error) if the input is empty or maxTokens is
 // non-positive — degenerate inputs would otherwise cause an infinite loop or
 // send an empty slice to the detokenizer.
-func (c *StructureAwareChunker) hardSplitByTokens(ctx context.Context, text, breadcrumb string, maxTokens int, idx *int) ([]Chunk, error) {
+func (c *StructureAwareChunker) hardSplitByTokens(ctx context.Context, text, breadcrumb string, refs []string, maxTokens int, idx *int) ([]Chunk, error) {
 	if maxTokens <= 0 {
 		return nil, nil
 	}
@@ -395,7 +504,7 @@ func (c *StructureAwareChunker) hardSplitByTokens(ctx context.Context, text, bre
 			continue
 		}
 
-		chunks = append(chunks, c.makeStructuredChunk(chunkText, breadcrumb, idx))
+		chunks = append(chunks, c.makeStructuredChunk(chunkText, breadcrumb, refs, idx))
 
 		if end == len(tokens) {
 			break
@@ -406,7 +515,19 @@ func (c *StructureAwareChunker) hardSplitByTokens(ctx context.Context, text, bre
 }
 
 // fallbackTokenSplit splits unstructured text (no headings) using separator-based token splitting.
-func (c *StructureAwareChunker) fallbackTokenSplit(ctx context.Context, content string) ([]Chunk, error) {
+// Each emitted chunk inherits the entire input's refs (best-effort attribution
+// since the unstructured path has no section boundaries to align with).
+func (c *StructureAwareChunker) fallbackTokenSplit(ctx context.Context, content string, refs []string) ([]Chunk, error) {
 	tokenChunker := NewRecursiveTokenChunker(c.config, c.counter, c.maxEmbeddingTokens)
-	return tokenChunker.Chunk(ctx, content)
+	chunks, err := tokenChunker.Chunk(ctx, content)
+	if err != nil {
+		return nil, err
+	}
+	if len(refs) == 0 {
+		return chunks, nil
+	}
+	for i := range chunks {
+		chunks[i].ImageRefs = cloneRefs(refs)
+	}
+	return chunks, nil
 }

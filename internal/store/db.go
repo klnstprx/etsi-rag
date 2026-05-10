@@ -37,6 +37,7 @@ func Migrate(db *sql.DB) error {
 			content TEXT NOT NULL,
 			chunk_index INTEGER NOT NULL,
 			section_title TEXT NOT NULL DEFAULT '',
+			image_refs TEXT NOT NULL DEFAULT '',
 			UNIQUE(doc_id, chunk_index)
 		);
 

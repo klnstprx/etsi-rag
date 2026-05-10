@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -237,12 +236,11 @@ func (c *Crawler) parseStage(
 			pageLang = item.HTMLParsed.Language
 
 			// Attach the full-page screenshot as a single "full" artifact when
-			// the browser captured one. The marker [[image:full]] is prefixed
-			// onto every non-heading content line so retrieval reliably finds
-			// at least one marker per chunk regardless of how the chunker
-			// splits the page.
+			// the browser captured one. A single [[image:full]] line at the top
+			// of the document acts as a page boundary the chunker reads to
+			// stamp every emitted chunk with the "full" ref.
 			if len(item.Screenshot) > 0 {
-				text = prefixContentLinesWithMarker(text, markers.Format("full"))
+				text = markers.Format("full") + "\n" + text
 				artifacts = append(artifacts, ParsedArtifact{
 					Ref:      "full",
 					Kind:     string(domain.ArtifactHTMLScreenshot),
@@ -468,37 +466,6 @@ func (c *Crawler) embedStage(
 			c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
 		}
 	}
-}
-
-// prefixContentLinesWithMarker prefixes every non-empty, non-heading line of
-// text with the given marker (followed by a space). Used to densely embed
-// image markers into document content so every chunk produced by the
-// structure-aware chunker carries at least one marker — necessary because
-// chunks may slice mid-page and a once-per-page marker can land outside the
-// chunked window.
-//
-// Headings (# / ## / ###) are passed through untouched so they remain valid
-// chunk boundaries. Markers strip cleanly via markers.Strip before embedding.
-func prefixContentLinesWithMarker(text, marker string) string {
-	var sb strings.Builder
-	sb.Grow(len(text) + len(marker)*8)
-	for line := range strings.SplitSeq(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			sb.WriteByte('\n')
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			sb.WriteString(line)
-			sb.WriteByte('\n')
-			continue
-		}
-		sb.WriteString(marker)
-		sb.WriteByte(' ')
-		sb.WriteString(line)
-		sb.WriteByte('\n')
-	}
-	return strings.TrimRight(sb.String(), "\n")
 }
 
 // storeArtifacts uploads each rendered image to RustFS and records a row in

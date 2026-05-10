@@ -12,7 +12,6 @@ import (
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
-	"etsi-rag/internal/markers"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/tokencount"
 )
@@ -271,10 +270,7 @@ func (p *Pipeline) RetrieveInDocument(ctx context.Context, query, docID string, 
 func applyRerank(ctx context.Context, r llm.Reranker, query string, candidates []store.SearchResult, topK int) []store.SearchResult {
 	docs := make([]string, len(candidates))
 	for i, c := range candidates {
-		// Strip image markers — same hygiene the embed-time path uses
-		// (Pipeline.Ingest), since they're metadata pointers, not content
-		// the cross-encoder should score.
-		docs[i] = markers.Strip(c.Chunk.Content)
+		docs[i] = c.Chunk.Content
 	}
 	results, err := r.Rerank(ctx, query, docs, topK)
 	if err != nil || len(results) == 0 {
@@ -416,10 +412,10 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 			continue
 		}
 
-		// Convert chunking.Chunk to domain.Chunk and collect texts. Strip image
-		// markers from the embed-time text so they don't pollute the embedding
-		// space; the storage path keeps the markers so retrieval can resolve
-		// them to image artifacts.
+		// Convert chunking.Chunk to domain.Chunk. Image refs travel as a
+		// separate field on the chunk record; chunk content is already
+		// marker-free at this point (the chunker strips markers during
+		// emission).
 		domainChunks := make([]domain.Chunk, len(chunks))
 		texts := make([]string, len(chunks))
 		for i, c := range chunks {
@@ -427,8 +423,9 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 				Content:      c.Content,
 				ChunkIndex:   c.Index,
 				SectionTitle: c.SectionTitle,
+				ImageRefs:    c.ImageRefs,
 			}
-			texts[i] = markers.Strip(c.Content)
+			texts[i] = c.Content
 		}
 
 		embeddings, err := embedder.EmbedBatch(ctx, texts)

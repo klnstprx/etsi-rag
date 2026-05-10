@@ -14,6 +14,7 @@ package markers
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // imageRe matches markers of the form [[image:ref]] where ref is one or more
@@ -45,4 +46,44 @@ func Extract(s string) []string {
 // in place — callers that need cleanup can collapse runs of spaces themselves.
 func Strip(s string) string {
 	return imageRe.ReplaceAllString(s, "")
+}
+
+// Boundary records where a marker appeared in the input, expressed as the byte
+// offset in the *cleaned* (marker-free) text. Start is the offset at which the
+// marker was located before stripping, so a chunker can intersect cleaned-text
+// byte ranges with these boundaries to determine which refs each chunk covers.
+type Boundary struct {
+	Ref   string
+	Start int
+}
+
+// ExtractBoundaries strips every marker from input and returns (cleaned, boundaries)
+// where each boundary's Start is its byte offset in the cleaned output. When a
+// marker is followed by a newline (the parser's "page header" form), the
+// newline is also consumed so the boundary points at the first byte of the
+// page's content rather than the empty line where the marker was. When the
+// input has no markers, returns the original string and a nil slice.
+func ExtractBoundaries(s string) (string, []Boundary) {
+	locs := imageRe.FindAllStringSubmatchIndex(s, -1)
+	if len(locs) == 0 {
+		return s, nil
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	boundaries := make([]Boundary, 0, len(locs))
+	prev := 0
+	for _, loc := range locs {
+		b.WriteString(s[prev:loc[0]])
+		boundaries = append(boundaries, Boundary{
+			Ref:   s[loc[2]:loc[3]],
+			Start: b.Len(),
+		})
+		end := loc[1]
+		if end < len(s) && s[end] == '\n' {
+			end++
+		}
+		prev = end
+	}
+	b.WriteString(s[prev:])
+	return b.String(), boundaries
 }

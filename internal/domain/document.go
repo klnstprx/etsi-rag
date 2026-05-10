@@ -56,6 +56,12 @@ type Chunk struct {
 	Content      string
 	ChunkIndex   int
 	SectionTitle string
+
+	// ImageRefs lists image-artifact refs (e.g. "p1", "full") whose page
+	// range overlaps the chunk's source span. Used by the agent's vision
+	// path to attach matching artifacts; empty when the source produced no
+	// images.
+	ImageRefs []string
 }
 
 // SourceReference identifies a source document used in RAG context.

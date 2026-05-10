@@ -57,7 +57,7 @@ Parser emits markdown: headings, lists, bold/italic, links. This markdown is sto
 Raw pdftotext output goes through three stages before ingestion:
 
 1. **Page header/footer stripping**: Lines that repeat across 2+ pages (e.g., "GUÍA DOCENTE DE LA ASIGNATURA") are removed. "Página X de Y" footers are stripped via regex. Form-feed page boundaries are preserved.
-2. **Heading detection + image markers**: ALL-CAPS lines matching configured `heading_patterns` are converted to `## Title Case Heading`. Each page boundary emits a `[[image:p{N}]]` marker so chunks can later reference the corresponding `pdftoppm`-rendered page image.
+2. **Heading detection + image markers**: ALL-CAPS lines matching configured `heading_patterns` are converted to `## Title Case Heading`. Each page boundary emits a single `[[image:p{N}]]` line at the top of the page; the chunker reads these as page boundaries, stamps each emitted chunk with the refs whose range overlaps the chunk's source section (stored on `chunks.image_refs`), and strips the markers from final chunk content. The markers are an internal parser→chunker protocol — never embedded, never user-facing.
 3. **Normalization**: `normalizeStructured()` collapses excessive blank lines while preserving paragraph boundaries.
 
 ### Image Artifact Rendering
