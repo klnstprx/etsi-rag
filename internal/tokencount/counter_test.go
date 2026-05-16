@@ -11,7 +11,7 @@ import (
 
 func TestLlamaCppCounterRetriesOn5xx(t *testing.T) {
 	// Flaky upstream: first 2 calls return 500, 3rd succeeds. Mirrors a
-	// llama-server crash window where llama-swap restarts the upstream.
+	// llama-server crash window
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) < 3 {

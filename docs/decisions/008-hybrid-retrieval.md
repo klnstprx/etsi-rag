@@ -179,8 +179,12 @@ ranking once the canonical doc is the top hit.
   **Deprioritised alternatives** — both still possible but smaller
   expected impact and less general:
     - FTS5 multi-column with weighted `bm25(table, 5.0, 1.0)` on
-      `(section_title, content)` to lift canonical breadcrumbs.
-      Targeted; only fixes a subset of pattern 1 / 4.
+      `(section_title, content)` to lift canonical breadcrumbs. The
+      current trigger already concatenates `coalesce(section_title, '')
+      || ' ' || content` into a single FTS column (equal weighting); a
+      multi-column variant would let heading words score higher than
+      body, but adds tuning surface. Targeted; only fixes a subset of
+      pattern 1 / 4.
     - Per-domain URL-canonicality boost preferring `/grado-en-X` over
       derivative `info/N/...` pages. Hand-coded heuristic; doesn't
       generalise to new corpora.

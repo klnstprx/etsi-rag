@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
@@ -49,9 +48,8 @@ func setupReadDocFixture(t *testing.T) (*ReadDocumentTool, *store.SQLiteStore) {
 	const dim = 4
 	s := store.NewSQLiteStore(db, func() int { return dim })
 
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100, ChunkOverlap: 0})
 	emb := fixedEmbedder{vec: []float32{1, 0, 0, 0}}
-	p := rag.NewPipeline(s, emb, chunker, &testutil.MockCounter{}, config.RetrievalConfig{
+	p := rag.NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             3,
 		MaxContextTokens: 1024,
 	})

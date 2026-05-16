@@ -13,7 +13,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"etsi-rag/internal/agent"
-	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
@@ -54,8 +53,7 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	s := store.NewSQLiteStore(db, func() int { return 4 })
 	mock := &mockEmbedder{}
 	counter := &testutil.MockCounter{}
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 100})
-	pipeline := rag.NewPipeline(s, mock, chunker, counter, config.RetrievalConfig{
+	pipeline := rag.NewPipeline(s, mock, testutil.FakeChunker{}, counter, config.RetrievalConfig{
 		TopK:             5,
 		MaxContextTokens: 1024,
 	})

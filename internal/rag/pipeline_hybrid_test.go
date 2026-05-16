@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/store"
@@ -77,13 +76,9 @@ func setupHybridPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 		t.Fatalf("create chunks: %v", err)
 	}
 
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{
-		MaxChunkSize: 100,
-		ChunkOverlap: 0,
-	})
 	emb := fixedEmbedder{vec: []float32{0.5, 0.5, 0, 0}}
 
-	p := NewPipeline(s, emb, chunker, &testutil.MockCounter{}, config.RetrievalConfig{
+	p := NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             3,
 		MaxContextTokens: 1024,
 		RetrievalMode:    "hybrid",

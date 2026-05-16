@@ -9,6 +9,36 @@ import (
 	"etsi-rag/internal/config"
 )
 
+// mockCounter counts words as tokens. Kept local to the chunking package
+// because testutil.MockCounter (functionally identical) lives in
+// internal/testutil — which imports chunking — and package-internal tests
+// importing testutil would create an import cycle.
+type mockCounter struct{}
+
+func (m *mockCounter) Count(_ context.Context, text string) (int, error) {
+	if text == "" {
+		return 0, nil
+	}
+	return len(strings.Fields(text)), nil
+}
+
+func (m *mockCounter) Tokenize(_ context.Context, text string) ([]int, error) {
+	words := strings.Fields(text)
+	tokens := make([]int, len(words))
+	for i := range tokens {
+		tokens[i] = i
+	}
+	return tokens, nil
+}
+
+func (m *mockCounter) Detokenize(_ context.Context, tokens []int) (string, error) {
+	parts := make([]string, len(tokens))
+	for i := range parts {
+		parts[i] = "word"
+	}
+	return strings.Join(parts, " "), nil
+}
+
 // TestImageMarkers verifies the parser→chunker handoff: page markers in the
 // input drive each chunk's ImageRefs, and the markers themselves are stripped
 // from the user-facing chunk content. The parser emits one marker per page
@@ -270,11 +300,13 @@ func TestStructureAwareChunker(t *testing.T) {
 				}
 			}
 
-			// Check content contains
+			// Check content contains. SectionTitle is included in the
+			// scan so assertions on breadcrumb text still match — the
+			// chunker no longer inlines the breadcrumb into Content.
 			if tt.wantContains != nil {
 				allContent := ""
 				for _, c := range chunks {
-					allContent += c.Content + "\n"
+					allContent += c.SectionTitle + "\n" + c.Content + "\n"
 				}
 				for _, want := range tt.wantContains {
 					if !strings.Contains(allContent, want) {
@@ -340,35 +372,30 @@ func TestStructureAwareChunkerDeepBreadcrumbDoesntOversizeChunks(t *testing.T) {
 }
 
 // TestHardSplitByTokensGuards verifies the defensive guards in hardSplitByTokens
-// that prevent infinite loops and empty-slice detokenize calls when the section
-// budget is degenerate.
+// that prevent infinite loops and empty-slice detokenize calls when the budget
+// is degenerate.
 func TestHardSplitByTokensGuards(t *testing.T) {
 	ctx := context.Background()
-	chunker := NewStructureAwareChunker(config.ChunkingConfig{
-		MaxChunkSize: 10,
-		MinChunkSize: 4,
-		ChunkOverlap: 2,
-	}, &mockCounter{}, 512)
+	counter := &mockCounter{}
 
-	idx := 0
 	// maxTokens <= 0: must return empty without error and without touching the
 	// tokenizer (mockCounter would return tokens regardless; we only care the
 	// loop doesn't execute).
-	chunks, err := chunker.hardSplitByTokens(ctx, "some text here", "Breadcrumb", nil, 0, &idx)
+	pieces, err := hardSplitByTokens(ctx, counter, "some text here", 0, 2)
 	if err != nil {
 		t.Fatalf("maxTokens=0: %v", err)
 	}
-	if len(chunks) != 0 {
-		t.Errorf("maxTokens=0: expected no chunks, got %d", len(chunks))
+	if len(pieces) != 0 {
+		t.Errorf("maxTokens=0: expected no pieces, got %d", len(pieces))
 	}
 
 	// empty text → Tokenize returns []; second guard kicks in.
-	chunks, err = chunker.hardSplitByTokens(ctx, "", "Breadcrumb", nil, 10, &idx)
+	pieces, err = hardSplitByTokens(ctx, counter, "", 10, 2)
 	if err != nil {
 		t.Fatalf("empty text: %v", err)
 	}
-	if len(chunks) != 0 {
-		t.Errorf("empty text: expected no chunks, got %d", len(chunks))
+	if len(pieces) != 0 {
+		t.Errorf("empty text: expected no pieces, got %d", len(pieces))
 	}
 }
 

@@ -14,7 +14,7 @@ var _ Embedder = (*EmbedClient)(nil)
 
 // DefaultMaxRetries is the fallback retry count for transient 5xx responses
 // when a backend doesn't override it. ~120s exponential-backoff budget at
-// openai-go's default cadence — long enough to outlast a llama-swap restart
+// openai-go's default cadence — long enough to outlast a llama-server restart
 // with cold model reload.
 const DefaultMaxRetries = 10
 
@@ -49,7 +49,7 @@ type EmbedClient struct {
 
 // NewEmbedClient creates a new embedding client from an EmbedClientConfig.
 //
-// Retries on transient upstream 5xx (e.g. llama-server crash + llama-swap
+// Retries on transient upstream 5xx (e.g. llama-server crash
 // restart) absorb backend flakiness so the crawler's consecutive-fail circuit
 // breaker doesn't trip on a recoverable outage. openai-go uses exponential
 // backoff with jitter. See DefaultMaxRetries for the fallback budget.

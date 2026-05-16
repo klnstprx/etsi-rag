@@ -1,4 +1,5 @@
 # Configuration
+
 <!-- packages: internal/config -->
 <!-- related: docs/architecture.md, config/config.default.toml, config/sources.default.toml -->
 
@@ -63,12 +64,12 @@ Admin-UI saves only rewrite the sections the Go config struct owns; foreign top-
 
 Sections are grouped by role:
 
-| Role               | Sections                                                   |
-| ------------------ | ---------------------------------------------------------- |
-| **Infrastructure** | `[server]`, `[admin]`, `[database]`, `[object_store]`, `[[backends]]` |
+| Role               | Sections                                                                                           |
+| ------------------ | -------------------------------------------------------------------------------------------------- |
+| **Infrastructure** | `[server]`, `[admin]`, `[database]`, `[object_store]`, `[[backends]]`                              |
 | **Pipeline**       | `[chunking]`, `[embedding]`, `[retrieval]`, `[reranker]`, `[agent]`, `[agent.vision]`, `[session]` |
-| **Ingest**         | `[crawler]`, `[crawler.pdf]`                               |
-| **Eval (Python)**  | `[eval]` — consumed by `eval/` only; the Go server ignores it |
+| **Ingest**         | `[crawler]`, `[crawler.pdf]`                                                                       |
+| **Eval (Python)**  | `[eval]` — consumed by `eval/` only; the Go server ignores it                                      |
 
 ## TOML Reference
 
@@ -107,8 +108,8 @@ enabled = true
 is_llama_cpp = true           # enables llama.cpp /tokenize endpoint
                               # (vision capability lives on [agent.vision].enabled — backends are
                               # transport, models are what supports vision)
-max_retries = 10              # per-call retry budget for transient 5xx (e.g. llama-server crash
-                              # + llama-swap restart). 0 = use llm.DefaultMaxRetries; applies to
+max_retries = 10              # per-call retry budget for transient 5xx (e.g. llama-server crash)
+                              # 0 = use llm.DefaultMaxRetries; applies to
                               # every client targeting this backend (embed, chat, token counter).
 
 # ---------- Pipeline (chunk → embed → retrieve → answer) ----------
@@ -117,7 +118,7 @@ max_retries = 10              # per-call retry budget for transient 5xx (e.g. ll
 max_chunk_size = 256          # in tokens (not characters)
 chunk_overlap = 32            # in tokens
 min_chunk_size = 64           # minimum chunk size in tokens
-separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators for RecursiveTokenChunker
+separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators used when a section exceeds the token budget or the document has no headings
 
 [embedding]
 backend = 'local-llama'       # references backend by name
@@ -224,17 +225,20 @@ judge_model   = 'claude-sonnet-4-6'
 ## Backend Resolution
 
 `server.Server.resolveEmbedClient()`, `resolveChatClient()` and `resolveRerankClient()` (in `internal/server/wiring.go`) are called both at startup and on every admin-UI config save (via `rebuildClients()`):
+
 1. Look up the backend by name from the `[[backends]]` array
 2. Merge stage-specific config (model + batch_size for embedding; model + max_tokens + temperature for agent; model + max_tokens + reserved_tokens + timeout for reranker)
 3. Build an `llm.EmbedClient`, `llm.ChatClient`, or `llm.RerankClient` with the resolved settings
 
 `resolveCounter()` creates the appropriate token counter:
+
 - `is_llama_cpp = true` -> `LlamaCppCounter` (HTTP `/tokenize` endpoint)
 - `is_llama_cpp = false` -> `TiktokenCounter` (tiktoken-go library); errors out if the model is unknown to tiktoken
 
 ## Auto-Detection (llama.cpp)
 
 `probeLlamaCppBackends()` probes each unique llama.cpp backend once at startup and after config changes:
+
 - **Embedding**: auto-detects `max_tokens` (n_ctx) and `dimension` (n_embd)
 - **Agent**: auto-detects `context_window` (n_ctx)
 - **Reranker**: auto-detects `max_tokens` (n_ctx); also has the side-effect of asking the router to load the reranker model so the first `/rerank` request avoids cold-load latency
@@ -251,13 +255,13 @@ It treats `config.toml` as a shared file: it loads what's on disk, drops the top
 
 The TOML layout was reorganized to group infrastructure / pipeline / ingest sections. `Load()` rejects pre-restructure keys with a rename hint instead of silently zero-defaulting them. If startup fails with `config uses legacy keys`, rename:
 
-| Old                                  | New                                    |
-| ------------------------------------ | -------------------------------------- |
-| `[rag] top_k`                        | `[retrieval] top_k`                    |
-| `[rag] max_context_tokens`           | `[retrieval] max_context_tokens`       |
-| `[rag] retrieval_mode`               | `[retrieval] retrieval_mode`           |
-| `[api] passthrough`                  | `[agent] passthrough`                  |
-| `[agent] public_base_url`            | `[agent.vision] public_base_url`       |
-| `[agent] max_images_per_call`        | `[agent.vision] max_images_per_call`   |
-| `[agent] max_image_bytes_per_call`   | `[agent.vision] max_image_bytes_per_call` |
-| `[[backends]] supports_vision`       | `[agent.vision] enabled` (moved to the agent stage — vision is a model property, not a backend one) |
+| Old                                | New                                                                                                 |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `[rag] top_k`                      | `[retrieval] top_k`                                                                                 |
+| `[rag] max_context_tokens`         | `[retrieval] max_context_tokens`                                                                    |
+| `[rag] retrieval_mode`             | `[retrieval] retrieval_mode`                                                                        |
+| `[api] passthrough`                | `[agent] passthrough`                                                                               |
+| `[agent] public_base_url`          | `[agent.vision] public_base_url`                                                                    |
+| `[agent] max_images_per_call`      | `[agent.vision] max_images_per_call`                                                                |
+| `[agent] max_image_bytes_per_call` | `[agent.vision] max_image_bytes_per_call`                                                           |
+| `[[backends]] supports_vision`     | `[agent.vision] enabled` (moved to the agent stage — vision is a model property, not a backend one) |

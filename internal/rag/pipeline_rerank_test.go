@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
@@ -101,13 +100,9 @@ func setupDensePipeline(t *testing.T, topK int) (*Pipeline, *store.SQLiteStore) 
 		t.Fatalf("create chunks: %v", err)
 	}
 
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{
-		MaxChunkSize: 100,
-		ChunkOverlap: 0,
-	})
 	emb := fixedEmbedder{vec: []float32{1.0, 0, 0, 0}}
 
-	p := NewPipeline(s, emb, chunker, &testutil.MockCounter{}, config.RetrievalConfig{
+	p := NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             topK,
 		MaxContextTokens: 1024,
 		RetrievalMode:    "dense",

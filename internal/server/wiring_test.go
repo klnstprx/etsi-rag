@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/prompts"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
+	"etsi-rag/internal/testutil"
 
 	"github.com/rs/zerolog"
 )
@@ -403,8 +403,7 @@ func TestConfigDimensionChange_SeenByStore(t *testing.T) {
 func testServerWithPipeline(t *testing.T, cfg *config.Config) *Server {
 	t.Helper()
 	s := testServer(t, cfg)
-	chunker := chunking.NewRecursiveCharacterChunker(cfg.Chunking)
-	s.pipeline = rag.NewPipeline(s.store, nil, chunker, nil, cfg.Retrieval)
+	s.pipeline = rag.NewPipeline(s.store, nil, testutil.FakeChunker{}, nil, cfg.Retrieval)
 	return s
 }
 

@@ -102,9 +102,14 @@ func Migrate(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_artifacts_doc ON document_artifacts(doc_id);
 
-		-- FTS5 keyword index over chunks.content. External-content table
-		-- (content='chunks', content_rowid='id') so the index references rows
-		-- in the chunks table without duplicating bytes. unicode61 with
+		-- FTS5 keyword index over (section_title || ' ' || content). The
+		-- chunker stores plain body in chunks.content and the heading
+		-- breadcrumb in chunks.section_title; the trigger concatenates them
+		-- so BM25 sees heading words alongside the body. External-content
+		-- table (content='chunks', content_rowid='id') so the index
+		-- references rows in the chunks table without duplicating bytes;
+		-- snippet()/highlight() are not used (only bm25()), so the
+		-- index-vs-content asymmetry is fine. unicode61 with
 		-- remove_diacritics=2 folds Spanish accents (María ↔ maria).
 		CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 			content,
@@ -113,16 +118,23 @@ func Migrate(db *sql.DB) error {
 			tokenize='unicode61 remove_diacritics 2'
 		);
 
-		-- Triggers keep chunks_fts in sync with chunks.
+		-- Triggers keep chunks_fts in sync with chunks. The indexed value
+		-- prepends section_title onto content so heading words contribute
+		-- to BM25 scoring; section_title is coalesced because rows from
+		-- the heading-free fallback path leave it empty.
 		CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+			INSERT INTO chunks_fts(rowid, content)
+			VALUES (new.id, coalesce(new.section_title, '') || ' ' || new.content);
 		END;
 		CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+			INSERT INTO chunks_fts(chunks_fts, rowid, content)
+			VALUES('delete', old.id, coalesce(old.section_title, '') || ' ' || old.content);
 		END;
 		CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
-			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+			INSERT INTO chunks_fts(chunks_fts, rowid, content)
+			VALUES('delete', old.id, coalesce(old.section_title, '') || ' ' || old.content);
+			INSERT INTO chunks_fts(rowid, content)
+			VALUES (new.id, coalesce(new.section_title, '') || ' ' || new.content);
 		END;
 
 		-- Chunks created before the chunks_fts table existed are not

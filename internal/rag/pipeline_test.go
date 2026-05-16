@@ -50,10 +50,6 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 	}
 
 	s := store.NewSQLiteStore(db, func() int { return 4 })
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{
-		MaxChunkSize: 100,
-		ChunkOverlap: 0,
-	})
 
 	mock := &mockEmbedder{
 		embedFn: func(ctx context.Context, text string) ([]float32, error) {
@@ -68,7 +64,7 @@ func setupTestPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 		},
 	}
 
-	p := NewPipeline(s, mock, chunker, &testutil.MockCounter{}, config.RetrievalConfig{
+	p := NewPipeline(s, mock, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             5,
 		MaxContextTokens: 1024,
 	})

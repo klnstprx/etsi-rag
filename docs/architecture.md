@@ -52,7 +52,7 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `store` | SQLite document/chunk storage, cosine similarity vector search, FTS5 BM25 keyword search, crawl-page/run + artifact CRUD (backends and crawl sources live in TOML, not SQLite) |
 | `crawler` | BFS web crawler: 3-stage pipeline (crawl -> parse -> embed), go-rod for JS pages, go-readability for content extraction, PDF support |
 | `objectstore` | S3-compatible object storage client (RustFS) |
-| `chunking` | StructureAwareChunker (heading-boundary splitting), RecursiveTokenChunker (fallback), RecursiveCharacterChunker (char-based fallback) |
+| `chunking` | StructureAwareChunker (heading-boundary splitting; falls back to in-package separator + token-range splitter for oversized sections and heading-free documents) |
 | `tokencount` | Token counting: LlamaCppCounter (HTTP /tokenize), TiktokenCounter (tiktoken-go) |
 | `session` | Conversation state with TTL expiration |
 | `domain` | Core types: Document, Chunk, SourceReference, Language, CrawlSource, Artifact |

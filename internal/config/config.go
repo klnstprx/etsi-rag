@@ -29,7 +29,7 @@ const (
 // BackendConfig represents an LLM server endpoint.
 //
 // MaxRetries is the per-call retry budget for transient 5xx responses (e.g.
-// llama-server crash + llama-swap restart). 0 = use llm.DefaultMaxRetries;
+// llama-server crash). 0 = use llm.DefaultMaxRetries;
 // negative is treated as 0. Applies to all clients targeting this backend
 // (embed, chat, token counter).
 type BackendConfig struct {

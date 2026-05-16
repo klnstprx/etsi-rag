@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/rag"
@@ -49,9 +48,8 @@ func setupSemanticSearchFixture(t *testing.T) (*SemanticSearchTool, *store.SQLit
 	const dim = 4
 	s := store.NewSQLiteStore(db, func() int { return dim })
 
-	chunker := chunking.NewRecursiveCharacterChunker(config.ChunkingConfig{MaxChunkSize: 200, ChunkOverlap: 0})
 	emb := fixedEmbedder{vec: []float32{1, 0, 0, 0}}
-	p := rag.NewPipeline(s, emb, chunker, &testutil.MockCounter{}, config.RetrievalConfig{
+	p := rag.NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             5,
 		MaxContextTokens: 4096,
 	})

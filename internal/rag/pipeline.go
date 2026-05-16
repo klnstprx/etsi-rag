@@ -415,7 +415,11 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 		// Convert chunking.Chunk to domain.Chunk. Image refs travel as a
 		// separate field on the chunk record; chunk content is already
 		// marker-free at this point (the chunker strips markers during
-		// emission).
+		// emission). The breadcrumb lives only on SectionTitle — the
+		// embedder sees it via chunking.EmbeddingText, but stored content
+		// is plain body so the LLM-facing context block (which already
+		// renders DocTitle > SectionTitle in its header) does not
+		// double-render the path.
 		domainChunks := make([]domain.Chunk, len(chunks))
 		texts := make([]string, len(chunks))
 		for i, c := range chunks {
@@ -425,7 +429,7 @@ func (p *Pipeline) Ingest(ctx context.Context, docs []domain.Document) (int, int
 				SectionTitle: c.SectionTitle,
 				ImageRefs:    c.ImageRefs,
 			}
-			texts[i] = c.Content
+			texts[i] = chunking.EmbeddingText(c.SectionTitle, c.Content)
 		}
 
 		embeddings, err := embedder.EmbedBatch(ctx, texts)

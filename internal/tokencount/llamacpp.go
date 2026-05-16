@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// DefaultMaxRetries on 5xx. llama-server can crash + restart via llama-swap
+// DefaultMaxRetries on 5xx. llama-server can crash
 // during heavy ingest; without retries every transient 500 fails a chunker
 // /tokenize call and surfaces as a chunking error. Mirrors llm.DefaultMaxRetries.
 const DefaultMaxRetries = 10
@@ -61,7 +61,7 @@ func (l *LlamaCppCounter) doWithRetry(req *http.Request) (status int, body []byt
 		}
 		resp, doErr := l.client.Do(req)
 		if doErr != nil {
-			// Network error — retry too, since llama-swap may be restarting upstream.
+			// Network error — retry too, since router may be restarting upstream.
 			if attempt < l.maxRetries {
 				if !sleepWithCtx(req.Context(), backoffDelay(attempt)) {
 					return 0, nil, req.Context().Err()
