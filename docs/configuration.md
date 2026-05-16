@@ -30,7 +30,7 @@ enabled = true
 
 Source records carry only what's needed for crawl scoping plus agent-facing scoping hints. Per-page `language` is detected from `<html lang>` and falls back to Spanish (the project is UMA-only Spanish). Documents themselves carry no taxonomy — classification is inherited from the source: the admin Documents view joins through `crawl_pages` to surface the source name and tag pills, and the Source/Tag dropdowns let operators filter the list.
 
-`description` and `tags` are surfaced through the `list_sources` agent tool so the agent can decide whether to scope a search by passing `source_keys` to `semantic_search`. Tags are **not** persisted on documents (they are read off the source registry on demand).
+`description` and `tags` are stored on the source for admin-UI grouping and filtering (the Documents view joins through `crawl_pages` to surface them) and remain in the schema as forward-compatibility for a future agent-facing scoping tool. A previous `list_sources` agent tool used them at retrieval time but was reverted on 2026-05-09 after an accuracy regression on small models; today the agent has no view onto them. Tags are **not** persisted on documents (they are read off the source registry on demand).
 
 ### Tag vocabulary
 
@@ -45,7 +45,7 @@ A controlled-but-extensible set; operators may invent new tags but should prefer
 - **Services**: `biblioteca`, `servicios-ti`, `calidad`
 - **Institution**: `escuela`
 
-`LoadSources` validates that `key` is non-empty and unique and that `seed_url` parses as an absolute URL. The admin UI at `/admin/crawler` performs CRUD against this file via `WriteSources` (atomic temp+rename) and calls `Crawler.SetSources` so the running crawler picks up edits without a server restart.
+`LoadSources` validates that `key` is non-empty and unique and that `seed_url` parses as an absolute URL. The admin UI at `/admin/crawler` performs CRUD against this file via `WriteSources` (atomic temp+rename) and calls `sources.Registry.Replace` so the next crawler / agent read sees the new snapshot without a server restart.
 
 Deleting a source — whether via the admin UI or by hand-editing `sources.toml` — marks the source's existing `crawl_pages` as `stale` rather than dropping them; embeddings, chunks and stored objects survive until the operator clicks **Purge Stale** on the crawler page. See [crawler.md](crawler.md#deletion-semantics) for the full mark-then-sweep flow and the rationale (typo recovery, history preservation).
 
@@ -107,6 +107,9 @@ enabled = true
 is_llama_cpp = true           # enables llama.cpp /tokenize endpoint
                               # (vision capability lives on [agent.vision].enabled — backends are
                               # transport, models are what supports vision)
+max_retries = 10              # per-call retry budget for transient 5xx (e.g. llama-server crash
+                              # + llama-swap restart). 0 = use llm.DefaultMaxRetries; applies to
+                              # every client targeting this backend (embed, chat, token counter).
 
 # ---------- Pipeline (chunk → embed → retrieve → answer) ----------
 
@@ -220,15 +223,14 @@ judge_model   = 'claude-sonnet-4-6'
 
 ## Backend Resolution
 
-`server.Server.resolveEmbedClient()` and `resolveChatClient()` (in `internal/server/wiring.go`) are called both at startup and on every admin-UI config save (via `rebuildClients()`):
+`server.Server.resolveEmbedClient()`, `resolveChatClient()` and `resolveRerankClient()` (in `internal/server/wiring.go`) are called both at startup and on every admin-UI config save (via `rebuildClients()`):
 1. Look up the backend by name from the `[[backends]]` array
-2. Merge stage-specific config (model, batch_size for embedding; model, max_tokens, temperature for agent)
-3. Build an `llm.EmbedClient` or `llm.ChatClient` with the resolved settings
+2. Merge stage-specific config (model + batch_size for embedding; model + max_tokens + temperature for agent; model + max_tokens + reserved_tokens + timeout for reranker)
+3. Build an `llm.EmbedClient`, `llm.ChatClient`, or `llm.RerankClient` with the resolved settings
 
 `resolveCounter()` creates the appropriate token counter:
 - `is_llama_cpp = true` -> `LlamaCppCounter` (HTTP `/tokenize` endpoint)
-- `is_llama_cpp = false` -> `TiktokenCounter` (tiktoken-go library)
-- Fallback -> `EstimateCounter` (len/4)
+- `is_llama_cpp = false` -> `TiktokenCounter` (tiktoken-go library); errors out if the model is unknown to tiktoken
 
 ## Auto-Detection (llama.cpp)
 
@@ -258,3 +260,4 @@ The TOML layout was reorganized to group infrastructure / pipeline / ingest sect
 | `[agent] public_base_url`            | `[agent.vision] public_base_url`       |
 | `[agent] max_images_per_call`        | `[agent.vision] max_images_per_call`   |
 | `[agent] max_image_bytes_per_call`   | `[agent.vision] max_image_bytes_per_call` |
+| `[[backends]] supports_vision`       | `[agent.vision] enabled` (moved to the agent stage — vision is a model property, not a backend one) |

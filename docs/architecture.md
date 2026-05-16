@@ -32,7 +32,9 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 |        +-->  prompts/     (system prompts)               |
 |        +-->  domain/      (core types)                   |
 |        +-->  config/      (TOML + env var config)        |
+|        +-->  sources/     (crawl-source registry)        |
 |        +-->  backend/     (LLM backend discovery)        |
+|        +-->  diag/        (health-issue registry)        |
 |        +-->  markers/     (inline image-ref syntax)      |
 +----------------------------------------------------------+
 ```
@@ -44,17 +46,19 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `config` | Centralized config types, koanf loading (TOML + env vars), `WriteTo()` for persistence |
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
-| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with `semantic_search`, `list_sources` and `read_document` tools; single entry point for all conversations |
-| `rag` | Retrieval service (retrieve + build context + ingest); takes embedder only |
+| `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with `semantic_search` and `read_document` tools; single entry point for all conversations |
+| `rag` | Retrieval service (retrieve + build context + ingest); takes store + embedder + chunker + counter, plus optional reranker — no chat client |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling; cross-encoder reranker client (`rerank.go`, llama.cpp `/v1/rerank`) |
-| `store` | SQLite document/chunk storage, cosine similarity vector search, backend + crawl source CRUD |
+| `store` | SQLite document/chunk storage, cosine similarity vector search, FTS5 BM25 keyword search, crawl-page/run + artifact CRUD (backends and crawl sources live in TOML, not SQLite) |
 | `crawler` | BFS web crawler: 3-stage pipeline (crawl -> parse -> embed), go-rod for JS pages, go-readability for content extraction, PDF support |
 | `objectstore` | S3-compatible object storage client (RustFS) |
 | `chunking` | StructureAwareChunker (heading-boundary splitting), RecursiveTokenChunker (fallback), RecursiveCharacterChunker (char-based fallback) |
-| `tokencount` | Token counting: LlamaCppCounter (HTTP /tokenize), TiktokenCounter (tiktoken-go), EstimateCounter (len/4 fallback) |
+| `tokencount` | Token counting: LlamaCppCounter (HTTP /tokenize), TiktokenCounter (tiktoken-go) |
 | `session` | Conversation state with TTL expiration |
 | `domain` | Core types: Document, Chunk, SourceReference, Language, CrawlSource, Artifact |
-| `backend` | LLM backend discovery (llama.cpp props, model listing) |
+| `sources` | In-memory `Registry` over `config/sources.toml`; admin edits flow through `Registry.Replace` and the crawler / `list_sources`-style consumers read the snapshot on demand |
+| `backend` | LLM backend discovery (llama.cpp `/props`, model listing) |
+| `diag` | Startup + runtime issue registry surfaced on the admin dashboard (e.g. object-store init failure, missing sources file); supports per-issue `Recheck` callbacks |
 | `prompts` | `text/template` system prompt rendering with data injection (doc/chunk counts) |
 | `markers` | `[[image:ref]]` syntax + `ExtractBoundaries` helper used by the parser→chunker handoff to map each chunk's source span to image artifact refs (stored separately on `chunks.image_refs`, not in chunk text) |
 | `server` | Application wiring (backend resolution, client construction, hot-rebuild on config save), HTTP server lifecycle |
@@ -106,8 +110,7 @@ The agent is the single entry point for all conversations. It owns the system pr
 
 | Tool | Purpose |
 |------|---------|
-| `semantic_search` | Top-K dense / hybrid retrieval. Optional `source_keys` (explicit) and `tags` (resolved against the registry; OR within the list) scope retrieval to a subset of the corpus; when both are supplied they UNION (additive scoping). Empty union under a non-empty filter returns an actionable error rather than falling back to a full-corpus search. Reads each retrieved chunk's `ImageRefs` to attach the matching artifacts when the backend supports vision. |
-| `list_sources` | Returns the operator-curated source catalogue (`{key, name, description, tags}` for every enabled source) so the agent can pick `source_keys` and/or `tags` to scope a follow-up `semantic_search` for narrow topical queries. Reads the in-memory registry, which the admin handler swaps atomically on edits — no file I/O on the hot path. |
+| `semantic_search` | Top-K dense / hybrid retrieval (optional `top_k` override). Reads each retrieved chunk's `ImageRefs` to attach the matching artifacts when the backend supports vision. A previous `source_keys` / `tags` scoping path and the companion `list_sources` tool were reverted on 2026-05-09 after an accuracy regression on small models. |
 | `read_document` | Fetch a full document by URL (for follow-up after a too-narrow snippet). Optional `query` runs a doc-scoped dense search and returns the top-K chunks within that document. Reuses `documents.content` and the per-doc chunk vectors — RustFS is not on the read path. |
 
 ```
@@ -145,20 +148,23 @@ Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config sa
 ## Storage
 
 ```
-RustFS (S3)             SQLite                config/
-+----------------+      +--------------------+ +-------------+
-| Raw HTML       |      | documents          | | config.toml |
-| Raw PDFs       |      | chunks             | | sources.toml|
-| crawl/{type}   |      | chunk_embeddings   | +-------------+
-|   /{sha256}    |      | document_artifacts |
-| Page images    |      | backends           |
-| crawl/img/     |      | crawl_pages        |
-|   {sha256}/    |      | crawl_runs         |
-|   {ref}.png    |      |                    |
-+----------------+      +--------------------+
+RustFS (S3)             SQLite                            config/
++----------------+      +-------------------------------+ +-------------+
+| Raw HTML       |      | documents                     | | config.toml |
+| Raw PDFs       |      | chunks (+ image_refs column)  | | sources.toml|
+| crawl/{type}   |      | chunks_fts  (FTS5 virtual)    | +-------------+
+|   /{sha256}    |      | chunk_embeddings              |
+| Page images    |      | document_artifacts            |
+| crawl/img/     |      | crawl_pages                   |
+|   {sha256}/    |      | crawl_runs                    |
+|   {ref}.png    |      |                               |
++----------------+      +-------------------------------+
 ```
 
-Crawl sources live in `config/sources.toml`, not the database. `crawl_pages.source_key` and `crawl_runs.source_key` reference the stable slug from each `[[sources]]` block. Admin CRUD writes back to `sources.toml` and hot-reloads the running crawler via `Crawler.SetSources`.
+Backends (`[[backends]]`) and crawl sources (`[[sources]]`) live in the TOML files,
+not in SQLite — admin CRUD writes the file and updates the in-memory snapshot.
+
+Crawl sources live in `config/sources.toml`, not the database. `crawl_pages.source_key` and `crawl_runs.source_key` reference the stable slug from each `[[sources]]` block. Admin CRUD writes back to `sources.toml` and calls `sources.Registry.Replace` so the crawler (and any other consumer) picks up the new snapshot on its next read — no server restart required.
 
 **Why both?** RustFS preserves raw content for re-processing. SQLite holds structured data, metadata, and vectors. Brute-force cosine similarity in Go, with an in-memory embedding cache warmed at startup so retrieval avoids re-loading 16 K BLOBs from SQLite per query (~37 ms cached vs ~370 ms uncached at the current corpus); see [ADR-002](decisions/002-brute-force-cosine.md).
 

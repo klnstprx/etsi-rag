@@ -7,13 +7,13 @@ Accepted
 Embedding and chat may use different backends (e.g., local embedding model + remote chat model). A single LLM client per stage is too rigid. Additionally, a monolithic `llm.Client` carries unused fields for each role: a chat-only client has an unused `embedBatchSize`; an embed-only client has unused `maxTokens`/`temperature`.
 
 ## Decision
-Split both the interfaces and the concrete implementations:
-- **Interfaces**: `llm.Embedder` (Embed, EmbedBatch) + `llm.Chatter` (Chat, ChatStream)
-- **Concrete types**: `llm.EmbedClient` (embedding-specific fields: batchSize) + `llm.ChatClient` (chat-specific fields: maxTokens, temperature). `ChatWithTools` lives on `ChatClient`.
-- RAG pipeline takes `llm.Embedder` only (pure retrieval service, no chatter)
+Split the concrete implementations and expose an interface only where a consumer actually needs to swap impls:
+- **Interface**: `llm.Embedder` (Embed, EmbedBatch) — the RAG pipeline depends on this so tests can substitute a stub. No `Chatter` interface is exported; the agent depends on `*llm.ChatClient` concretely.
+- **Concrete types**: `llm.EmbedClient` (embedding-specific fields: batchSize) + `llm.ChatClient` (chat-specific fields: maxTokens, temperature). `ChatWithTools` and `ChatStreamWithTools` live on `ChatClient`.
+- RAG pipeline takes `llm.Embedder` only (pure retrieval service, no chat client)
 - API handler takes `llm.Embedder` + delegates chat to `agent.Agent`
-- Agent takes `*llm.ChatClient` concretely (needs `ChatWithTools`)
-- The `server` package resolves backends via `resolveEmbedClient()` and `resolveChatClient()` (in `internal/server/wiring.go`)
+- Agent takes `*llm.ChatClient` concretely (needs the tool-calling methods)
+- The `server` package resolves backends via `resolveEmbedClient()` and `resolveChatClient()` (in `internal/server/wiring.go`); the reranker stage adds `resolveRerankClient()` for the llama.cpp `/v1/rerank` extension.
 
 Backend config (`[[backends]]`) defines named endpoints. Stage config (`[embedding]`, `[agent]`) references a backend by name and adds model-specific settings. The `[chat]` stage was removed — the agent is the single entry point for all conversations.
 

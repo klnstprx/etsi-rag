@@ -122,9 +122,9 @@ graph TD
 flowchart TB
     subgraph Ingestion["Ingestion Flow"]
         direction TB
-        Doc["Document<br/>(markdown + [[image:ref]] markers)"] --> Chunk["Chunk<br/>(StructureAwareChunker)"]
-        Chunk --> Embed["Embed chunks<br/>(markers stripped in-flight)"]
-        Embed --> StoreDoc["Store document +<br/>chunks + embeddings +<br/>chunks_fts (FTS5)"]
+        Doc["Document<br/>(markdown + [[image:ref]] markers)"] --> Chunk["Chunk<br/>(StructureAwareChunker:<br/>strips markers, stamps<br/>chunks.image_refs)"]
+        Chunk --> Embed["Embed chunks<br/>(marker-free content)"]
+        Embed --> StoreDoc["Store document +<br/>chunks (+ image_refs) +<br/>embeddings + chunks_fts (FTS5)"]
         Doc -.->|"page renders / screenshots"| Artifacts["document_artifacts<br/>(RustFS PNGs)"]
     end
 
@@ -201,7 +201,9 @@ flowchart TB
     Check -->|"Yes"| Execute["Execute tool(s)"]
 
     Execute --> SemanticSearch["semantic_search<br/>(retrieve + build context)"]
+    Execute --> ReadDocument["read_document<br/>(whole-doc fetch, or<br/>doc-scoped dense search<br/>when query is set)"]
     SemanticSearch --> Result["ToolResult<br/>{Text, Citations, Images}"]
+    ReadDocument --> Result
 
     Result --> AggCite["Aggregate Citations<br/>(into ChatResult/ToolEvent)"]
     AggCite --> Append["Append tool message<br/>to history"]
@@ -288,6 +290,7 @@ erDiagram
         text content
         int chunk_index
         text section_title
+        text image_refs "comma-separated PNG refs (p1,p2,full,…)"
     }
 
     chunks_fts {

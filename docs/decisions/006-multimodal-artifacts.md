@@ -1,7 +1,7 @@
 # ADR-006: Multimodal Image Artifacts via Inline Markers
 
 ## Status
-Accepted
+Accepted — implementation evolved 2026-05-09 (see [Update](#update-2026-05-09-chunker-side-stamping) at the end of this file).
 
 ## Context
 Text-only RAG can't answer questions about layout-heavy documents (UMA
@@ -108,3 +108,32 @@ also recorded for future use.
   misattributing it.
 - **Backwards compatibility**: every chunk with a marker that has no
   matching artifact row is silently text-only. No errors propagate.
+
+## Update 2026-05-09: chunker-side stamping
+
+The original design above had per-line markers ride through chunking
+unchanged, and the embedder stripped them in-flight. In practice this
+meant every chunk's text had to be scanned at retrieval time to figure
+out which artifacts it implied, and the marker noise complicated the
+chunker's section-boundary logic.
+
+Replaced with a parser→chunker handoff:
+
+- The PDF parser emits one `[[image:pN]]` line at the top of each page
+  (sparse, no per-line repetition). HTML parsing emits `[[image:full]]`
+  once at the top when a go-rod screenshot was captured.
+- `markers.ExtractBoundaries` returns the marker positions alongside
+  marker-free text.
+- The chunker (`StructureAwareChunker`) walks the boundaries while
+  splitting, stamps each emitted chunk with the refs whose page range
+  overlaps the chunk's source span, and stores them in a new
+  `chunks.image_refs` column (comma-separated `p1,p2,full,…`).
+- Chunk content is marker-free from the moment it leaves the chunker;
+  the embedder and the agent both consume clean text. Retrieval reads
+  `Chunk.ImageRefs` directly to look up `document_artifacts` and build
+  the synthetic vision user message.
+
+The on-the-wire vision-injection design (synthetic follow-up user
+message with `image_url` parts) and the capability-flag decision
+(`agent.vision.enabled`, with `modalities.vision` as a hint) are
+unchanged.

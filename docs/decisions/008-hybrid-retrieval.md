@@ -32,8 +32,10 @@ Mechanics:
 - **Index.** Single FTS5 virtual table, `chunks_fts`, declared with
   `content='chunks', content_rowid='id'` (external content) so it indexes
   `chunks.content` without duplicating bytes. AFTER INSERT/UPDATE/DELETE
-  triggers on `chunks` keep it in sync; a one-time idempotent backfill
-  populates the index for chunks already in the DB.
+  triggers on `chunks` keep it in sync. Chunks that predate the FTS5
+  table are not retroactively indexed; populate an existing corpus by
+  running the admin **Reprocess** flow, which re-ingests every
+  `fetched` page from the archived RustFS bytes (no re-fetch).
 - **Tokenizer.** `unicode61 remove_diacritics 2` folds Spanish accents
   (`María` ↔ `maria`). No stemmer, no stop words — short factoid queries
   lose signal when stop-style tokens are stripped.

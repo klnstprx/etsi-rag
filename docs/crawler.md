@@ -6,9 +6,9 @@ BFS web crawler for ETSI Informatica (UMA) content acquisition. Fetches HTML pag
 
 ## Sources
 
-Seed URLs live in `config/sources.toml` (single source of truth) — see [configuration.md](configuration.md#crawl-sources) for the schema. The crawler holds an in-memory snapshot loaded at boot; the admin UI mutates the file and calls `Crawler.SetSources` to hot-reload it for the next run. Per-URL state (`crawl_pages`) and per-run history (`crawl_runs`) reference each source by its stable `key` slug.
+Seed URLs live in `config/sources.toml` (single source of truth) — see [configuration.md](configuration.md#crawl-sources) for the schema. The crawler reads the live snapshot from a shared `sources.Registry`; the admin UI mutates the file and calls `Registry.Replace` so the next crawl run sees the change without a server restart. Per-URL state (`crawl_pages`) and per-run history (`crawl_runs`) reference each source by its stable `key` slug.
 
-Each source also carries a `description` and a list of `tags`. These are agent-facing only — surfaced through the `list_sources` tool so the agent can pass `source_keys` to `semantic_search` for scoped retrieval. They are not stored on documents and not used as SQL filters at ingest or retrieval time.
+Each source also carries a `description` and a list of `tags`. They are surfaced in the admin Documents view (joined through `crawl_pages`) for operator filtering, and remain in the schema as forward-compatibility for a future agent-facing scoping tool. A previous `list_sources` tool that exposed them to the agent was reverted on 2026-05-09 after an accuracy regression on small models; today they are not visible to the agent and are not used as SQL filters at ingest or retrieval time.
 
 ### Deletion semantics
 

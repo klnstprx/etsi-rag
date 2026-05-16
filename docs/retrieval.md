@@ -65,7 +65,11 @@ of the same term saturates; `b` controls whether long chunks get penalised
   `content='chunks', content_rowid='id'` (external content) so the index
   references rows in the `chunks` table without duplicating bytes. AFTER
   INSERT/UPDATE/DELETE triggers on `chunks` keep the index in sync. See
-  `internal/store/db.go`.
+  `internal/store/db.go`. There is no idempotent backfill: chunks that
+  predate the FTS5 table are not retroactively indexed — populate an
+  existing corpus via the admin **Reprocess** flow (which re-ingests
+  every `fetched` `crawl_page` through `pipeline.Ingest`, replaying the
+  archived bytes from RustFS without re-fetching).
 - **Score function.** SQLite's built-in `bm25()` aggregator. It implements
   the BM25F generalisation; for a single column this reduces to standard
   BM25 with `k1 = 1.2, b = 0.75` (the canonical Robertson defaults).
