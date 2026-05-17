@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/ingest"
 	"etsi-rag/internal/markers"
-	"etsi-rag/internal/rag"
 )
 
 // crawlStageAll runs BFS crawl for all enabled sources concurrently, sending items to parseCh.
@@ -375,7 +375,7 @@ func (c *Crawler) embedStage(
 		// (same content reached via another URL, or an earlier crawl of this
 		// URL), skip the embed and just record the URL — unless force is set,
 		// in which case delete the stale doc (chunks/embeddings cascade) so
-		// pipeline.Ingest can re-embed with the current model. This is the
+		// ingester.Ingest can re-embed with the current model. This is the
 		// reprocess-after-model-change path: without the delete, CreateDocument
 		// would hit the PK and stale embeddings would linger.
 		docExists, err := c.store.DocumentExists(ctx, docID)
@@ -423,11 +423,11 @@ func (c *Crawler) embedStage(
 			Language: language,
 		}
 
-		if _, _, err := c.pipeline.Ingest(ctx, []domain.Document{doc}); err != nil {
+		if _, _, err := c.ingester.Ingest(ctx, []domain.Document{doc}); err != nil {
 			// Chunking failures (e.g. tokenizer quirks on malformed sections) are
 			// document-specific and shouldn't trip the consecutive-embed-fail circuit
 			// breaker — the backend is healthy, the document just can't be processed.
-			chunkErr := errors.Is(err, rag.ErrChunking)
+			chunkErr := errors.Is(err, ingest.ErrChunking)
 			if chunkErr {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("chunking failed")
 			} else {

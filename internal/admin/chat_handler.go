@@ -23,15 +23,12 @@ type chatStream struct {
 	cancel context.CancelFunc
 }
 
-// SetAgent sets the agent instance for chat handlers (thread-safe).
-func (h *Handler) SetAgent(a *agent.Agent) {
-	h.agent.Store(a)
-}
-
 // GetAgent returns the currently installed agent (or nil). Thread-safe;
 // exposed for diagnostic tests that verify rebuild wiring is preserved.
+// The agent itself lives in the shared *agent.Handle owned by the server —
+// admin and api both read from that single source of truth.
 func (h *Handler) GetAgent() *agent.Agent {
-	return h.agent.Load()
+	return h.agentHandle.Get()
 }
 
 // ChatPage handles GET /admin/chat.
@@ -72,7 +69,7 @@ func (h *Handler) ChatSend(w http.ResponseWriter, r *http.Request) {
 	// Run agent in background if available.
 	// The goroutine only closes the channels when done — ChatStream handles
 	// map cleanup, so the stream entry survives until the SSE client connects.
-	ag := h.agent.Load()
+	ag := h.agentHandle.Get()
 	if ag == nil {
 		go func() {
 			defer close(tokenChan)

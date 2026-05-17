@@ -15,6 +15,7 @@ import (
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/ingest"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
@@ -53,22 +54,24 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	s := store.NewSQLiteStore(db, func() int { return 4 })
 	mock := &mockEmbedder{}
 	counter := &testutil.MockCounter{}
-	pipeline := rag.NewPipeline(s, mock, testutil.FakeChunker{}, counter, config.RetrievalConfig{
+	h := llm.NewEmbedderHandle(mock)
+	retriever := rag.NewRetriever(s, h, counter, config.RetrievalConfig{
 		TopK:             5,
 		MaxContextTokens: 1024,
 	})
+	ingester := ingest.NewIngester(s, h, testutil.FakeChunker{})
 	sessionStore := session.NewStore(config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600})
 	t.Cleanup(sessionStore.Close)
 
-	h := NewHandler(HandlerConfig{
-		EmbeddingClient: mock,
-		Counter:         counter,
-		Pipeline:        pipeline,
-		Store:           s,
-		SessionStore:    sessionStore,
+	handler := NewHandler(HandlerConfig{
+		AgentHandle:  agent.NewHandle(nil),
+		Retriever:    retriever,
+		Ingester:     ingester,
+		Store:        s,
+		SessionStore: sessionStore,
 	})
 
-	return h, s
+	return handler, s
 }
 
 // TestGetArtifact_NotFound covers the 404 path: when the {token} doesn't
@@ -488,7 +491,7 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 	})
 
 	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
-	h.SetAgent(ag)
+	h.agentHandle.Set(ag)
 
 	// Create a session in the shared store
 	sessionID := h.sessionStore.Create()

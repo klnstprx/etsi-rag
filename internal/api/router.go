@@ -38,7 +38,6 @@ func NewRouter(handler *Handler, logger zerolog.Logger, requestTimeout time.Dura
 
 		// Standard OpenAI endpoints (proxied to llama-server or handled locally)
 		r.Post("/chat/completions", handler.ChatCompletions)
-		r.Post("/embeddings", handler.Embeddings)
 
 		// Image artifact serving — fed to vision-capable LLMs as image_url.
 		// {token} is the artifact's opaque public_token; .png suffix is

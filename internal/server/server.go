@@ -19,6 +19,8 @@ import (
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/diag"
+	"etsi-rag/internal/ingest"
+	"etsi-rag/internal/llm"
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
@@ -29,17 +31,27 @@ import (
 )
 
 // Server holds all live application components.
+//
+// The embedder and agent are owned by shared handles (single source of truth
+// for hot-swapped runtime resources). Retriever and Ingester both reference
+// the same EmbedderHandle so the "one embedding model per corpus" invariant
+// is enforced by construction; admin and api both reference the same
+// AgentHandle so a config-reload swap propagates without parallel SetAgent
+// fanout.
 type Server struct {
 	cfg        *config.Config
 	configPath string
 	logger     zerolog.Logger
 
-	store        *store.SQLiteStore
-	sessionStore *session.Store
-	pipeline     *rag.Pipeline
-	sources      *sources.Registry
-	crawler      *crawler.Crawler
-	diag         *diag.Registry
+	store          *store.SQLiteStore
+	sessionStore   *session.Store
+	embedderHandle *llm.EmbedderHandle
+	agentHandle    *agent.Handle
+	retriever      *rag.Retriever
+	ingester       *ingest.Ingester
+	sources        *sources.Registry
+	crawler        *crawler.Crawler
+	diag           *diag.Registry
 
 	apiHandler   *api.Handler
 	adminHandler *admin.Handler
@@ -92,30 +104,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		baseCancel: baseCancel,
 	}
 
-	// Warm the in-memory embedding cache so the first user query doesn't pay
-	// the ~300 ms full-table BLOB load. Failures are non-fatal: SearchSimilar
-	// transparently falls back to a SQL scan when the cache is unloaded. The
-	// warm path is one-shot at boot — RequiresRestart=true on the dashboard.
-	{
-		warmStart := time.Now()
-		if n, err := sqliteStore.Warm(context.Background()); err != nil {
-			logger.Warn().Err(err).Msg("embedding cache warm failed; SearchSimilar will use SQL fallback")
-			s.diag.Set(diag.Issue{
-				ID:              "embedding.warm",
-				Component:       "embedding",
-				Severity:        diag.SeverityWarn,
-				Message:         "Embedding cache failed to warm; falling back to SQL scan",
-				Detail:          err.Error(),
-				Hint:            "Restart the server to retry the cache warm.",
-				RequiresRestart: true,
-			})
-		} else {
-			logger.Info().
-				Int("chunks", n).
-				Dur("duration", time.Since(warmStart)).
-				Msg("embedding cache warmed")
-		}
-	}
+	s.warmEmbeddingCache(context.Background())
 
 	// Resolve embedding backend and create client (graceful: nil on failure).
 	// Re-runnable via rebuildClients on admin save.
@@ -125,6 +114,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		logger.Warn().Err(err).Msg("embedding backend not available")
 	}
 	s.publishProbeResult(issueEmbeddingBackend, err)
+	s.embedderHandle = llm.NewEmbedderHandle(embeddingClient)
 
 	// Initialize token counter, probe llama.cpp for auto-detection, then create chunker
 	embeddingCounter, err := s.resolveCounter(cfg.Embedding.Backend, cfg.Embedding.Model)
@@ -135,88 +125,41 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	s.probeLlamaCppBackends()
 	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
 
-	// Initialize RAG pipeline (may have nil embedder — guarded in pipeline methods)
-	s.pipeline = rag.NewPipeline(sqliteStore, embeddingClient, chunker, embeddingCounter, cfg.Retrieval)
+	// Build the retrieval and ingest sides. Both share the same embedder
+	// handle so a config-reload swap reaches them in lockstep.
+	s.retriever = rag.NewRetriever(sqliteStore, s.embedderHandle, embeddingCounter, cfg.Retrieval)
+	s.ingester = ingest.NewIngester(sqliteStore, s.embedderHandle, chunker)
 
 	// Wire optional reranker. Disabled = no-op; resolution failures degrade
 	// retrieval to the un-reranked path without crashing the server.
 	s.attachReranker()
 
-	// Initialize object store (graceful: nil on failure). Built once at boot;
-	// no in-process re-init path today, hence RequiresRestart on the issue.
-	objStore, err := objectstore.New(cfg.ObjectStore)
-	if err != nil {
-		logger.Warn().Err(err).Msg("object store not available")
-		objStore = nil
-		s.diag.Set(diag.Issue{
-			ID:              "objectstore.unavailable",
-			Component:       "objectstore",
-			Severity:        diag.SeverityError,
-			Message:         "Object store (RustFS) not available; crawler and image artifacts disabled",
-			Detail:          err.Error(),
-			Hint:            "Start RustFS, then restart the server.",
-			RequiresRestart: true,
-		})
-	}
+	objStore := s.attachObjectStore()
 
-	// Load crawl sources from config/sources.toml. The Registry is the single
-	// in-memory source of truth at runtime; admin CRUD calls Replace, the
-	// crawler reads Snapshot on each run, the agent's list_sources reads
-	// Snapshot on each turn. The first boot copies sources.default.toml.
+	// Sources: in-memory registry seeded from sources.toml, reconciled
+	// against any orphaned crawl_pages rows whose source_key disappeared.
 	configDir := filepath.Dir(configPath)
-	if err := config.EnsureSourcesFile(configDir); err != nil {
-		logger.Warn().Err(err).Msg("ensuring sources.toml")
-		s.diag.Set(diag.Issue{
-			ID: "sources.ensure", Component: "sources", Severity: diag.SeverityError,
-			Message: "Could not seed sources.toml from sources.default.toml",
-			Detail:  err.Error(),
-			Hint:    "Verify the config directory is writable and the default file exists.",
-		})
-	} else {
-		s.diag.Clear("sources.ensure")
-	}
-	s.sources = sources.New(config.SourcesPath(configDir), logger)
-	s.sources.SetDiag(s.diag) // sources.parse / sources.empty are published from here on
-	loadErr := s.sources.Load()
-	if loadErr != nil {
-		logger.Warn().Err(loadErr).Msg("loading sources.toml; crawler will start with no sources")
-	}
+	s.loadAndReconcileSources(configDir)
 
-	// Reconcile crawl_pages with the loaded sources: any page whose source_key
-	// no longer appears in sources.toml gets marked stale, so a hand-edit that
-	// removes a source has the same effect as deleting it via the admin UI.
-	// The operator clears the rows by running Purge Stale. Skip on parse
-	// failure — we don't want a broken file to mass-stale the corpus.
-	if loadErr == nil {
-		n, recErr := sqliteStore.MarkOrphanPagesStale(context.Background(), s.sources.KnownKeys())
-		if recErr != nil {
-			logger.Warn().Err(recErr).Msg("reconciling orphan crawl pages")
-		} else if n > 0 {
-			logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
-		}
-		s.publishProbeResult(issueSourcesReconcile, recErr)
-	}
-
-	// Initialize crawler only if dependencies are available
+	// Initialize crawler only if dependencies are available.
 	if embeddingClient != nil && objStore != nil {
-		s.crawler = crawler.New(sqliteStore, objStore, s.pipeline, cfg.Crawler, s.sources, logger)
+		s.crawler = crawler.New(sqliteStore, objStore, s.ingester, cfg.Crawler, s.sources, logger)
 		s.diag.Clear("crawler.disabled")
 	} else {
 		logger.Warn().Msg("crawler disabled (requires embedding backend + object store)")
-		s.diag.Set(diag.Issue{
-			ID:              "crawler.disabled",
-			Component:       "crawler",
-			Severity:        diag.SeverityWarn,
-			Message:         "Crawler disabled (requires embedding backend + object store)",
-			Hint:            "Fix the embedding backend and object store, then restart.",
-			RequiresRestart: true,
-		})
+		s.warnIssue("crawler.disabled", "crawler", diag.SeverityWarn,
+			"Crawler disabled (requires embedding backend + object store)",
+			"",
+			"Fix the embedding backend and object store, then restart.",
+			true)
 	}
 
 	// Initialize session store
 	s.sessionStore = session.NewStore(cfg.Session)
 
-	// Create agent (only if [agent] backend is configured)
+	// Create agent (only if [agent] backend is configured) and wrap it in
+	// the shared handle. admin and api both read from this handle so a
+	// rebuild swap is observed by both without parallel SetAgent calls.
 	var agentInstance *agent.Agent
 	if cfg.Agent.Backend != "" {
 		s.diag.Clear(issueAgentNoBackend.ID)
@@ -236,17 +179,17 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		logger.Warn().Msg("no [agent] backend configured, agent disabled")
 		s.diag.Set(issueAgentNoBackend)
 	}
+	s.agentHandle = agent.NewHandle(agentInstance)
 
 	// Create API handler and router
 	s.apiHandler = api.NewHandler(api.HandlerConfig{
-		EmbeddingClient: embeddingClient,
-		Counter:         embeddingCounter,
-		Agent:           agentInstance,
-		Pipeline:        s.pipeline,
-		Store:           sqliteStore,
-		SessionStore:    s.sessionStore,
-		ObjStore:        objStore,
-		Passthrough:     cfg.Agent.Passthrough,
+		AgentHandle:  s.agentHandle,
+		Retriever:    s.retriever,
+		Ingester:     s.ingester,
+		Store:        sqliteStore,
+		SessionStore: s.sessionStore,
+		ObjStore:     objStore,
+		Passthrough:  cfg.Agent.Passthrough,
 	})
 	router := api.NewRouter(s.apiHandler, logger, time.Duration(cfg.Server.RequestTimeout)*time.Second)
 
@@ -259,13 +202,13 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Sources:      s.sources,
 		Diag:         s.diag,
 		SessionStore: s.sessionStore,
+		AgentHandle:  s.agentHandle,
 		Crawler:      s.crawler,
-		Pipeline:     s.pipeline,
+		Ingester:     s.ingester,
 		ObjStore:     objStore,
 		Logger:       logger,
 		BaseCtx:      s.baseCtx,
 	})
-	s.adminHandler.SetAgent(agentInstance)
 	s.adminHandler.SetOnConfigSave(s.rebuildClients)
 
 	// Register diag rechecks so the dashboard "Re-check" button has work to do
@@ -286,6 +229,96 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	}
 
 	return s, nil
+}
+
+// warmEmbeddingCache loads the chunk embeddings BLOB cache up-front so the
+// first query doesn't pay the ~300 ms scan latency. Non-fatal: SearchSimilar
+// transparently falls back to a SQL scan when the cache is unloaded. The warm
+// path is one-shot at boot — RequiresRestart=true on the dashboard.
+func (s *Server) warmEmbeddingCache(ctx context.Context) {
+	warmStart := time.Now()
+	n, err := s.store.Warm(ctx)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("embedding cache warm failed; SearchSimilar will use SQL fallback")
+		s.warnIssue("embedding.warm", "embedding", diag.SeverityWarn,
+			"Embedding cache failed to warm; falling back to SQL scan",
+			err.Error(),
+			"Restart the server to retry the cache warm.",
+			true)
+		return
+	}
+	s.logger.Info().
+		Int("chunks", n).
+		Dur("duration", time.Since(warmStart)).
+		Msg("embedding cache warmed")
+}
+
+// attachObjectStore builds the optional object store client. Failures degrade
+// the crawler and image-artifact paths without crashing the server. Returns
+// nil on failure; callers must nil-check before passing downstream.
+func (s *Server) attachObjectStore() *objectstore.Client {
+	objStore, err := objectstore.New(s.cfg.ObjectStore)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("object store not available")
+		s.warnIssue("objectstore.unavailable", "objectstore", diag.SeverityError,
+			"Object store (RustFS) not available; crawler and image artifacts disabled",
+			err.Error(),
+			"Start RustFS, then restart the server.",
+			true)
+		return nil
+	}
+	return objStore
+}
+
+// loadAndReconcileSources seeds sources.toml from the default file if absent,
+// loads it into the in-memory Registry, and reconciles crawl_pages rows whose
+// source_key disappeared since the last load (marks them stale so Purge Stale
+// can clear them, matching the admin-UI delete semantics).
+func (s *Server) loadAndReconcileSources(configDir string) {
+	if err := config.EnsureSourcesFile(configDir); err != nil {
+		s.logger.Warn().Err(err).Msg("ensuring sources.toml")
+		s.warnIssue("sources.ensure", "sources", diag.SeverityError,
+			"Could not seed sources.toml from sources.default.toml",
+			err.Error(),
+			"Verify the config directory is writable and the default file exists.",
+			false)
+	} else {
+		s.diag.Clear("sources.ensure")
+	}
+
+	s.sources = sources.New(config.SourcesPath(configDir), s.logger)
+	s.sources.SetDiag(s.diag) // sources.parse / sources.empty are published from here on
+	loadErr := s.sources.Load()
+	if loadErr != nil {
+		s.logger.Warn().Err(loadErr).Msg("loading sources.toml; crawler will start with no sources")
+		return
+	}
+
+	// Reconcile crawl_pages with the loaded sources: any page whose source_key
+	// no longer appears in sources.toml gets marked stale. Skip on parse
+	// failure — we don't want a broken file to mass-stale the corpus.
+	n, recErr := s.store.MarkOrphanPagesStale(context.Background(), s.sources.KnownKeys())
+	if recErr != nil {
+		s.logger.Warn().Err(recErr).Msg("reconciling orphan crawl pages")
+	} else if n > 0 {
+		s.logger.Info().Int("pages", n).Msg("marked orphan crawl pages stale (source removed from sources.toml)")
+	}
+	s.publishProbeResult(issueSourcesReconcile, recErr)
+}
+
+// warnIssue builds and publishes a diag.Issue from inline parameters. Used
+// for the one-shot RequiresRestart issues that don't share a template with
+// the rebuild-replayable issues in diag.go (those go through publishProbeResult).
+func (s *Server) warnIssue(id, component string, severity diag.Severity, message, detail, hint string, requiresRestart bool) {
+	s.diag.Set(diag.Issue{
+		ID:              id,
+		Component:       component,
+		Severity:        severity,
+		Message:         message,
+		Detail:          detail,
+		Hint:            hint,
+		RequiresRestart: requiresRestart,
+	})
 }
 
 // Run starts the HTTP server and blocks until a shutdown signal is received.

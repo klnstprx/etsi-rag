@@ -26,7 +26,7 @@ Three-stage concurrent pipeline using Go channels:
 ```
 [Stage 1: Crawl]  -->  [Stage 2: Parse]  -->  [Stage 3: Embed]
    BFS traversal        Content extraction      Chunk + store
-   Rate-limited HTTP    go-readability (HTML)    pipeline.Ingest()
+   Rate-limited HTTP    go-readability (HTML)    ingester.Ingest()
    go-rod (JS pages)    pdftotext (PDF)          SQLite + RustFS
 ```
 
@@ -85,7 +85,7 @@ PDFs from archived bytes for free; HTML screenshots require a fresh crawl.
    e. Compare with existing `crawl_pages` record
    f. **Unchanged**: update `last_crawled_at`, skip ingestion
    g. **Content already seen** (same hash via another URL): upsert a `crawl_pages` row pointing at the existing document, skip re-embedding
-   h. **New content**: `pipeline.Ingest()` -> upsert `crawl_pages`
+   h. **New content**: `ingester.Ingest()` -> upsert `crawl_pages`
 3. Normalize each discovered link (strip tracking params + sort query keys), then enqueue if it passes `shouldFollow()`
 4. After source complete: mark unvisited pages as `status='stale'`; after the run: `PurgeOrphanDocuments()` drops documents no longer referenced by any `crawl_pages`
 5. Global `max_pages` counter shared via `atomic.Int64`
@@ -130,7 +130,7 @@ Rejected pages increment the `Skipped` progress counter and are logged at debug 
 Reprocess sets the embed stage's `force` flag, which changes two things vs. a regular crawl:
 
 - The "content hash unchanged" early-out is skipped, so identical bytes still flow through chunking and embedding.
-- When the content-addressed `doc_id` already exists in `documents`, the stale row is dropped via `DeleteDocument` (chunks and embeddings cascade) and the document is re-ingested with the current embedder/chunker. Without this delete, `pipeline.Ingest` would hit the `documents.id` PK and reprocess would silently skip everything.
+- When the content-addressed `doc_id` already exists in `documents`, the stale row is dropped via `DeleteDocument` (chunks and embeddings cascade) and the document is re-ingested with the current embedder/chunker. Without this delete, `ingester.Ingest` would hit the `documents.id` PK and reprocess would silently skip everything.
 
 This is the supported path after switching embedding model or dimension: save the new model/dimension in the admin config editor, then click **Reprocess**. The admin UI shows a warning toast on the embedding-section save when either field changed.
 

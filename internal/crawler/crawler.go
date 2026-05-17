@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/ingest"
 	"etsi-rag/internal/objectstore"
-	"etsi-rag/internal/rag"
 	"etsi-rag/internal/sources"
 	"etsi-rag/internal/store"
 	"fmt"
@@ -23,7 +23,7 @@ import (
 type Crawler struct {
 	store    *store.SQLiteStore
 	objStore *objectstore.Client
-	pipeline *rag.Pipeline
+	ingester *ingest.Ingester
 	fetcher  *Fetcher
 	browser  *Browser
 	config   config.CrawlerConfig
@@ -42,7 +42,7 @@ type Crawler struct {
 func New(
 	st *store.SQLiteStore,
 	obj *objectstore.Client,
-	pip *rag.Pipeline,
+	ing *ingest.Ingester,
 	cfg config.CrawlerConfig,
 	srcs *sources.Registry,
 	logger zerolog.Logger,
@@ -53,7 +53,7 @@ func New(
 	c := &Crawler{
 		store:    st,
 		objStore: obj,
-		pipeline: pip,
+		ingester: ing,
 		fetcher:  f,
 		config:   cfg,
 		sources:  srcs,
@@ -241,8 +241,8 @@ func (c *Crawler) startWorkers(
 }
 
 func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
-	if err := c.pipeline.Preflight(ctx); err != nil {
-		return 0, fmt.Errorf("preflight: %w", err)
+	if err := c.ingester.HealthCheck(ctx); err != nil {
+		return 0, fmt.Errorf("health check: %w", err)
 	}
 
 	c.mu.RLock()
@@ -370,8 +370,8 @@ func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
 }
 
 func (c *Crawler) runCrawl(ctx context.Context, sourceKey *string) (int64, error) {
-	if err := c.pipeline.Preflight(ctx); err != nil {
-		return 0, fmt.Errorf("preflight: %w", err)
+	if err := c.ingester.HealthCheck(ctx); err != nil {
+		return 0, fmt.Errorf("health check: %w", err)
 	}
 
 	// Capture cancel func for embed abort (set by RunAll/RunSource before this call)

@@ -49,12 +49,13 @@ func setupReadDocFixture(t *testing.T) (*ReadDocumentTool, *store.SQLiteStore) {
 	s := store.NewSQLiteStore(db, func() int { return dim })
 
 	emb := fixedEmbedder{vec: []float32{1, 0, 0, 0}}
-	p := rag.NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
+	h := llm.NewEmbedderHandle(emb)
+	r := rag.NewRetriever(s, h, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             3,
 		MaxContextTokens: 1024,
 	})
 
-	tool := NewReadDocumentTool(p, s)
+	tool := NewReadDocumentTool(r, s)
 	tool.SetDefaultTopK(3) // mirrors retrieval config TopK for the fixture
 	return tool, s
 }

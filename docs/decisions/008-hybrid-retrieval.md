@@ -214,7 +214,7 @@ ranking once the canonical doc is the top hit.
   `Migrate`.
 - `internal/store/chunks.go` — `SearchKeyword`, `sanitizeFTS5Query`.
 - `internal/rag/rrf.go` — `FuseRRF`.
-- `internal/rag/pipeline.go` — `Retrieve` mode switch, `buildRetrievalResult`.
+- `internal/rag/retriever.go` — `Retrieve` mode switch, `buildRetrievalResult`.
 - `internal/config/config.go` — `RetrievalConfig.RetrievalMode`, default,
   validation.
 - `eval/scripts/d1_topk_probe.py` — diagnostic that motivated this work.

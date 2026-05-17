@@ -50,11 +50,11 @@ generation and `BuildContext`.
   hatch — so the auth / retry / base-URL machinery is shared with
   `EmbedClient` / `ChatClient`. No raw `net/http`. The non-OpenAI endpoint
   is the only divergence from the existing pattern.
-- **Pipeline integration.** `Pipeline.Retrieve` over-fetches a wider
+- **Pipeline integration.** `Retriever.Retrieve` over-fetches a wider
   candidate pool (`max(reranker.top_n, top_k * 3, 30)` for hybrid;
   `max(reranker.top_n, top_k)` for dense), reranks, and trims to `top_k`.
   Image markers (`[[image:ref]]`) are stripped before sending — same
-  hygiene the embed path already uses (`Pipeline.Ingest`).
+  hygiene the embed path already uses (`Ingester.Ingest`).
 - **Token-budget guard.** Cross-encoders concatenate (query, doc) into a
   single sequence; both must fit `n_ctx`. `RerankClient.fitToContext`
   tokenises the query, computes a per-doc budget of
@@ -87,10 +87,10 @@ following degrade silently to the un-reranked candidates:
 - token-counter unavailable
 - per-request deadline exceeded
 
-`Pipeline.applyRerank` logs a warn line and returns the pre-rerank
+`applyRerank` (in `internal/rag/retriever.go`) logs a warn line and returns the pre-rerank
 ordering trimmed to `top_k`. **Chats never fail because the reranker is
 offline.** This is the same design choice the embedding stage made:
-`Pipeline.Retrieve` returns errors only for hard failures (no embedder,
+`Retriever.Retrieve` returns errors only for hard failures (no embedder,
 SQL error); transient backend issues degrade the result rather than
 the request.
 
@@ -104,11 +104,11 @@ crashing the server.
 | Boundary | Check | Reaction |
 |---|---|---|
 | `config.Validate` | enabled requires backend / model / `IsLlamaCpp` / `top_n >= top_k` | Reject; admin UI reverts in-memory config |
-| `Server.resolveRerankClient` | re-checks the same invariants | `(nil, error)` → `Pipeline.SetReranker(nil, 0)` |
+| `Server.resolveRerankClient` | re-checks the same invariants | `(nil, error)` → `Retriever.SetReranker(nil, 0)` |
 | `Server.attachReranker` | counter availability | Disables reranker, logs warn |
-| `Pipeline.Retrieve` | nil reranker, single candidate | Skips rerank silently |
+| `Retriever.Retrieve` | nil reranker, single candidate | Skips rerank silently |
 | `RerankClient.fitToContext` | query overflows budget | Returns input ordering, no error |
-| `Pipeline.applyRerank` | request error | Returns un-reranked candidates |
+| `applyRerank` (in `internal/rag/retriever.go`) | request error | Returns un-reranked candidates |
 
 ### Auto-detection
 
@@ -310,7 +310,7 @@ retrieval-tier metrics are not affected.
   unmistakably cross-encoder output, not cosine.
 - **Score interpretation.** Downstream code that compared scores across
   queries (none currently) would see incomparable values when reranking
-  is on. `Pipeline.applyRerank` documents this in a comment block.
+  is on. `applyRerank` (in `internal/rag/retriever.go`) documents this in a comment block.
 
 ## Rejected alternatives
 
@@ -338,7 +338,7 @@ retrieval-tier metrics are not affected.
 - `internal/llm/rerank.go` — `RerankClient`, `Reranker` interface,
   `fitToContext` truncation.
 - `internal/llm/llm.go` — `Reranker` and `RerankResult` shapes.
-- `internal/rag/pipeline.go` — `applyRerank`, candidate-pool sizing,
+- `internal/rag/retriever.go` — `applyRerank`, candidate-pool sizing,
   soft fall-through.
 - `internal/config/config.go` — `RerankerConfig`, `Validate` rules.
 - `internal/server/wiring.go` — `resolveRerankClient`,

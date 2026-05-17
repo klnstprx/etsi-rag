@@ -5,7 +5,6 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
-	"sync/atomic"
 
 	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
@@ -15,8 +14,8 @@ import (
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/diag"
+	"etsi-rag/internal/ingest"
 	"etsi-rag/internal/objectstore"
-	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/sources"
 	"etsi-rag/internal/store"
@@ -34,9 +33,9 @@ type Handler struct {
 	sources      *sources.Registry
 	diag         *diag.Registry
 	sessionStore *session.Store
-	agent        atomic.Pointer[agent.Agent]
+	agentHandle  *agent.Handle
 	crawler      *crawler.Crawler
-	pipeline     *rag.Pipeline
+	ingester     *ingest.Ingester
 	objStore     *objectstore.Client
 	logger       zerolog.Logger
 	onConfigSave func()
@@ -53,8 +52,9 @@ type HandlerConfig struct {
 	Sources      *sources.Registry
 	Diag         *diag.Registry
 	SessionStore *session.Store
+	AgentHandle  *agent.Handle
 	Crawler      *crawler.Crawler
-	Pipeline     *rag.Pipeline
+	Ingester     *ingest.Ingester
 	ObjStore     *objectstore.Client
 	Logger       zerolog.Logger
 	OnConfigSave func()
@@ -78,8 +78,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		sources:      cfg.Sources,
 		diag:         cfg.Diag,
 		sessionStore: cfg.SessionStore,
+		agentHandle:  cfg.AgentHandle,
 		crawler:      cfg.Crawler,
-		pipeline:     cfg.Pipeline,
+		ingester:     cfg.Ingester,
 		objStore:     cfg.ObjStore,
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,

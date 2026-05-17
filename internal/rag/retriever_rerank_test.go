@@ -55,9 +55,9 @@ func (r *recordingReranker) Rerank(_ context.Context, _ string, docs []string, _
 	return out, nil
 }
 
-// setupDensePipeline seeds 5 chunks in dense mode with cosine scores
+// setupDenseRetriever seeds 5 chunks in dense mode with cosine scores
 // monotonically decreasing from chunk 0 (best) to chunk 4 (worst).
-func setupDensePipeline(t *testing.T, topK int) (*Pipeline, *store.SQLiteStore) {
+func setupDenseRetriever(t *testing.T, topK int) (*Retriever, *store.SQLiteStore) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -101,21 +101,21 @@ func setupDensePipeline(t *testing.T, topK int) (*Pipeline, *store.SQLiteStore) 
 	}
 
 	emb := fixedEmbedder{vec: []float32{1.0, 0, 0, 0}}
-
-	p := NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
+	h := llm.NewEmbedderHandle(emb)
+	r := NewRetriever(s, h, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             topK,
 		MaxContextTokens: 1024,
 		RetrievalMode:    "dense",
 	})
-	return p, s
+	return r, s
 }
 
 func TestRetrieve_RerankInvertsOrder(t *testing.T) {
-	p, _ := setupDensePipeline(t, 5)
+	r, _ := setupDenseRetriever(t, 5)
 	rr := &reverseReranker{}
-	p.SetReranker(rr, 5)
+	r.SetReranker(rr, 5)
 
-	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -140,11 +140,11 @@ func TestRetrieve_RerankInvertsOrder(t *testing.T) {
 }
 
 func TestRetrieve_RerankErrorFallsThrough(t *testing.T) {
-	p, _ := setupDensePipeline(t, 3)
+	r, _ := setupDenseRetriever(t, 3)
 	er := &erroringReranker{}
-	p.SetReranker(er, 5)
+	r.SetReranker(er, 5)
 
-	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve must not surface reranker errors, got: %v", err)
 	}
@@ -161,10 +161,10 @@ func TestRetrieve_RerankErrorFallsThrough(t *testing.T) {
 }
 
 func TestRetrieve_NilRerankerSkipsRerank(t *testing.T) {
-	p, _ := setupDensePipeline(t, 3)
+	r, _ := setupDenseRetriever(t, 3)
 	// No SetReranker call — reranker is nil. Retrieve should behave exactly
 	// like the pre-rerank pipeline.
-	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -180,11 +180,11 @@ func TestRetrieve_NilRerankerSkipsRerank(t *testing.T) {
 func TestRetrieve_RerankOverFetchesCandidatePool(t *testing.T) {
 	// topK=2, but reranker pool=5 — Retrieve must hand the reranker 5 docs,
 	// not 2, so the cross-encoder has room to swap.
-	p, _ := setupDensePipeline(t, 2)
+	r, _ := setupDenseRetriever(t, 2)
 	rec := &recordingReranker{}
-	p.SetReranker(rec, 5)
+	r.SetReranker(rec, 5)
 
-	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -201,11 +201,11 @@ func TestRetrieve_RerankRespectsTopKWhenPoolSmaller(t *testing.T) {
 	// Even when the reranker pool size is smaller than topK, Retrieve should
 	// still fetch at least topK candidates so the result has the requested
 	// length.
-	p, _ := setupDensePipeline(t, 5)
+	r, _ := setupDenseRetriever(t, 5)
 	rec := &recordingReranker{}
-	p.SetReranker(rec, 2) // poolSize < topK
+	r.SetReranker(rec, 2) // poolSize < topK
 
-	got, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -221,11 +221,11 @@ func TestRetrieve_RerankWithHybridUsesPoolDepth(t *testing.T) {
 	// Hybrid retrieval already enforces a 30-candidate floor. When rerank
 	// pool is bigger, the floor should grow to match — verify the reranker
 	// actually sees the bigger pool.
-	p, _ := setupHybridPipeline(t)
+	r, _ := setupHybridRetriever(t)
 	rec := &recordingReranker{}
-	p.SetReranker(rec, 50)
+	r.SetReranker(rec, 50)
 
-	_, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	_, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -240,11 +240,11 @@ func TestRetrieve_RerankWithHybridUsesPoolDepth(t *testing.T) {
 func TestRetrieve_RerankSingleCandidateSkipsReranker(t *testing.T) {
 	// With only one candidate, rerank can't change anything — verify we
 	// short-circuit rather than spending a network round-trip.
-	p, _ := setupDensePipeline(t, 1)
+	r, _ := setupDenseRetriever(t, 1)
 	rr := &reverseReranker{}
-	p.SetReranker(rr, 1)
+	r.SetReranker(rr, 1)
 
-	if _, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{}); err != nil {
+	if _, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{}); err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
 	if rr.calls != 0 {

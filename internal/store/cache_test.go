@@ -302,7 +302,7 @@ func TestPurgeStaleDocuments_InvalidatesCache(t *testing.T) {
 // SetMaxOpenConns(1) serializes DB access so the test focuses on the cache
 // mutex (the actual unit under test), not on SQLite's own write-lock
 // behaviour. Production callers serialise CreateChunks per document anyway
-// (see rag.Pipeline.Ingest); this fixture matches that reality.
+// (see ingest.Ingester.Ingest); this fixture matches that reality.
 func TestConcurrent_SearchAndCreateChunks(t *testing.T) {
 	dbPath := t.TempDir() + "/race.db"
 	db, err := OpenDB(dbPath)

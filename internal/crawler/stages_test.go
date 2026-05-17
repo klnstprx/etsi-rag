@@ -10,7 +10,8 @@ import (
 	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
-	"etsi-rag/internal/rag"
+	"etsi-rag/internal/ingest"
+	"etsi-rag/internal/llm"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/testutil"
 )
@@ -31,7 +32,7 @@ func (stagesTestEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]flo
 	return out, nil
 }
 
-// newEmbedStageHarness wires an in-memory SQLite store + RAG pipeline + Crawler
+// newEmbedStageHarness wires an in-memory SQLite store + Ingester + Crawler
 // stub sufficient to drive embedStage. objStore is left nil; tests must avoid
 // items with Artifacts.
 func newEmbedStageHarness(t *testing.T) (*Crawler, *store.SQLiteStore) {
@@ -55,11 +56,12 @@ func newEmbedStageHarness(t *testing.T) (*Crawler, *store.SQLiteStore) {
 		counter,
 		512,
 	)
-	pipeline := rag.NewPipeline(s, stagesTestEmbedder{}, chunker, counter, config.RetrievalConfig{TopK: 5, MaxContextTokens: 1024})
+	h := llm.NewEmbedderHandle(stagesTestEmbedder{})
+	ing := ingest.NewIngester(s, h, chunker)
 
 	c := &Crawler{
 		store:    s,
-		pipeline: pipeline,
+		ingester: ing,
 		config: config.CrawlerConfig{
 			MaxEmbedFails:       3,
 			ProgressLogInterval: time.Hour,

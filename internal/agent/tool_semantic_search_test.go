@@ -8,6 +8,7 @@ import (
 
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/llm"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/testutil"
@@ -49,12 +50,13 @@ func setupSemanticSearchFixture(t *testing.T) (*SemanticSearchTool, *store.SQLit
 	s := store.NewSQLiteStore(db, func() int { return dim })
 
 	emb := fixedEmbedder{vec: []float32{1, 0, 0, 0}}
-	p := rag.NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
+	h := llm.NewEmbedderHandle(emb)
+	r := rag.NewRetriever(s, h, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             5,
 		MaxContextTokens: 4096,
 	})
 
-	tool := NewSemanticSearchTool(p)
+	tool := NewSemanticSearchTool(r)
 	return tool, s
 }
 

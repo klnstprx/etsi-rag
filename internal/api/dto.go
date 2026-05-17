@@ -35,12 +35,6 @@ type ChatCompletionWithCitations struct {
 	ToolCalls []agent.ToolCallRecord `json:"tool_calls,omitempty"`
 }
 
-// EmbeddingRequest is the OpenAI-compatible embedding request.
-type EmbeddingRequest = openai.EmbeddingNewParams
-
-// EmbeddingResponse is the OpenAI-compatible embedding response.
-type EmbeddingResponse = openai.CreateEmbeddingResponse
-
 // IngestRequest is used to add documents to the RAG index.
 type IngestRequest struct {
 	Documents []DocumentInput `json:"documents"`

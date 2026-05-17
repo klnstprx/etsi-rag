@@ -56,6 +56,7 @@ func setupTestAdminHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 		Config:       cfg,
 		ConfigPath:   configPath,
 		SessionStore: sessionStore,
+		AgentHandle:  agent.NewHandle(nil),
 		Logger:       zerolog.New(os.Stderr).Level(zerolog.Disabled),
 	})
 

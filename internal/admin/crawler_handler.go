@@ -86,7 +86,7 @@ func (h *Handler) CrawlerPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // crawlerGuard checks common preconditions for crawler actions (configured, not running,
-// pipeline available and reachable). Returns true if the guard failed and a response was sent.
+// ingester available and reachable). Returns true if the guard failed and a response was sent.
 func (h *Handler) crawlerGuard(w http.ResponseWriter, r *http.Request, label string) bool {
 	if h.crawler == nil {
 		http.Error(w, "crawler not configured", http.StatusServiceUnavailable)
@@ -98,10 +98,10 @@ func (h *Handler) crawlerGuard(w http.ResponseWriter, r *http.Request, label str
 	switch {
 	case h.crawler.IsRunning():
 		msg, level = "Crawl already running", "warning"
-	case h.pipeline == nil:
-		msg, level = "Cannot "+label+": pipeline not configured", "error"
+	case h.ingester == nil:
+		msg, level = "Cannot "+label+": ingester not configured", "error"
 	default:
-		if err := h.pipeline.Preflight(r.Context()); err != nil {
+		if err := h.ingester.HealthCheck(r.Context()); err != nil {
 			msg, level = "Cannot "+label+": "+err.Error(), "error"
 		}
 	}

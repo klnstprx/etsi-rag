@@ -7,7 +7,7 @@ was adopted (motivation, eval results, regressions), see
 
 ## Overview
 
-`Pipeline.Retrieve(ctx, query, k)` (`internal/rag/pipeline.go`) runs in one of
+`Retriever.Retrieve(ctx, query, k)` (`internal/rag/retriever.go`) runs in one of
 two modes selected by `[retrieval] retrieval_mode`:
 
 | Mode     | What it does                                                                                              |
@@ -15,7 +15,7 @@ two modes selected by `[retrieval] retrieval_mode`:
 | `dense`  | Cosine similarity between the query embedding and each chunk embedding. Default.                          |
 | `hybrid` | Dense (cosine) + sparse (BM25 over an FTS5 inverted index), merged by Reciprocal Rank Fusion. See ADR-008. |
 
-The contract above the pipeline is identical in both modes: `Retrieve` returns
+The contract above the retriever is identical in both modes: `Retrieve` returns
 the top-K `ScoredChunk`s ordered by score (higher = better).
 
 ## Dense retrieval
@@ -68,7 +68,7 @@ of the same term saturates; `b` controls whether long chunks get penalised
   `internal/store/db.go`. There is no idempotent backfill: chunks that
   predate the FTS5 table are not retroactively indexed — populate an
   existing corpus via the admin **Reprocess** flow (which re-ingests
-  every `fetched` `crawl_page` through `pipeline.Ingest`, replaying the
+  every `fetched` `crawl_page` through `ingester.Ingest`, replaying the
   archived bytes from RustFS without re-fetching).
 - **Score function.** SQLite's built-in `bm25()` aggregator. It implements
   the BM25F generalisation; for a single column this reduces to standard
@@ -140,7 +140,7 @@ Each leg runs at `kEach = max(top_k * 3, 30)` so RRF has enough candidates
 to fuse before the merger trims back to `top_k`. The floor of 30 was chosen
 from the eval-D1 finding that 15 of 19 missed gold chunks in dense
 retrieval ranked at positions 7–12 in top-30 — a 30-deep pool covers them
-comfortably. See `internal/rag/pipeline.go` and ADR-008.
+comfortably. See `internal/rag/retriever.go` and ADR-008.
 
 ### Implementation
 
@@ -158,7 +158,7 @@ descending fused score and returns the top-K.
 
 ## Reranking (optional)
 
-When `[reranker] enabled = true`, `Pipeline.Retrieve` over-fetches a wider
+When `[reranker] enabled = true`, `Retriever.Retrieve` over-fetches a wider
 candidate pool and re-scores it with a cross-encoder before trimming to
 `retrieval.top_k`. This is the "ranking, not visibility" lever from ADR-007
 applied at the chunk level: more candidates considered, fewer chunks reaching
@@ -243,11 +243,11 @@ After rerank, the result is trimmed to `retrieval.top_k`.
 | Boundary | Check | Reaction |
 |---|---|---|
 | `config.Validate` (load + admin save) | `enabled` requires non-empty backend, non-empty model, backend exists & enabled, `IsLlamaCpp`, `top_n >= top_k` | Reject; admin UI reverts in-memory config and toasts |
-| `Server.resolveRerankClient` | Re-checks the same invariants at runtime | Returns `(nil, error)`; `Pipeline.SetReranker(nil, 0)` |
+| `Server.resolveRerankClient` | Re-checks the same invariants at runtime | Returns `(nil, error)`; `Retriever.SetReranker(nil, 0)` |
 | `Server.attachReranker` | Token-counter availability | Disables reranker, logs warn |
-| `Pipeline.Retrieve` | `len(candidates) <= 1` | Skips reranker (nothing to reorder) |
+| `Retriever.Retrieve` | `len(candidates) <= 1` | Skips reranker (nothing to reorder) |
 | `RerankClient.fitToContext` | Query overflows budget | Returns input ordering, no error |
-| `Pipeline.applyRerank` | Network / HTTP / decode error | Returns un-reranked candidates trimmed to `top_k` |
+| `applyRerank` (`internal/rag/retriever.go`) | Network / HTTP / decode error | Returns un-reranked candidates trimmed to `top_k` |
 
 ### Sources
 
@@ -269,9 +269,9 @@ After rerank, the result is trimmed to `retrieval.top_k`.
 | FTS5 schema, triggers, tokenizer            | `internal/store/db.go`                |
 | `SearchKeyword`, `sanitizeFTS5Query`        | `internal/store/chunks.go`            |
 | `FuseRRF`                                   | `internal/rag/rrf.go`                 |
-| `Retrieve` mode switch, candidate sizing    | `internal/rag/pipeline.go`            |
+| `Retrieve` mode switch, candidate sizing    | `internal/rag/retriever.go`            |
 | `RetrievalConfig.RetrievalMode` validation  | `internal/config/config.go`           |
-| `applyRerank` (rerank step + soft fall-through) | `internal/rag/pipeline.go`        |
+| `applyRerank` (rerank step + soft fall-through) | `internal/rag/retriever.go`        |
 | `llm.Reranker` interface, `RerankClient`        | `internal/llm/rerank.go`           |
 | `RerankerConfig` validation                     | `internal/config/config.go`        |
 | `Server.attachReranker`, `resolveRerankClient`  | `internal/server/wiring.go`        |

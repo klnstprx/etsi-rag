@@ -13,46 +13,23 @@ import (
 
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/domain"
-	"etsi-rag/internal/llm"
+	"etsi-rag/internal/ingest"
 	"etsi-rag/internal/objectstore"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/store"
-	"etsi-rag/internal/tokencount"
 )
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	mu              sync.RWMutex
-	embeddingClient llm.Embedder
-	counter         tokencount.Counter
-	agent           *agent.Agent
-	pipeline        *rag.Pipeline
-	store           *store.SQLiteStore
-	sessionStore    *session.Store
-	objStore        *objectstore.Client
-	passthrough     bool
-}
-
-// SetEmbeddingClient swaps the embedding client (thread-safe).
-func (h *Handler) SetEmbeddingClient(c llm.Embedder) {
-	h.mu.Lock()
-	h.embeddingClient = c
-	h.mu.Unlock()
-}
-
-// SetCounter swaps the token counter (thread-safe).
-func (h *Handler) SetCounter(c tokencount.Counter) {
-	h.mu.Lock()
-	h.counter = c
-	h.mu.Unlock()
-}
-
-// SetAgent swaps the agent (thread-safe).
-func (h *Handler) SetAgent(a *agent.Agent) {
-	h.mu.Lock()
-	h.agent = a
-	h.mu.Unlock()
+	mu           sync.RWMutex
+	agentHandle  *agent.Handle
+	retriever    *rag.Retriever
+	ingester     *ingest.Ingester
+	store        *store.SQLiteStore
+	sessionStore *session.Store
+	objStore     *objectstore.Client
+	passthrough  bool
 }
 
 // SetPassthrough toggles passthrough mode (thread-safe).
@@ -62,24 +39,6 @@ func (h *Handler) SetPassthrough(p bool) {
 	h.mu.Unlock()
 }
 
-func (h *Handler) getEmbeddingClient() llm.Embedder {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.embeddingClient
-}
-
-func (h *Handler) getCounter() tokencount.Counter {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.counter
-}
-
-func (h *Handler) getAgent() *agent.Agent {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.agent
-}
-
 func (h *Handler) getPassthrough() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -87,28 +46,30 @@ func (h *Handler) getPassthrough() bool {
 }
 
 // HandlerConfig holds configuration for creating a Handler.
+//
+// The agent and embedder live on shared handles owned by the server; api and
+// admin both read from those single sources of truth instead of holding
+// their own copies that must be hot-swapped in parallel.
 type HandlerConfig struct {
-	EmbeddingClient llm.Embedder
-	Counter         tokencount.Counter
-	Agent           *agent.Agent
-	Pipeline        *rag.Pipeline
-	Store           *store.SQLiteStore
-	SessionStore    *session.Store
-	ObjStore        *objectstore.Client
-	Passthrough     bool
+	AgentHandle  *agent.Handle
+	Retriever    *rag.Retriever
+	Ingester     *ingest.Ingester
+	Store        *store.SQLiteStore
+	SessionStore *session.Store
+	ObjStore     *objectstore.Client
+	Passthrough  bool
 }
 
 // NewHandler creates a new Handler with the given dependencies.
 func NewHandler(cfg HandlerConfig) *Handler {
 	return &Handler{
-		embeddingClient: cfg.EmbeddingClient,
-		counter:         cfg.Counter,
-		agent:           cfg.Agent,
-		pipeline:        cfg.Pipeline,
-		store:           cfg.Store,
-		sessionStore:    cfg.SessionStore,
-		objStore:        cfg.ObjStore,
-		passthrough:     cfg.Passthrough,
+		agentHandle:  cfg.AgentHandle,
+		retriever:    cfg.Retriever,
+		ingester:     cfg.Ingester,
+		store:        cfg.Store,
+		sessionStore: cfg.SessionStore,
+		objStore:     cfg.ObjStore,
+		passthrough:  cfg.Passthrough,
 	}
 }
 
@@ -123,7 +84,7 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // - Session mode (default): single user message, session managed via X-Session-ID header
 // - Passthrough mode: accepts full message array, no session management
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
-	ag := h.getAgent()
+	ag := h.agentHandle.Get()
 	if ag == nil {
 		ErrServiceUnavailable("agent not configured").WriteJSON(w, r)
 		return
@@ -228,65 +189,6 @@ func (h *Handler) chatPassthrough(w http.ResponseWriter, r *http.Request, ag *ag
 	})
 }
 
-// Embeddings handles POST /v1/embeddings.
-func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
-	var req EmbeddingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w, r)
-		return
-	}
-
-	// Extract texts from the input union.
-	var texts []string
-	if req.Input.OfString.Valid() {
-		texts = []string{req.Input.OfString.Value}
-	} else if len(req.Input.OfArrayOfStrings) > 0 {
-		texts = req.Input.OfArrayOfStrings
-	} else {
-		ErrBadRequest("input must be a string or array of strings").WriteJSON(w, r)
-		return
-	}
-
-	embeddings, err := h.getEmbeddingClient().EmbedBatch(r.Context(), texts)
-	if err != nil {
-		ErrBadGateway(err).WriteJSON(w, r)
-		return
-	}
-
-	// Build response using SDK types.
-	data := make([]openai.Embedding, len(embeddings))
-	var totalTokens int64
-	counter := h.getCounter()
-	for i, emb := range embeddings {
-		emb64 := make([]float64, len(emb))
-		for j, v := range emb {
-			emb64[j] = float64(v)
-		}
-		data[i] = openai.Embedding{
-			Index:     int64(i),
-			Embedding: emb64,
-		}
-		if counter != nil {
-			n, err := counter.Count(r.Context(), texts[i])
-			if err != nil {
-				ErrInternal(err).WriteJSON(w, r)
-				return
-			}
-			totalTokens += int64(n)
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(openai.CreateEmbeddingResponse{
-		Model: req.Model,
-		Data:  data,
-		Usage: openai.CreateEmbeddingResponseUsage{
-			PromptTokens: totalTokens,
-			TotalTokens:  totalTokens,
-		},
-	})
-}
-
 // Ingest handles POST /v1/rag/ingest.
 func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	var req IngestRequest
@@ -317,7 +219,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ingested, chunks, err := h.pipeline.Ingest(r.Context(), docs)
+	ingested, chunks, err := h.ingester.Ingest(r.Context(), docs)
 	if err != nil {
 		ErrInternal(err).WriteJSON(w, r)
 		return
@@ -349,7 +251,7 @@ func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.pipeline.Retrieve(r.Context(), req.Query, rag.RetrieveOpts{TopK: req.TopK})
+	result, err := h.retriever.Retrieve(r.Context(), req.Query, rag.RetrieveOpts{TopK: req.TopK})
 	if err != nil {
 		ErrInternal(err).WriteJSON(w, r)
 		return

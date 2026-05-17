@@ -22,8 +22,8 @@ func TestNew_MinimalConfig(t *testing.T) {
 	if srv.store == nil {
 		t.Error("expected non-nil store")
 	}
-	if srv.pipeline == nil {
-		t.Error("expected non-nil pipeline")
+	if srv.retriever == nil {
+		t.Error("expected non-nil retriever")
 	}
 	if srv.sessionStore == nil {
 		t.Error("expected non-nil sessionStore")
@@ -64,8 +64,8 @@ func TestNew_WithBackend(t *testing.T) {
 	t.Cleanup(func() { srv.store.Close(); srv.sessionStore.Close() })
 
 	// Pipeline should exist with resolved embedding client
-	if srv.pipeline == nil {
-		t.Error("expected non-nil pipeline")
+	if srv.retriever == nil {
+		t.Error("expected non-nil retriever")
 	}
 	// No object store → no crawler even with embedding
 	if srv.crawler != nil {

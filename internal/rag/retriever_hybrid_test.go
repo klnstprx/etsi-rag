@@ -7,6 +7,7 @@ import (
 
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
+	"etsi-rag/internal/llm"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/testutil"
 )
@@ -30,11 +31,11 @@ func (f fixedEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float3
 	return out, nil
 }
 
-// setupHybridPipeline constructs a Pipeline configured for hybrid retrieval,
+// setupHybridRetriever constructs a Retriever configured for hybrid retrieval,
 // seeded with three chunks whose dense ranking is fixed by hand-rolled
 // embeddings. Content is crafted so a unique lexical token appears only in
 // the dense-worst chunk, exposing whether RRF pulls it up.
-func setupHybridPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
+func setupHybridRetriever(t *testing.T) (*Retriever, *store.SQLiteStore) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -77,24 +78,24 @@ func setupHybridPipeline(t *testing.T) (*Pipeline, *store.SQLiteStore) {
 	}
 
 	emb := fixedEmbedder{vec: []float32{0.5, 0.5, 0, 0}}
-
-	p := NewPipeline(s, emb, testutil.FakeChunker{}, &testutil.MockCounter{}, config.RetrievalConfig{
+	h := llm.NewEmbedderHandle(emb)
+	r := NewRetriever(s, h, &testutil.MockCounter{}, config.RetrievalConfig{
 		TopK:             3,
 		MaxContextTokens: 1024,
 		RetrievalMode:    "hybrid",
 	})
-	return p, s
+	return r, s
 }
 
 func TestRetrieve_HybridSurfacesDenseLowChunkViaBM25(t *testing.T) {
-	p, _ := setupHybridPipeline(t)
+	r, _ := setupHybridRetriever(t)
 	ctx := context.Background()
 
 	// "uniquetokenzigzag" appears only in chunk C (chunk index 2). C ranks
 	// last in dense (cos=0 vs ~1.0 for A) but rank 1 in BM25. RRF should
 	// pull it to the top of the merged result.
 	q := "uniquetokenzigzag"
-	got, err := p.Retrieve(ctx, q, RetrieveOpts{})
+	got, err := r.Retrieve(ctx, q, RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -113,13 +114,13 @@ func TestRetrieve_HybridSurfacesDenseLowChunkViaBM25(t *testing.T) {
 func TestRetrieve_DenseModeIgnoresLexicalMatch(t *testing.T) {
 	// Same fixture, but with retrieval_mode=dense — chunk 2 should NOT be
 	// the top result because dense cosine ignores token overlap.
-	p, _ := setupHybridPipeline(t)
-	cfg := p.getConfig()
+	r, _ := setupHybridRetriever(t)
+	cfg := r.getConfig()
 	cfg.RetrievalMode = "dense"
-	p.SetConfig(cfg)
+	r.SetConfig(cfg)
 
 	ctx := context.Background()
-	got, err := p.Retrieve(ctx, "uniquetokenzigzag", RetrieveOpts{})
+	got, err := r.Retrieve(ctx, "uniquetokenzigzag", RetrieveOpts{})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -133,12 +134,12 @@ func TestRetrieve_DenseModeIgnoresLexicalMatch(t *testing.T) {
 }
 
 func TestRetrieve_UnsupportedModeErrors(t *testing.T) {
-	p, _ := setupHybridPipeline(t)
-	cfg := p.getConfig()
+	r, _ := setupHybridRetriever(t)
+	cfg := r.getConfig()
 	cfg.RetrievalMode = "wat"
-	p.SetConfig(cfg)
+	r.SetConfig(cfg)
 
-	_, err := p.Retrieve(context.Background(), "anything", RetrieveOpts{})
+	_, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err == nil {
 		t.Fatal("expected error for unsupported retrieval_mode")
 	}

@@ -15,7 +15,6 @@ import (
 	"etsi-rag/internal/prompts"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
-	"etsi-rag/internal/testutil"
 
 	"github.com/rs/zerolog"
 )
@@ -398,19 +397,20 @@ func TestConfigDimensionChange_SeenByStore(t *testing.T) {
 
 // --- attachReranker ---
 
-// testServerWithPipeline builds a Server with a real Pipeline so attachReranker
+// testServerWithRetriever builds a Server with a real Retriever so attachReranker
 // has somewhere to write SetReranker calls.
-func testServerWithPipeline(t *testing.T, cfg *config.Config) *Server {
+func testServerWithRetriever(t *testing.T, cfg *config.Config) *Server {
 	t.Helper()
 	s := testServer(t, cfg)
-	s.pipeline = rag.NewPipeline(s.store, nil, testutil.FakeChunker{}, nil, cfg.Retrieval)
+	h := llm.NewEmbedderHandle(nil)
+	s.retriever = rag.NewRetriever(s.store, h, nil, cfg.Retrieval)
 	return s
 }
 
 func TestAttachReranker_DisabledIsNoop(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Reranker.Enabled = false
-	s := testServerWithPipeline(t, cfg)
+	s := testServerWithRetriever(t, cfg)
 
 	s.attachReranker() // must not panic, must not error
 }
@@ -420,7 +420,7 @@ func TestAttachReranker_BadBackendDegradesGracefully(t *testing.T) {
 	cfg.Reranker.Enabled = true
 	cfg.Reranker.Backend = "ghost"
 	cfg.Reranker.Model = "qwen-reranker"
-	s := testServerWithPipeline(t, cfg)
+	s := testServerWithRetriever(t, cfg)
 
 	// Must not panic — the safeguards in attachReranker should swallow the
 	// resolution failure and disable the reranker on the pipeline.
@@ -438,7 +438,7 @@ func TestAttachReranker_LlamaCppBackendInstalls(t *testing.T) {
 	cfg.Reranker.TopN = 30
 	cfg.Reranker.MaxTokens = 4096
 	cfg.Reranker.ReservedTokens = 16
-	s := testServerWithPipeline(t, cfg)
+	s := testServerWithRetriever(t, cfg)
 
 	s.attachReranker() // success path — installs on the pipeline
 }

@@ -87,7 +87,7 @@ func (s *Server) resolveRerankClient(backendName string, partialCfg llm.RerankCl
 // and the operator sees a warning in the logs.
 func (s *Server) attachReranker() {
 	if !s.cfg.Reranker.Enabled {
-		s.pipeline.SetReranker(nil, 0)
+		s.retriever.SetReranker(nil, 0)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (s *Server) attachReranker() {
 	counter, err := s.resolveCounter(s.cfg.Reranker.Backend, s.cfg.Reranker.Model)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reranker disabled: no token counter")
-		s.pipeline.SetReranker(nil, 0)
+		s.retriever.SetReranker(nil, 0)
 		return
 	}
 
@@ -111,11 +111,11 @@ func (s *Server) attachReranker() {
 	})
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reranker disabled: client resolution failed")
-		s.pipeline.SetReranker(nil, 0)
+		s.retriever.SetReranker(nil, 0)
 		return
 	}
 
-	s.pipeline.SetReranker(rc, s.cfg.Reranker.TopN)
+	s.retriever.SetReranker(rc, s.cfg.Reranker.TopN)
 	s.logger.Info().
 		Str("backend", s.cfg.Reranker.Backend).
 		Str("model", s.cfg.Reranker.Model).
@@ -241,11 +241,11 @@ func (s *Server) probeLlamaCppBackends() {
 // agent's switch distinguishes these two failure modes in its diagnostic
 // logging.
 func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
-	searchTool := agent.NewSemanticSearchTool(s.pipeline)
+	searchTool := agent.NewSemanticSearchTool(s.retriever)
 	searchTool.SetStore(s.store)
 	searchTool.SetMaxImages(s.cfg.Agent.Vision.MaxImagesPerCall)
 
-	readDocTool := agent.NewReadDocumentTool(s.pipeline, s.store)
+	readDocTool := agent.NewReadDocumentTool(s.retriever, s.store)
 	readDocTool.SetDefaultTopK(s.cfg.Retrieval.TopK)
 
 	tools := []agent.Tool{searchTool, readDocTool}

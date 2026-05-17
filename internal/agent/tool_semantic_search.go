@@ -17,7 +17,7 @@ import (
 // When configured with a Store, it also resolves [[image:ref]] markers in
 // retrieved chunks to attached image artifacts (Images field on ToolResult).
 type SemanticSearchTool struct {
-	Pipeline *rag.Pipeline
+	Retriever *rag.Retriever
 
 	// Store provides artifact lookup for image markers; optional. Without it
 	// the tool returns text-only.
@@ -29,9 +29,9 @@ type SemanticSearchTool struct {
 }
 
 // NewSemanticSearchTool constructs a semantic_search tool backed by the given
-// RAG pipeline.
-func NewSemanticSearchTool(pipeline *rag.Pipeline) *SemanticSearchTool {
-	return &SemanticSearchTool{Pipeline: pipeline}
+// retriever.
+func NewSemanticSearchTool(r *rag.Retriever) *SemanticSearchTool {
+	return &SemanticSearchTool{Retriever: r}
 }
 
 // SetStore enables image-marker resolution. Pass nil to disable.
@@ -74,7 +74,7 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		return ToolResult{}, fmt.Errorf("parsing args: %w", err)
 	}
 
-	results, err := t.Pipeline.Retrieve(ctx, args.Query, rag.RetrieveOpts{
+	results, err := t.Retriever.Retrieve(ctx, args.Query, rag.RetrieveOpts{
 		TopK: args.TopK,
 	})
 	if err != nil {
@@ -88,7 +88,7 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 	// BuildContext is token-aware and always emits at least the top-1 chunk
 	// (truncated if needed). Its output is our authoritative result — do not
 	// fall back to an unbounded formatter.
-	ragContext, err := t.Pipeline.BuildContext(ctx, results)
+	ragContext, err := t.Retriever.BuildContext(ctx, results)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("building context: %w", err)
 	}

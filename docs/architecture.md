@@ -47,7 +47,8 @@ RustFS       (localhost:9000)  <- S3-compatible object storage
 | `api` | Chi router, HTTP handlers, OpenAI-compatible DTOs |
 | `admin` | Admin dashboard UI: backends CRUD, config editor, crawler control, documents, agent chat |
 | `agent` | Session-aware tool-calling LLM loop (configurable max iterations) with `semantic_search` and `read_document` tools; single entry point for all conversations |
-| `rag` | Retrieval service (retrieve + build context + ingest); takes store + embedder + chunker + counter, plus optional reranker — no chat client |
+| `rag` | Retrieval service (`Retriever.Retrieve` + `BuildContext` + `SourcesFromRetrieval`, plus RRF and reranker glue); takes store + shared `*llm.EmbedderHandle` + counter, plus optional reranker — no chat client, no ingest |
+| `ingest` | Indexing service (`Ingester.Ingest` + `HealthCheck`); chunk → embed → store. Crawler and `POST /v1/rag/ingest` both go through here. Owns the `ErrChunking` sentinel |
 | `llm` | openai-go SDK wrapper for embeddings/chat/streaming/tool-calling; cross-encoder reranker client (`rerank.go`, llama.cpp `/v1/rerank`) |
 | `store` | SQLite document/chunk storage, cosine similarity vector search, FTS5 BM25 keyword search, crawl-page/run + artifact CRUD (backends and crawl sources live in TOML, not SQLite) |
 | `crawler` | BFS web crawler: 3-stage pipeline (crawl -> parse -> embed), go-rod for JS pages, go-readability for content extraction, PDF support |
@@ -84,7 +85,7 @@ User query
 [Build context] --> [Formatted chunk text with token budget]
 ```
 
-The pipeline is a pure retrieval service — it takes an `embedder` and (optionally) a reranker only. Chat generation is handled by the agent, which calls `semantic_search` as a tool.
+The `rag` package is a pure retrieval service — `Retriever` takes a shared `*llm.EmbedderHandle` and (optionally) a reranker. Ingestion (chunk + embed + store) lives in the separate `ingest` package; both halves share the same embedder handle so the "one embedding model per corpus" invariant is enforced by construction (a config-reload swaps the embedder in one place and both sides observe the new client on next Get). Chat generation is handled by the agent, which calls `semantic_search` as a tool.
 
 `retrieval_mode` is selected via `[retrieval]` in `config.toml`. Default is `"dense"`. `"hybrid"` adds a BM25 leg over an SQLite FTS5 index of `chunks.content` and merges with cosine via reciprocal-rank fusion (`k=60`). When `[reranker].enabled = true`, a cross-encoder (llama.cpp `/v1/rerank`) re-scores the candidate pool to produce the final top-K (soft fall-through if the backend errors). For formulas, parameter choices, and citations see [retrieval.md](retrieval.md); see [ADR-008](decisions/008-hybrid-retrieval.md) for hybrid and [ADR-009](decisions/009-reranker.md) for the reranker. The agent's `semantic_search` tool sees the same `Retrieve` contract regardless of mode.
 
@@ -128,7 +129,7 @@ User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
 
 Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
 Vision: when `[agent.vision].enabled = true` and `public_base_url` is set, the agent reads each retrieved chunk's `ImageRefs` (stamped at chunk time from the parser's page markers), resolves them to artifact URLs, and injects a synthetic user message carrying `image_url` parts on the next turn (see [ADR-006](decisions/006-multimodal-artifacts.md)).
-Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and installs it via `Handler.SetAgent()` on the API and admin handlers — individual fields are not mutated at runtime. Agent construction (search-tool wiring, vision getter, reranker wiring) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
+Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and routes it through the shared `*agent.Handle` — one `handle.Set(newAgent)` call propagates to both the API and admin handlers via `handle.Get()`, eliminating parallel-fanout fragility. The embedder follows the same pattern (`*llm.EmbedderHandle` shared by retriever and ingester). Agent construction (search-tool wiring, vision getter, reranker wiring) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
 
 ## Key Design Patterns
 

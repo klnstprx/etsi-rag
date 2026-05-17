@@ -32,8 +32,8 @@ import (
 // defence against oversized whole-document replies; the LLM's natural retry
 // is to add a query parameter to scope the result.
 type ReadDocumentTool struct {
-	Pipeline *rag.Pipeline
-	Store    *store.SQLiteStore
+	Retriever *rag.Retriever
+	Store     *store.SQLiteStore
 
 	// DefaultTopK is the top_k used in query mode when the LLM doesn't
 	// supply one. Zero (or unset) falls back to 5, mirroring the typical
@@ -41,11 +41,11 @@ type ReadDocumentTool struct {
 	DefaultTopK int
 }
 
-// NewReadDocumentTool constructs a read_document tool. Both the pipeline
+// NewReadDocumentTool constructs a read_document tool. Both the retriever
 // (for query-mode embedding + scoped search) and the store (for whole-doc
 // fetch and URL → doc resolution) are required.
-func NewReadDocumentTool(p *rag.Pipeline, s *store.SQLiteStore) *ReadDocumentTool {
-	return &ReadDocumentTool{Pipeline: p, Store: s}
+func NewReadDocumentTool(r *rag.Retriever, s *store.SQLiteStore) *ReadDocumentTool {
+	return &ReadDocumentTool{Retriever: r, Store: s}
 }
 
 // SetDefaultTopK overrides the default top_k used when the LLM doesn't pass
@@ -126,7 +126,7 @@ func (t *ReadDocumentTool) wholeDocument(doc *domain.Document) ToolResult {
 }
 
 // scopedQuery runs a dense search within the document and formats the top-K
-// chunks the same way Pipeline.BuildContext does, so the LLM sees a
+// chunks the same way Retriever.BuildContext does, so the LLM sees a
 // consistent shape across both tools.
 func (t *ReadDocumentTool) scopedQuery(ctx context.Context, doc *domain.Document, query string, topK *int) (ToolResult, error) {
 	k := t.DefaultTopK
@@ -137,7 +137,7 @@ func (t *ReadDocumentTool) scopedQuery(ctx context.Context, doc *domain.Document
 		k = *topK
 	}
 
-	results, err := t.Pipeline.RetrieveInDocument(ctx, query, doc.ID, k)
+	results, err := t.Retriever.RetrieveInDocument(ctx, query, doc.ID, k)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("scoped search: %w", err)
 	}
