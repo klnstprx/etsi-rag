@@ -21,7 +21,6 @@ func (s *Server) rebuildClients() {
 
 	// Propagate non-LLM config changes
 	s.retriever.SetConfig(s.cfg.Retrieval)
-	s.apiHandler.SetPassthrough(s.cfg.Agent.Passthrough)
 	if s.crawler != nil {
 		s.crawler.SetConfig(s.cfg.Crawler)
 	}

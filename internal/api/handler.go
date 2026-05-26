@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,27 +21,12 @@ import (
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	mu           sync.RWMutex
 	agentHandle  *agent.Handle
 	retriever    *rag.Retriever
 	ingester     *ingest.Ingester
 	store        *store.SQLiteStore
 	sessionStore *session.Store
 	objStore     *objectstore.Client
-	passthrough  bool
-}
-
-// SetPassthrough toggles passthrough mode (thread-safe).
-func (h *Handler) SetPassthrough(p bool) {
-	h.mu.Lock()
-	h.passthrough = p
-	h.mu.Unlock()
-}
-
-func (h *Handler) getPassthrough() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.passthrough
 }
 
 // HandlerConfig holds configuration for creating a Handler.
@@ -57,7 +41,6 @@ type HandlerConfig struct {
 	Store        *store.SQLiteStore
 	SessionStore *session.Store
 	ObjStore     *objectstore.Client
-	Passthrough  bool
 }
 
 // NewHandler creates a new Handler with the given dependencies.
@@ -69,7 +52,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		store:        cfg.Store,
 		sessionStore: cfg.SessionStore,
 		objStore:     cfg.ObjStore,
-		passthrough:  cfg.Passthrough,
 	}
 }
 
@@ -80,9 +62,7 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // ChatCompletions handles POST /v1/chat/completions.
-// Two modes based on passthrough config:
-// - Session mode (default): single user message, session managed via X-Session-ID header
-// - Passthrough mode: accepts full message array, no session management
+// Session mode: single user message, session managed via X-Session-ID header.
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ag := h.agentHandle.Get()
 	if ag == nil {
@@ -90,15 +70,6 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.getPassthrough() {
-		h.chatPassthrough(w, r, ag)
-	} else {
-		h.chatSession(w, r, ag)
-	}
-}
-
-// chatSession handles session-managed chat.
-func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.Agent) {
 	var req ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ErrBadRequest("invalid request body").WriteJSON(w, r)
@@ -151,42 +122,6 @@ func (h *Handler) chatSession(w http.ResponseWriter, r *http.Request, ag *agent.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Session-ID", sessionID)
 	json.NewEncoder(w).Encode(resp)
-}
-
-// chatPassthrough handles stateless passthrough chat.
-func (h *Handler) chatPassthrough(w http.ResponseWriter, r *http.Request, ag *agent.Agent) {
-	var req ChatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrBadRequest("invalid request body").WriteJSON(w, r)
-		return
-	}
-
-	if len(req.Messages) == 0 {
-		ErrBadRequest("messages cannot be empty").WriteJSON(w, r)
-		return
-	}
-
-	result, err := ag.ChatPassthrough(r.Context(), req.Messages, nil)
-	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(openai.ChatCompletion{
-		ID:      "chatcmpl-local",
-		Model:   string(req.Model),
-		Created: time.Now().Unix(),
-		Choices: []openai.ChatCompletionChoice{
-			{
-				Index:        0,
-				FinishReason: "stop",
-				Message: openai.ChatCompletionMessage{
-					Content: result.Response,
-				},
-			},
-		},
-	})
 }
 
 // Ingest handles POST /v1/rag/ingest.

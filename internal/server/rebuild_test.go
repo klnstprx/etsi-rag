@@ -104,7 +104,6 @@ func TestRebuildClients_RemoveBackend(t *testing.T) {
 func TestRebuildClients_PropagatesNonLLMConfig(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Retrieval.TopK = 5
-	cfg.Agent.Passthrough = false
 
 	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
 	srv, err := New(cfg, t.TempDir()+"/config.toml", logger)
@@ -115,7 +114,6 @@ func TestRebuildClients_PropagatesNonLLMConfig(t *testing.T) {
 
 	// Change non-LLM config
 	cfg.Retrieval.TopK = 20
-	cfg.Agent.Passthrough = true
 
 	// Should not panic and should propagate changes
 	srv.rebuildClients()

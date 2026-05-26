@@ -231,42 +231,6 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 	return tokens, outcome
 }
 
-// ChatPassthrough handles a stateless conversation (client provides full history).
-// No session management — the client is responsible for message history.
-// events may be nil; if non-nil, ToolEvent values are sent during tool execution.
-func (a *Agent) ChatPassthrough(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, events chan<- ToolEvent) (*ChatResult, error) {
-	client := a.client
-	if client == nil {
-		return nil, fmt.Errorf("agent not configured")
-	}
-
-	tools := a.tools
-	maxIter := a.maxIter
-	system := a.system
-
-	// Prepend system prompt
-	full := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
-	full = append(full, openai.ChatCompletionMessageParamUnion{
-		OfSystem: &openai.ChatCompletionSystemMessageParam{
-			Content: openai.ChatCompletionSystemMessageParamContentUnion{
-				OfString: openai.String(system),
-			},
-		},
-	})
-	full = append(full, messages...)
-
-	var citations []Citation
-	var attached []ImageRef
-	var toolCalls []ToolCallRecord
-
-	response, _, err := a.runToolLoop(ctx, client, full, tools, maxIter, &citations, &attached, &toolCalls, events, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ChatResult{Response: response, Citations: citations, Images: attached, ToolCalls: toolCalls}, nil
-}
-
 // runToolLoop executes the tool-calling loop and returns the final text response
 // plus all intermediate messages (assistant+tool messages, excluding the initial messages).
 // events may be nil; if non-nil, ToolEvent values are sent for each tool execution.

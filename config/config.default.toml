@@ -80,7 +80,6 @@ temperature = 0.7
 context_window = 0                # 0 = auto-detect (llama.cpp /props)
 max_iterations = 5
 tool_output_max_tokens = 0        # 0 = auto (context_window / 4, floor 256)
-passthrough = false               # true = accept client messages directly, no session management
 system_prompt = ''                # empty = use prompts/agent.md
 
 [agent.vision]

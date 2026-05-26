@@ -511,7 +511,6 @@ func TestLoad_RejectsLegacyKeys(t *testing.T) {
 		{"rag.top_k", "[rag]\ntop_k = 5\n", "retrieval.top_k"},
 		{"rag.max_context_tokens", "[rag]\nmax_context_tokens = 2048\n", "retrieval.max_context_tokens"},
 		{"rag.retrieval_mode", "[rag]\nretrieval_mode = \"dense\"\n", "retrieval.retrieval_mode"},
-		{"api.passthrough", "[api]\npassthrough = true\n", "agent.passthrough"},
 		{"agent.public_base_url", "[agent]\npublic_base_url = \"http://x\"\n", "agent.vision.public_base_url"},
 		{"agent.max_images_per_call", "[agent]\nmax_images_per_call = 4\n", "agent.vision.max_images_per_call"},
 		{"agent.max_image_bytes_per_call", "[agent]\nmax_image_bytes_per_call = 1024\n", "agent.vision.max_image_bytes_per_call"},

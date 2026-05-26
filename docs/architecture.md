@@ -127,7 +127,7 @@ User message --> [Load session history] --> [Chat with tools] --> [Tool call?]
                                            (max_iterations configurable, default 5)
 ```
 
-Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming), `ChatPassthrough()` (stateless, client provides history).
+Methods: `Chat()` (session-managed), `ChatStream()` (session + streaming).
 Vision: when `[agent.vision].enabled = true` and `public_base_url` is set, the agent reads each retrieved chunk's `ImageRefs` (stamped at chunk time from the parser's page markers), resolves them to artifact URLs, and injects a synthetic user message carrying `image_url` parts on the next turn (see [ADR-006](decisions/006-multimodal-artifacts.md)).
 Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config save and routes it through the shared `*agent.Handle` — one `handle.Set(newAgent)` call propagates to both the API and admin handlers via `handle.Get()`, eliminating parallel-fanout fragility. The embedder follows the same pattern (`*llm.EmbedderHandle` shared by retriever and ingester). Agent construction (search-tool wiring, vision getter, reranker wiring) is centralised in `Server.buildAgent()` so the initial-setup and rebuild paths cannot drift.
 
@@ -142,7 +142,7 @@ Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config sa
 ## Routes
 
 - **Health**: `GET /health`, `GET /v1/health`
-- **API**: `/v1/chat/completions` (session mode or passthrough mode), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `POST /v1/rag/query` (retrieval-layer introspection for eval — returns ranked chunks with document_url, used to compute Recall@k / MRR), `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
+- **API**: `/v1/chat/completions` (session mode, single user message + `X-Session-ID` header), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `POST /v1/rag/query` (retrieval-layer introspection for eval — returns ranked chunks with document_url, used to compute Recall@k / MRR), `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
 - **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents, agent chat)
 - Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX + SSE
 

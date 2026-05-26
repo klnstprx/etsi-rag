@@ -157,7 +157,6 @@ temperature = 0.7
 context_window = 0            # total context window (auto-detected for llama.cpp, 0 = unknown)
 max_iterations = 5            # max tool-calling iterations per turn
 tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto (context_window/4, min 256)
-passthrough = false           # true = accept client messages directly, no session management
 system_prompt = ''            # custom system prompt text/template (empty = use embedded prompts/agent.tmpl)
                               # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
 
@@ -260,7 +259,6 @@ The TOML layout was reorganized to group infrastructure / pipeline / ingest sect
 | `[rag] top_k`                      | `[retrieval] top_k`                                                                                 |
 | `[rag] max_context_tokens`         | `[retrieval] max_context_tokens`                                                                    |
 | `[rag] retrieval_mode`             | `[retrieval] retrieval_mode`                                                                        |
-| `[api] passthrough`                | `[agent] passthrough`                                                                               |
 | `[agent] public_base_url`          | `[agent.vision] public_base_url`                                                                    |
 | `[agent] max_images_per_call`      | `[agent.vision] max_images_per_call`                                                                |
 | `[agent] max_image_bytes_per_call` | `[agent.vision] max_image_bytes_per_call`                                                           |

@@ -189,7 +189,6 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		Store:        sqliteStore,
 		SessionStore: s.sessionStore,
 		ObjStore:     objStore,
-		Passthrough:  cfg.Agent.Passthrough,
 	})
 	router := api.NewRouter(s.apiHandler, logger, time.Duration(cfg.Server.RequestTimeout)*time.Second)
 

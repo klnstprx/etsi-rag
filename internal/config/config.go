@@ -125,7 +125,6 @@ type AgentConfig struct {
 	ContextWindow       int               `koanf:"context_window"`         // total context window (auto-detected for llama.cpp)
 	MaxIterations       int               `koanf:"max_iterations"`         // max tool-calling iterations
 	ToolOutputMaxTokens int               `koanf:"tool_output_max_tokens"` // max tokens allowed per tool result; 0 = auto (context_window/4)
-	Passthrough         bool              `koanf:"passthrough"`            // true = accept client messages directly, no session management
 	SystemPrompt        string            `koanf:"system_prompt"`          // empty = use prompts/agent.md
 	Vision              AgentVisionConfig `koanf:"vision"`
 }
@@ -324,7 +323,6 @@ func checkLegacyKeys(k *koanf.Koanf) error {
 		{"rag.top_k", "retrieval.top_k"},
 		{"rag.max_context_tokens", "retrieval.max_context_tokens"},
 		{"rag.retrieval_mode", "retrieval.retrieval_mode"},
-		{"api.passthrough", "agent.passthrough"},
 		{"agent.public_base_url", "agent.vision.public_base_url"},
 		{"agent.max_images_per_call", "agent.vision.max_images_per_call"},
 		{"agent.max_image_bytes_per_call", "agent.vision.max_image_bytes_per_call"},

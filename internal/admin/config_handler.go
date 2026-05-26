@@ -117,7 +117,6 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Agent.ContextWindow = formInt(r, "context_window", h.config.Agent.ContextWindow)
 		h.config.Agent.MaxIterations = formInt(r, "max_iterations", h.config.Agent.MaxIterations)
 		h.config.Agent.ToolOutputMaxTokens = formInt(r, "tool_output_max_tokens", h.config.Agent.ToolOutputMaxTokens)
-		h.config.Agent.Passthrough = r.FormValue("passthrough") == "true"
 		submitted := strings.TrimSpace(r.FormValue("system_prompt"))
 		if submitted == "" || submitted == strings.TrimSpace(prompts.Agent) {
 			h.config.Agent.SystemPrompt = ""
@@ -340,13 +339,6 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "context_window", Label: "Context Window (auto-detected)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number"},
 				{Key: "max_iterations", Label: "Max Tool Iterations", Value: strconv.Itoa(cfg.Agent.MaxIterations), Type: "number"},
 				{Key: "tool_output_max_tokens", Label: "Tool Output Max Tokens (0 = auto, context_window/4)", Value: strconv.Itoa(cfg.Agent.ToolOutputMaxTokens), Type: "number"},
-				{
-					Key:   "passthrough",
-					Label: "Passthrough mode",
-					Value: strconv.FormatBool(cfg.Agent.Passthrough),
-					Type:  "checkbox",
-					Hint:  "Accept client-supplied message lists directly without session management.",
-				},
 				{Key: "system_prompt", Label: "System Prompt (clear to restore default)", Value: effectivePrompt(cfg), Type: "textarea", Hint: "Template variables: {{.DocumentCount}}, {{.ChunkCount}}"},
 			},
 		},

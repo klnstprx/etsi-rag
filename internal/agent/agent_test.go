@@ -312,31 +312,6 @@ func TestChat_SessionNotFound(t *testing.T) {
 	}
 }
 
-func TestChatPassthrough(t *testing.T) {
-	srv := newSequentialLLM(t, []map[string]any{
-		chatResp("Passthrough response"),
-	})
-	defer srv.Close()
-
-	ag, _ := newTestAgent(t, srv, nil, 5)
-
-	messages := []openai.ChatCompletionMessageParamUnion{
-		{OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfString: openai.String("Hello"),
-			},
-		}},
-	}
-
-	result, err := ag.ChatPassthrough(context.Background(), messages, nil)
-	if err != nil {
-		t.Fatalf("ChatPassthrough: %v", err)
-	}
-	if result.Response != "Passthrough response" {
-		t.Errorf("response = %q, want %q", result.Response, "Passthrough response")
-	}
-}
-
 // largeTool returns a tool that produces a result with the given number of words.
 func largeTool(wordCount int) Tool {
 	return newStubTool("large", "Returns a large result", func(ctx context.Context, argsJSON string) (ToolResult, error) {
@@ -686,42 +661,6 @@ func TestChat_ToolEvents_NoToolCalls(t *testing.T) {
 	evts := collectEvents(events)
 	if len(evts) != 0 {
 		t.Errorf("got %d events, want 0 (no tool calls)", len(evts))
-	}
-}
-
-func TestChatPassthrough_ToolEvents(t *testing.T) {
-	srv := newSequentialLLM(t, []map[string]any{
-		toolCallResp("echo", "call-1", `{}`),
-		chatResp("Passthrough done"),
-	})
-	defer srv.Close()
-
-	ag, _ := newTestAgent(t, srv, []Tool{echoTool()}, 5)
-
-	messages := []openai.ChatCompletionMessageParamUnion{
-		{OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfString: openai.String("test"),
-			},
-		}},
-	}
-
-	events := make(chan ToolEvent, 16)
-	result, err := ag.ChatPassthrough(context.Background(), messages, events)
-	if err != nil {
-		t.Fatalf("ChatPassthrough: %v", err)
-	}
-	if result.Response != "Passthrough done" {
-		t.Errorf("response = %q, want %q", result.Response, "Passthrough done")
-	}
-
-	close(events)
-	evts := collectEvents(events)
-	if len(evts) != 2 {
-		t.Fatalf("got %d events, want 2", len(evts))
-	}
-	if evts[0].Type != "start" || evts[1].Type != "done" {
-		t.Error("expected start+done events")
 	}
 }
 
