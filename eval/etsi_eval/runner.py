@@ -87,7 +87,6 @@ def _process_question(
     try:
         reply = agent_client.ask(
             rt.server_base_url,
-            rt.agent_model,
             q.question,
             session_id=f"eval-{run_id}-{q.id}",
         )

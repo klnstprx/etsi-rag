@@ -3,37 +3,59 @@
 package api
 
 import (
-	"github.com/openai/openai-go"
+	"encoding/json"
 
-	"etsi-rag/internal/agent"
+	"github.com/openai/openai-go"
 )
 
 // ChatCompletionRequest is the OpenAI-compatible chat completion request.
-// We use the openai-go types directly for compatibility.
-type ChatCompletionRequest = openai.ChatCompletionNewParams
+// We embed openai-go's params for field-shape compatibility and add the
+// `stream` flag here because the SDK splits New / NewStreaming at the call
+// site instead of exposing a Stream field on the params struct.
+//
+// The embedded type has its own MarshalJSON/UnmarshalJSON; we have to override
+// both on the wrapper or the Stream field gets dropped on the wire.
+type ChatCompletionRequest struct {
+	openai.ChatCompletionNewParams
+	Stream bool `json:"stream,omitempty"`
+}
+
+// MarshalJSON delegates to the embedded SDK marshaler, then re-inserts the
+// stream field at the top level.
+func (r ChatCompletionRequest) MarshalJSON() ([]byte, error) {
+	inner, err := json.Marshal(r.ChatCompletionNewParams)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Stream {
+		return inner, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(inner, &m); err != nil {
+		return nil, err
+	}
+	m["stream"] = json.RawMessage("true")
+	return json.Marshal(m)
+}
+
+// UnmarshalJSON delegates to the embedded SDK unmarshaler for OpenAI fields,
+// then independently decodes the wrapper-only Stream field.
+func (r *ChatCompletionRequest) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &r.ChatCompletionNewParams); err != nil {
+		return err
+	}
+	var aux struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	r.Stream = aux.Stream
+	return nil
+}
 
 // ChatCompletionResponse is the OpenAI-compatible chat completion response.
 type ChatCompletionResponse = openai.ChatCompletion
-
-// ChatCompletionWithCitations extends the chat response with citations
-// produced by the agent's tool calls (e.g. semantic_search, web_search).
-type ChatCompletionWithCitations struct {
-	openai.ChatCompletion
-
-	// Citations lists external resources referenced during the turn.
-	Citations []agent.Citation `json:"citations,omitempty"`
-
-	// Images lists image artifacts attached during the turn (path-only URLs
-	// rooted under /v1/artifacts/{token}.png). Empty when the configured
-	// backend doesn't support vision or no markers were resolved.
-	Images []agent.ImageRef `json:"images,omitempty"`
-
-	// ToolCalls records every tool invocation made inside the agent loop.
-	// Custom extension on top of the OpenAI response shape; root-level so
-	// it doesn't clash with the OpenAI-reserved tool_calls field that lives
-	// inside choices[].message. Same loose-compat posture as Citations.
-	ToolCalls []agent.ToolCallRecord `json:"tool_calls,omitempty"`
-}
 
 // IngestRequest is used to add documents to the RAG index.
 type IngestRequest struct {

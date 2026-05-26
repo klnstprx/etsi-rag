@@ -15,8 +15,8 @@ For each question in `dataset.jsonl`:
 
 1. Look up the reference document(s) in `data/etsi-rag.db` by each entry in `golden_urls` (read-only). Used as a sanity-check that the eval is pointed at the indexed corpus we expect; not consumed by any judge in this runner. URLs are canonicalised on both sides (see "URL canonicalisation" below). Skipped for `expected_behavior == "refuse"` rows.
 2. Probe the retrieval layer via `POST /v1/rag/query` to compute Recall@k / MRR against `golden_urls` (URL-level, k = 5 and 10). Skipped for refuse rows where the metric is undefined.
-3. Ask the agent via `POST /v1/chat/completions` — single user turn. Each row gets a unique `X-Session-ID` of the form `eval-<run_id>-<question_id>` so chat history never bleeds between questions when the server is in session mode.
-4. Record the agent answer and the list of tool invocations the agent made (custom `tool_calls` extension on the chat-completion response — `name`, `args`, `error`, `duration_ms` per call).
+3. Ask the agent via `POST /v1/agent/chat` (the proprietary endpoint) — single user turn (`{"message": ...}`). Each row gets a unique `X-Session-ID` of the form `eval-<run_id>-<question_id>` so chat history never bleeds between questions. (We use the proprietary endpoint because eval needs the per-call tool audit trail. The OpenAI-compatible `/v1/chat/completions` keeps the standard schema — including `choices[].message.tool_calls`, which is always `null` here since the agent resolves tools server-side and returns only final text — but carries no proprietary root-level `tool_calls` audit field.)
+4. Record the agent answer and the list of tool invocations the agent made (`tool_calls` in the proprietary response — `name`, `args`, `error`, `duration_ms` per call).
 5. Aggregate retrieval metrics and per-tool counts. Results are written to `results/TIMESTAMP.json` (schema_version 3).
 
 ## Retrieval metrics

@@ -1,9 +1,10 @@
-"""Thin OpenAI-compatible client that calls the etsi-rag agent.
+"""Thin client for etsi-rag's proprietary agent endpoint.
 
-We post to etsi-rag's own /v1/chat/completions so the agent runs its
-tool-calling loop and semantic_search pipeline — this is the "system under
-test". The caller supplies an explicit session_id so each eval row is
-isolated when the server is in session mode.
+We POST to /v1/agent/chat so the agent runs its tool-calling loop and
+semantic_search pipeline — this is the "system under test". The proprietary
+endpoint (unlike the OpenAI-compatible /v1/chat/completions) returns the full
+RAG context, including the root-level tool_calls the eval harness records.
+The caller supplies an explicit session_id so each eval row is isolated.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ class AgentReply:
 
 def ask(
     server_base_url: str,
-    model: str,
     question: str,
     *,
     session_id: str,
@@ -33,7 +33,7 @@ def ask(
 
     session_id is sent as X-Session-ID. Callers MUST pass a value that is
     unique per row (and ideally per run) so chat history from one question
-    doesn't bleed into the next when the server is in session mode.
+    doesn't bleed into the next.
     """
     if not session_id:
         raise ValueError("session_id is required")
@@ -43,11 +43,10 @@ def ask(
         "X-Session-ID": session_id,
     }
     payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": question}],
+        "message": question,
         "stream": False,
     }
-    url = f"{server_base_url.rstrip('/')}/v1/chat/completions"
+    url = f"{server_base_url.rstrip('/')}/v1/agent/chat"
 
     owns_client = client is None
     if owns_client:
@@ -60,9 +59,6 @@ def ask(
         if owns_client:
             client.close()
 
-    choices = body.get("choices") or []
-    if not choices:
-        raise RuntimeError(f"agent returned no choices: {body}")
-    content = choices[0].get("message", {}).get("content", "") or ""
+    content = body.get("content", "") or ""
     tool_calls = list(body.get("tool_calls") or [])
     return AgentReply(content=content, tool_calls=tool_calls, raw=body)

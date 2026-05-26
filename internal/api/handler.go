@@ -61,8 +61,15 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
 }
 
-// ChatCompletions handles POST /v1/chat/completions.
-// Session mode: single user message, session managed via X-Session-ID header.
+// ChatCompletions handles POST /v1/chat/completions. Single user message,
+// session managed via X-Session-ID header. When req.Stream is set it emits a
+// strictly OpenAI-compatible SSE stream; otherwise a single openai.ChatCompletion.
+//
+// The response is the standard OpenAI shape and nothing more. The agent
+// resolves all tool calls server-side, so the standard choices[].message.
+// tool_calls is always null here. The proprietary RAG context — citations,
+// images, and the root-level tool-call audit trail — is NOT exposed on this
+// endpoint; clients that want it use POST /v1/agent/chat.
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ag := h.agentHandle.Get()
 	if ag == nil {
@@ -91,6 +98,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID, _ := h.sessionStore.GetOrCreate(sessionIDPtr)
 
+	if req.Stream {
+		h.chatSessionStreaming(w, r, ag, sessionID, string(req.Model), userMsg)
+		return
+	}
+
 	// Run agent
 	result, err := ag.Chat(r.Context(), sessionID, userMsg, nil)
 	if err != nil {
@@ -98,30 +110,41 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build response
-	resp := ChatCompletionWithCitations{
-		ChatCompletion: openai.ChatCompletion{
-			ID:      "chatcmpl-local",
-			Model:   string(req.Model),
-			Created: time.Now().Unix(),
-			Choices: []openai.ChatCompletionChoice{
-				{
-					Index:        0,
-					FinishReason: "stop",
-					Message: openai.ChatCompletionMessage{
-						Content: result.Response,
-					},
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Session-ID", sessionID)
+	json.NewEncoder(w).Encode(openai.ChatCompletion{
+		ID:      "chatcmpl-local",
+		Model:   string(req.Model),
+		Created: time.Now().Unix(),
+		Choices: []openai.ChatCompletionChoice{
+			{
+				Index:        0,
+				FinishReason: "stop",
+				Message: openai.ChatCompletionMessage{
+					Content: result.Response,
 				},
 			},
 		},
-		Citations: result.Citations,
-		Images:    result.Images,
-		ToolCalls: result.ToolCalls,
-	}
+	})
+}
 
-	w.Header().Set("Content-Type", "application/json")
+// chatSessionStreaming runs the agent through agent.RelayChat and writes the
+// resulting tokens / tool events / outcome to the response as OpenAI-spec SSE.
+// X-Session-ID is set before the first chunk goes out so the client can
+// persist it without parsing the body.
+func (h *Handler) chatSessionStreaming(w http.ResponseWriter, r *http.Request, ag *agent.Agent, sessionID, model, userMsg string) {
+	flusher, err := prepareSSE(w)
+	if err != nil {
+		ErrInternal(err).WriteJSON(w, r)
+		return
+	}
 	w.Header().Set("X-Session-ID", sessionID)
-	json.NewEncoder(w).Encode(resp)
+
+	sink := newOpenAISSESink(w, flusher, model)
+	// Errors from RelayChat almost always mean the client disconnected mid-stream
+	// (writes to w fail). There's nothing useful to do but log — we can't change
+	// the status code after headers have been flushed.
+	_ = agent.RelayChat(r.Context(), ag, sessionID, userMsg, sink)
 }
 
 // Ingest handles POST /v1/rag/ingest.

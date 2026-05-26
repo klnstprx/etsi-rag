@@ -71,7 +71,7 @@ def _stub_agent(monkeypatch, sleep_ms: int = 0, sessions: list | None = None):
     """Patch agent_client.ask and the retrieval probe so the runner doesn't
     hit any network. Capture session ids if requested."""
 
-    def fake_ask(server_base_url, model, question, *, session_id, timeout=120.0, client=None):
+    def fake_ask(server_base_url, question, *, session_id, timeout=120.0, client=None):
         if sessions is not None:
             sessions.append(session_id)
         if sleep_ms:
@@ -130,7 +130,7 @@ def test_parallel_actually_overlaps_calls(monkeypatch, runtime: Runtime):
     high_water = 0
     lock = threading.Lock()
 
-    def fake_ask(server_base_url, model, question, *, session_id, timeout=120.0, client=None):
+    def fake_ask(server_base_url, question, *, session_id, timeout=120.0, client=None):
         nonlocal in_flight, high_water
         with lock:
             in_flight += 1
@@ -162,7 +162,7 @@ def test_serial_path_still_works(monkeypatch, runtime: Runtime, capsys):
 
 def test_tool_calls_are_persisted_on_row(monkeypatch, runtime: Runtime):
     """Regression: the runner must thread agent reply.tool_calls into Row."""
-    def fake_ask(server_base_url, model, question, *, session_id, timeout=120.0, client=None):
+    def fake_ask(server_base_url, question, *, session_id, timeout=120.0, client=None):
         return agent_client.AgentReply(
             content="answer",
             tool_calls=[

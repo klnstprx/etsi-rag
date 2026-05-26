@@ -36,8 +36,13 @@ func NewRouter(handler *Handler, logger zerolog.Logger, requestTimeout time.Dura
 		// Health check (llama-server also exposes /v1/health)
 		r.Get("/health", handler.HealthCheck)
 
-		// Standard OpenAI endpoints (proxied to llama-server or handled locally)
+		// Standard OpenAI endpoint — strictly OpenAI-shaped (no RAG extras).
 		r.Post("/chat/completions", handler.ChatCompletions)
+
+		// Proprietary agent endpoint — same agent, but the response carries the
+		// full RAG context (citations, images, tool calls) the OpenAI endpoint
+		// omits. Consumed by the admin UI and the eval harness.
+		r.Post("/agent/chat", handler.AgentChat)
 
 		// Image artifact serving — fed to vision-capable LLMs as image_url.
 		// {token} is the artifact's opaque public_token; .png suffix is

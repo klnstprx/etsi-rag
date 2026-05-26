@@ -21,7 +21,7 @@ import (
 	"etsi-rag/internal/store"
 )
 
-//go:embed static/styles.css static/htmx.min.js static/htmx-sse.js static/htmx-remove-me.js
+//go:embed static/styles.css static/htmx.min.js static/htmx-sse.js static/htmx-remove-me.js static/chat.js
 var staticFiles embed.FS
 
 // Handler serves the admin UI.
@@ -40,7 +40,6 @@ type Handler struct {
 	logger       zerolog.Logger
 	onConfigSave func()
 	baseCtx      context.Context
-	chatStreams  *chatStreamManager
 }
 
 // HandlerConfig holds dependencies for the admin handler.
@@ -85,7 +84,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,
 		baseCtx:      baseCtx,
-		chatStreams:  newChatStreamManager(),
 	}
 }
 
@@ -143,8 +141,6 @@ func (h *Handler) Routes() chi.Router {
 	r.Post("/crawler/purge", h.PurgeStale)
 
 	r.Get("/chat", h.ChatPage)
-	r.Post("/chat/send", h.ChatSend)
-	r.Get("/chat/stream/{sessionID}", h.ChatStream)
 	r.Post("/chat/reset", h.ChatReset)
 
 	return r

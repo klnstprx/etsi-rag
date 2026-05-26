@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -842,119 +841,26 @@ func TestDocumentDelete_EmptyID(t *testing.T) {
 }
 
 // --- Chat ---
+//
+// The admin chat surface is now just a shell: the browser talks to the
+// proprietary POST /v1/agent/chat endpoint directly (see static/chat.js and
+// the api package tests). Server-side, only the page render + reset remain.
 
-func TestChatSend_MissingParams(t *testing.T) {
+func TestChatPage(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
-	tests := []struct {
-		name   string
-		values url.Values
-	}{
-		{"missing message", url.Values{"session_id": {"s1"}}},
-		{"missing session_id", url.Values{"message": {"hello"}}},
-		{"both empty", url.Values{"message": {""}, "session_id": {""}}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := postForm("/admin/chat/send", tt.values)
-			w := httptest.NewRecorder()
-
-			h.ChatSend(w, req)
-
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400", w.Code)
-			}
-		})
-	}
-}
-
-func TestChatSend_NoAgent(t *testing.T) {
-	h, _ := setupTestAdminHandler(t)
-
-	sessionID := h.sessionStore.Create()
-
-	form := url.Values{
-		"message":    {"hello"},
-		"session_id": {sessionID},
-	}
-	req := postForm("/admin/chat/send", form)
+	req := httptest.NewRequest(http.MethodGet, "/admin/chat", nil)
 	w := httptest.NewRecorder()
-
-	h.ChatSend(w, req)
+	h.ChatPage(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
-
-	// ChatSend renders the user message HTML + SSE div for streaming.
-	// Verify the response contains the user's message text.
 	body := w.Body.String()
-	if !strings.Contains(body, "hello") {
-		t.Errorf("response should contain user message, got %q", body)
-	}
-	// Verify it references the session ID for SSE streaming.
-	if !strings.Contains(body, sessionID) {
-		t.Errorf("response should contain session ID for SSE, got %q", body)
-	}
-}
-
-func TestChatStream_NotFound(t *testing.T) {
-	h, _ := setupTestAdminHandler(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/unknown", nil)
-	req = withChiParam(req, "sessionID", "unknown")
-	w := httptest.NewRecorder()
-
-	h.ChatStream(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", w.Code)
-	}
-}
-
-// TestChatStream_AfterFastSend verifies that the SSE stream survives in the map
-// after ChatSend's goroutine finishes quickly (no agent configured). This was a
-// race: the goroutine deleted the stream entry before HTMX could connect.
-func TestChatStream_AfterFastSend(t *testing.T) {
-	h, _ := setupTestAdminHandler(t)
-	// h.agent is nil — the goroutine finishes immediately.
-
-	sessionID := h.sessionStore.Create()
-
-	// 1. ChatSend — registers the stream and spawns a goroutine that finishes fast.
-	form := url.Values{"message": {"hi"}, "session_id": {sessionID}}
-	sendReq := postForm("/admin/chat/send", form)
-	sendW := httptest.NewRecorder()
-	h.ChatSend(sendW, sendReq)
-
-	if sendW.Code != http.StatusOK {
-		t.Fatalf("ChatSend status = %d, want 200", sendW.Code)
-	}
-
-	// Small sleep to let the goroutine finish — simulates the delay before
-	// HTMX opens the SSE connection.
-	time.Sleep(50 * time.Millisecond)
-
-	// 2. ChatStream — must still find the stream despite the goroutine having finished.
-	streamReq := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/"+sessionID, nil)
-	streamReq = withChiParam(streamReq, "sessionID", sessionID)
-	streamW := httptest.NewRecorder()
-	h.ChatStream(streamW, streamReq)
-
-	if streamW.Code != http.StatusOK {
-		t.Fatalf("ChatStream status = %d, want 200 (stream should still exist)", streamW.Code)
-	}
-
-	body := streamW.Body.String()
-	if !strings.Contains(body, "event: token") {
-		t.Errorf("expected SSE token event, got %q", body)
-	}
-	if !strings.Contains(body, "event: done") {
-		t.Errorf("expected SSE done event, got %q", body)
-	}
-	if !strings.Contains(body, "Agent not configured") {
-		t.Errorf("expected placeholder message, got %q", body[:min(len(body), 500)])
+	for _, want := range []string{`id="chat-form"`, "data-session-id=", `id="chat-messages"`, "/admin/static/chat.js"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("chat page missing %q", want)
+		}
 	}
 }
 
@@ -973,120 +879,6 @@ func TestChatReset(t *testing.T) {
 	}
 	if h.sessionStore.Count() != before+1 {
 		t.Errorf("session count = %d, want %d", h.sessionStore.Count(), before+1)
-	}
-}
-
-// --- Crawler guard ---
-
-// --- writeSSE ---
-
-func TestWriteSSE_SingleLine(t *testing.T) {
-	var buf bytes.Buffer
-	writeSSE(&buf, "token", "hello")
-
-	want := "event: token\ndata: hello\n\n"
-	if got := buf.String(); got != want {
-		t.Errorf("writeSSE =\n%q\nwant\n%q", got, want)
-	}
-}
-
-func TestWriteSSE_MultiLine(t *testing.T) {
-	var buf bytes.Buffer
-	writeSSE(&buf, "tool_start", "<div>\n<span>test</span>\n</div>")
-
-	want := "event: tool_start\ndata: <div>\ndata: <span>test</span>\ndata: </div>\n\n"
-	if got := buf.String(); got != want {
-		t.Errorf("writeSSE =\n%q\nwant\n%q", got, want)
-	}
-}
-
-// --- ChatStream with tool events ---
-
-func TestChatStream_ToolEvents(t *testing.T) {
-	h, _ := setupTestAdminHandler(t)
-	sessionID := "test-session"
-
-	eventChan := make(chan agent.ToolEvent, 16)
-	tokenChan := make(chan string, 64)
-	stream := &chatStream{
-		tokens: tokenChan,
-		events: eventChan,
-		cancel: func() {},
-	}
-
-	h.chatStreams.register(sessionID, stream)
-
-	// Send tool events + token + close channels (simulates agent goroutine)
-	go func() {
-		eventChan <- agent.ToolEvent{Type: "start", CallID: "call-1", Name: "semantic_search", Args: `{"query":"test"}`}
-		eventChan <- agent.ToolEvent{Type: "done", CallID: "call-1", Name: "semantic_search", Result: "found 3 results", Duration: 150 * time.Millisecond}
-		close(eventChan)
-		tokenChan <- "Here are the results"
-		close(tokenChan)
-	}()
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/"+sessionID, nil)
-	req = withChiParam(req, "sessionID", sessionID)
-	w := httptest.NewRecorder()
-
-	h.ChatStream(w, req)
-
-	body := w.Body.String()
-
-	if !strings.Contains(body, "event: tool_start") {
-		t.Error("expected tool_start SSE event")
-	}
-	if !strings.Contains(body, "event: tool_done") {
-		t.Error("expected tool_done SSE event")
-	}
-	if !strings.Contains(body, "semantic_search") {
-		t.Error("expected tool name in SSE data")
-	}
-	if !strings.Contains(body, "event: token") {
-		t.Error("expected token SSE event")
-	}
-	if !strings.Contains(body, "event: done") {
-		t.Error("expected done SSE event")
-	}
-}
-
-func TestChatStream_NoToolEvents(t *testing.T) {
-	h, _ := setupTestAdminHandler(t)
-	sessionID := "test-no-tools"
-
-	eventChan := make(chan agent.ToolEvent, 16)
-	tokenChan := make(chan string, 64)
-	stream := &chatStream{
-		tokens: tokenChan,
-		events: eventChan,
-		cancel: func() {},
-	}
-
-	h.chatStreams.register(sessionID, stream)
-
-	// No tool events, just token
-	go func() {
-		close(eventChan)
-		tokenChan <- "Direct response"
-		close(tokenChan)
-	}()
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/chat/stream/"+sessionID, nil)
-	req = withChiParam(req, "sessionID", sessionID)
-	w := httptest.NewRecorder()
-
-	h.ChatStream(w, req)
-
-	body := w.Body.String()
-
-	if strings.Contains(body, "event: tool_start") {
-		t.Error("should not contain tool_start when no tools used")
-	}
-	if !strings.Contains(body, "event: token") {
-		t.Error("expected token SSE event")
-	}
-	if !strings.Contains(body, "event: done") {
-		t.Error("expected done SSE event")
 	}
 }
 

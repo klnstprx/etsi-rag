@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/openai/openai-go"
@@ -498,14 +502,16 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 
 	// Send a chat completion request
 	body, _ := json.Marshal(ChatCompletionRequest{
-		Messages: []openai.ChatCompletionMessageParamUnion{
-			{OfUser: &openai.ChatCompletionUserMessageParam{
-				Content: openai.ChatCompletionUserMessageParamContentUnion{
-					OfString: openai.String("Hi there"),
-				},
-			}},
+		ChatCompletionNewParams: openai.ChatCompletionNewParams{
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("Hi there"),
+					},
+				}},
+			},
+			Model: "test-model",
 		},
-		Model: "test-model",
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
@@ -518,9 +524,10 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify response content
-	var resp ChatCompletionWithCitations
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	// Verify response content (plain OpenAI shape — no RAG extras)
+	bodyStr := w.Body.String()
+	var resp openai.ChatCompletion
+	if err := json.Unmarshal([]byte(bodyStr), &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Choices) == 0 {
@@ -528,6 +535,12 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 	}
 	if resp.Choices[0].Message.Content != "Hello from agent" {
 		t.Errorf("got content %q, want %q", resp.Choices[0].Message.Content, "Hello from agent")
+	}
+	// Purity guard: the OpenAI endpoint must not leak proprietary root fields.
+	// (tool_calls is a legit OpenAI message field, so we key off citations/images,
+	// which the old hybrid always emitted alongside the root tool_calls.)
+	if strings.Contains(bodyStr, "citations") || strings.Contains(bodyStr, `"images"`) {
+		t.Errorf("OpenAI non-stream response leaked RAG extras: %s", bodyStr)
 	}
 
 	// Verify session ID header
@@ -545,3 +558,291 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 		t.Errorf("session has %d messages, want 2 (user + assistant)", len(msgs))
 	}
 }
+
+// fakeStreamingChatServer returns an httptest.Server whose /chat/completions
+// emits the given content tokens as OpenAI-format SSE chunks, followed by a
+// finish chunk and [DONE].
+func fakeStreamingChatServer(t *testing.T, contents []string, finish string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, c := range contents {
+			fmt.Fprintf(w, "data: {\"id\":\"upstream-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":null}]}\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprintf(w, "data: {\"id\":\"upstream-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":%q}]}\n\n", finish)
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+}
+
+func TestChatCompletions_Streaming_HappyPath(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	srv := fakeStreamingChatServer(t, []string{"Hola", " mundo"}, "stop")
+	defer srv.Close()
+
+	chatClient := llm.NewChatClient(llm.ChatClientConfig{
+		BaseURL:     srv.URL,
+		Model:       "test-model",
+		MaxTokens:   100,
+		Temperature: 0,
+	})
+	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	h.agentHandle.Set(ag)
+
+	sessionID := h.sessionStore.Create()
+	body, _ := json.Marshal(ChatCompletionRequest{
+		ChatCompletionNewParams: openai.ChatCompletionNewParams{
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("saludos"),
+					},
+				}},
+			},
+			Model: "test-model",
+		},
+		Stream: true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("X-Session-ID", sessionID)
+	w := httptest.NewRecorder()
+	h.ChatCompletions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\nbody=%s\nheaders=%v", w.Code, w.Body.String(), w.Header())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	if got := w.Header().Get("X-Session-ID"); got != sessionID {
+		t.Errorf("X-Session-ID = %q, want %q", got, sessionID)
+	}
+
+	out := w.Body.String()
+
+	// Must terminate with [DONE]
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "data: [DONE]") {
+		t.Fatalf("body does not end with [DONE]:\n%s", out)
+	}
+
+	// First chunk should be a role:assistant delta (OpenAI convention).
+	if !strings.Contains(out, `"role":"assistant"`) {
+		t.Errorf("missing role:assistant delta chunk:\n%s", out)
+	}
+	// Content deltas
+	if !strings.Contains(out, `"content":"Hola"`) || !strings.Contains(out, `"content":" mundo"`) {
+		t.Errorf("missing content deltas:\n%s", out)
+	}
+	// finish_reason chunk
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("missing finish_reason chunk:\n%s", out)
+	}
+
+	// Session was persisted (user + assistant).
+	sess := h.sessionStore.Get(sessionID)
+	if sess == nil {
+		t.Fatal("session should exist after stream")
+	}
+	if got := len(sess.GetMessages()); got != 2 {
+		t.Errorf("session has %d messages, want 2", got)
+	}
+}
+
+func TestChatCompletions_Streaming_NoSessionHeaderMintsOne(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	srv := fakeStreamingChatServer(t, []string{"hi"}, "stop")
+	defer srv.Close()
+
+	chatClient := llm.NewChatClient(llm.ChatClientConfig{
+		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
+	})
+	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	h.agentHandle.Set(ag)
+
+	body, _ := json.Marshal(ChatCompletionRequest{
+		ChatCompletionNewParams: openai.ChatCompletionNewParams{
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("hello"),
+					},
+				}},
+			},
+			Model: "test-model",
+		},
+		Stream: true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ChatCompletions(w, req)
+
+	mintedSID := w.Header().Get("X-Session-ID")
+	if mintedSID == "" {
+		t.Fatal("expected X-Session-ID header to be set even without input header")
+	}
+	if h.sessionStore.Get(mintedSID) == nil {
+		t.Fatalf("session %q not found in store after stream", mintedSID)
+	}
+}
+
+// TestChatCompletions_Streaming_StaysPure asserts the OpenAI stream emits ONLY
+// standard chunks even when a tool fires — no named tool_start/tool_done/
+// rag_final events that would surface to SDK clients as bogus empty-choices
+// chunks. RAG observability lives on /v1/agent/chat instead.
+func TestChatCompletions_Streaming_StaysPure(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	// Two-turn SSE script: turn 1 streams a tool_calls delta, turn 2 streams the
+	// final answer. runToolLoop uses ChatStreamWithTools for every iteration
+	// when streaming, so both upstream turns must be SSE.
+	var callIdx int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		callIdx++
+		if callIdx == 1 {
+			// Tool-calling chunk: a single chunk that carries the tool_calls
+			// delta, then a finish_reason=tool_calls chunk, then [DONE].
+			fmt.Fprint(w, `data: {"id":"u","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo","arguments":"{}"}}]},"finish_reason":null}]}`+"\n\n")
+			flusher.Flush()
+			fmt.Fprint(w, `data: {"id":"u","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			flusher.Flush()
+		} else {
+			fmt.Fprint(w, `data: {"id":"u","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}`+"\n\n")
+			flusher.Flush()
+			fmt.Fprint(w, `data: {"id":"u","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	chatClient := llm.NewChatClient(llm.ChatClientConfig{
+		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
+	})
+	echo := stubEchoTool()
+	ag := agent.NewAgent(chatClient, []agent.Tool{echo}, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	h.agentHandle.Set(ag)
+
+	body, _ := json.Marshal(ChatCompletionRequest{
+		ChatCompletionNewParams: openai.ChatCompletionNewParams{
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("call echo please"),
+					},
+				}},
+			},
+			Model: "test-model",
+		},
+		Stream: true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ChatCompletions(w, req)
+
+	out := w.Body.String()
+	// The final assistant content must still stream through as a chunk.
+	if !strings.Contains(out, `"content":"done"`) {
+		t.Errorf("missing final content chunk:\n%s", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "data: [DONE]") {
+		t.Errorf("stream must end with [DONE]:\n%s", out)
+	}
+	// Purity: no named events, no proprietary payloads — even though a tool fired.
+	for _, banned := range []string{"event: tool_start", "event: tool_done", "event: rag_final", "event: tool", "call_id", "citations"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("OpenAI stream leaked %q:\n%s", banned, out)
+		}
+	}
+}
+
+// stubEchoTool is a Tool that echoes its args as the tool result. Defined here
+// instead of importing the agent-test fixture (different package).
+type stubEchoTool_ struct{}
+
+func (stubEchoTool_) Name() string        { return "echo" }
+func (stubEchoTool_) Description() string { return "echoes args" }
+func (stubEchoTool_) Parameters() openai.FunctionParameters {
+	return openai.FunctionParameters{"type": "object", "properties": map[string]any{}}
+}
+func (stubEchoTool_) Execute(_ context.Context, args string) (agent.ToolResult, error) {
+	return agent.ToolResult{Text: "echo: " + args}, nil
+}
+
+// TestChatCompletions_Streaming_OverRealSocket drives the full chi router over
+// a real TCP socket (httptest.NewServer) so the chunked-transfer + flush path
+// and router middleware are exercised end-to-end, not just the in-process
+// handler. The upstream LLM is a fake SSE server.
+func TestChatCompletions_Streaming_OverRealSocket(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	upstream := fakeStreamingChatServer(t, []string{"Hola", " mundo"}, "stop")
+	defer upstream.Close()
+
+	chatClient := llm.NewChatClient(llm.ChatClientConfig{
+		BaseURL: upstream.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
+	})
+	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	h.agentHandle.Set(ag)
+
+	router := NewRouter(h, zerolog.Nop(), 30*time.Second)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	body, _ := json.Marshal(ChatCompletionRequest{
+		ChatCompletionNewParams: openai.ChatCompletionNewParams{
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfString: openai.String("saludos"),
+					},
+				}},
+			},
+			Model: "test-model",
+		},
+		Stream: true,
+	})
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	if resp.Header.Get("X-Session-ID") == "" {
+		t.Error("missing X-Session-ID response header")
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	out := string(raw)
+	if !strings.Contains(out, `"content":"Hola"`) || !strings.Contains(out, `"content":" mundo"`) {
+		t.Errorf("missing content deltas:\n%s", out)
+	}
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("missing finish chunk:\n%s", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "data: [DONE]") {
+		t.Errorf("stream did not end with [DONE]:\n%s", out)
+	}
+}
+
+func stubEchoTool() agent.Tool { return stubEchoTool_{} }

@@ -52,7 +52,7 @@ class Runtime:
     judge_model: str
     judge_pricing: JudgePricing
     db_path: Path
-    server_base_url: str  # where etsi-rag serves /v1/chat/completions
+    server_base_url: str  # where etsi-rag serves /v1/agent/chat
 
 
 def _resolve_backend(cfg: dict, name: str) -> BackendConfig:

@@ -142,9 +142,12 @@ Live reconfiguration: `rebuildClients()` constructs a fresh `Agent` on config sa
 ## Routes
 
 - **Health**: `GET /health`, `GET /v1/health`
-- **API**: `/v1/chat/completions` (session mode, single user message + `X-Session-ID` header), `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `POST /v1/rag/query` (retrieval-layer introspection for eval — returns ranked chunks with document_url, used to compute Recall@k / MRR), `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
-- **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents, agent chat)
-- Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX + SSE
+- **Chat (two APIs, one agent)**:
+  - `POST /v1/chat/completions` — **OpenAI-compatible**, strictly OpenAI-shaped. Session mode (single user message + `X-Session-ID` header). `stream: true` emits standard `chat.completion.chunk` SSE terminated by `data: [DONE]`; otherwise a plain `openai.ChatCompletion`. No RAG extras of any kind — safe for off-the-shelf OpenAI SDK clients.
+  - `POST /v1/agent/chat` — **proprietary**. Same agent, but the response carries the full RAG context. Non-stream returns `{session_id, content, citations, images, tool_calls}`; `stream: true` emits a JSON-SSE vocabulary (`event: token` `{text}`, `event: tool` `{phase,...}`, `event: done` `{citations,images,tool_calls}`, `event: error`). Consumed by the admin UI and the eval harness.
+- **Other API**: `/v1/embeddings`, `/v1/rag/ingest`, `GET /v1/rag/documents`, `DELETE /v1/rag/documents/{id}`, `POST /v1/rag/query` (retrieval-layer introspection for eval — returns ranked chunks with document_url, used to compute Recall@k / MRR), `GET /v1/artifacts/{token}.png` (image artifact streaming for vision)
+- **Admin**: `/admin/*` (dashboard, backends, config, crawler, documents). Agent chat is `GET /admin/chat` (page shell) + `POST /admin/chat/reset`; the chat itself is a browser client (`static/chat.js`) of `POST /v1/agent/chat` — the admin UI has no chat-specific streaming endpoint of its own.
+- Admin UI: templ -> `_templ.go`, Tailwind CSS v4 standalone CLI, HTMX (chat streaming uses a small vendored JS module over fetch + ReadableStream)
 
 ## Storage
 
