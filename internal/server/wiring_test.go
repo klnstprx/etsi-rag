@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -314,6 +315,87 @@ func TestProbeLlamaCppBackends_NonLlamaCpp(t *testing.T) {
 
 	if cfg.Embedding.MaxTokens != original {
 		t.Errorf("MaxTokens changed for non-llama.cpp backend: got %d, want %d", cfg.Embedding.MaxTokens, original)
+	}
+}
+
+// visionProbeServer returns a mock llama.cpp server whose /props advertises
+// modalities.vision = visionSupported.
+func visionProbeServer(t *testing.T, modelID string, visionSupported bool) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"default_generation_settings": map[string]any{"n_ctx": 4096},
+			"model_path":                  "/models/" + modelID + ".gguf",
+			"modalities":                  map[string]any{"vision": visionSupported},
+		})
+	})
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"id": modelID}},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// probeWithVision wires a single llama.cpp agent backend reporting the given
+// vision capability against the given agent.vision.enabled flag, runs the
+// probe, and returns the captured log output.
+func probeWithVision(t *testing.T, visionSupported, visionEnabled bool) string {
+	t.Helper()
+	ts := visionProbeServer(t, "agent-model", visionSupported)
+
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "llama", BaseURL: ts.URL + "/v1", Enabled: true, IsLlamaCpp: true},
+	}
+	cfg.Agent.Backend = "llama"
+	cfg.Agent.Model = "agent-model"
+	cfg.Agent.Vision.Enabled = visionEnabled
+
+	s := testServer(t, cfg)
+	var buf bytes.Buffer
+	s.logger = zerolog.New(&buf)
+	s.probeLlamaCppBackends()
+	return buf.String()
+}
+
+const (
+	visionEnableHint  = "consider enabling agent.vision.enabled"
+	visionReverseWarn = "agent.vision.enabled is on but"
+)
+
+// Model is vision-capable but the flag is off: advisory hint, no warning.
+func TestProbeLlamaCppBackends_VisionHintWhenDisabled(t *testing.T) {
+	out := probeWithVision(t, true, false)
+	if !strings.Contains(out, visionEnableHint) {
+		t.Errorf("expected vision-enable hint, got logs: %s", out)
+	}
+	if strings.Contains(out, visionReverseWarn) {
+		t.Errorf("unexpected reverse warning in logs: %s", out)
+	}
+}
+
+// Flag is on but the model cannot see: reverse warning, no enable hint.
+func TestProbeLlamaCppBackends_VisionWarnWhenEnabledButUnsupported(t *testing.T) {
+	out := probeWithVision(t, false, true)
+	if !strings.Contains(out, visionReverseWarn) {
+		t.Errorf("expected reverse vision warning, got logs: %s", out)
+	}
+	if strings.Contains(out, visionEnableHint) {
+		t.Errorf("unexpected enable hint in logs: %s", out)
+	}
+}
+
+// Flag agrees with the probe (both on, both off): neither message fires.
+func TestProbeLlamaCppBackends_VisionNoMessageWhenConsistent(t *testing.T) {
+	for _, agree := range []bool{true, false} {
+		out := probeWithVision(t, agree, agree)
+		if strings.Contains(out, visionEnableHint) || strings.Contains(out, visionReverseWarn) {
+			t.Errorf("vision=%t enabled=%t: expected no hint/warning, got logs: %s", agree, agree, out)
+		}
 	}
 }
 

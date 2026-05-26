@@ -189,14 +189,24 @@ func (s *Server) probeLlamaCppBackends() {
 			Bool("supports_vision_detected", props.SupportsVision).
 			Msg("probed llama.cpp backend")
 
-		// Vision hint: never override the manual agent.vision.enabled flag,
-		// but log a suggestion when the probe sees vision on the agent's
-		// model and the flag is off, so the operator can flip it in admin
-		// without re-reading the discovery output. Only meaningful for the
-		// agent stage — embedding/reranker probes also pass through here.
-		if props.SupportsVision && st.name == "agent" && !s.cfg.Agent.Vision.Enabled {
-			s.logger.Info().Str("backend", b.Name).Str("model", st.model).
-				Msg("hint: probe detected modalities.vision — consider enabling agent.vision.enabled in admin")
+		// Vision sanity-check (agent stage only): the probe never overrides the
+		// manual agent.vision.enabled flag — the operator's assertion is
+		// authoritative — but it logs whenever its reading disagrees with the
+		// flag, in either direction. Only meaningful for the agent stage;
+		// embedding/reranker probes also pass through here.
+		if st.name == "agent" {
+			switch {
+			case props.SupportsVision && !s.cfg.Agent.Vision.Enabled:
+				// Capable model, flag off: suggest the operator turn it on in
+				// admin without re-reading the discovery output.
+				s.logger.Info().Str("backend", b.Name).Str("model", st.model).
+					Msg("hint: probe detected modalities.vision — consider enabling agent.vision.enabled in admin")
+			case !props.SupportsVision && s.cfg.Agent.Vision.Enabled:
+				// Flag on, model can't see: image attachment will fail at
+				// inference, so warn rather than wait for the runtime error.
+				s.logger.Warn().Str("backend", b.Name).Str("model", st.model).
+					Msg("warning: agent.vision.enabled is on but probe reports no modalities.vision — the configured model likely cannot process images")
+			}
 		}
 	}
 
