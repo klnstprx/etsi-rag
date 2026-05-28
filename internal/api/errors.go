@@ -2,11 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/openai/openai-go"
 	"github.com/rs/zerolog"
+
+	"etsi-rag/internal/llm"
 )
 
 // logger is the package-level logger used by AppError.WriteJSON to surface
@@ -149,4 +153,23 @@ func ErrServiceUnavailable(msg string) *AppError {
 		Code:    http.StatusServiceUnavailable,
 		Message: msg,
 	}
+}
+
+// classifyUpstreamError maps an error from the agent / retrieval / embedding
+// path to the right HTTP status. Failures that originate in the model server —
+// an empty response, or any upstream HTTP error — are 502s, not 500s: the
+// fault is the gateway's, not ours. Everything else stays a 500. Sentinels are
+// matched through %w wrapping via errors.Is/As, so callers can wrap freely.
+func classifyUpstreamError(err error) *AppError {
+	switch {
+	case errors.Is(err, llm.ErrEmptyCompletion):
+		return ErrEmptyLLMResponse()
+	case errors.Is(err, llm.ErrEmptyEmbedding):
+		return ErrEmptyEmbeddingResponse()
+	}
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		return ErrBadGateway(err)
+	}
+	return ErrInternal(err)
 }

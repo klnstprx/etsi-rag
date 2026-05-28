@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -920,6 +921,63 @@ func TestChatWithTools(t *testing.T) {
 				t.Errorf("content = %q, want %q", resp.Choices[0].Message.Content, tt.wantContent)
 			}
 		})
+	}
+}
+
+func TestChatWithTools_EmptyChoices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":      "chatcmpl-empty",
+			"object":  "chat.completion",
+			"created": 1234567890,
+			"model":   "test-model",
+			"choices": []map[string]any{},
+		})
+	}))
+	defer srv.Close()
+
+	client := newTestChatClient(srv.URL)
+	msgs := []openai.ChatCompletionMessageParamUnion{
+		{OfUser: &openai.ChatCompletionUserMessageParam{
+			Content: openai.ChatCompletionUserMessageParamContentUnion{OfString: openai.String("hi")},
+		}},
+	}
+
+	_, err := client.ChatWithTools(context.Background(), msgs, nil)
+	if !errors.Is(err, ErrEmptyCompletion) {
+		t.Fatalf("err = %v, want ErrEmptyCompletion", err)
+	}
+}
+
+func TestEmbed_EmptyDataSentinel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list", "model": "test", "data": []any{},
+			"usage": map[string]int{"prompt_tokens": 0, "total_tokens": 0},
+		})
+	}))
+	defer srv.Close()
+
+	_, err := newTestEmbedClient(srv.URL).Embed(context.Background(), "hello")
+	if !errors.Is(err, ErrEmptyEmbedding) {
+		t.Fatalf("err = %v, want ErrEmptyEmbedding", err)
+	}
+}
+
+func TestEmbedBatch_ShortResponseSentinel(t *testing.T) {
+	// Server returns one embedding for a two-item batch — a shortfall that
+	// would otherwise misalign chunks and embeddings downstream.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(embeddingResponse([]float64{0.1, 0.2}))
+	}))
+	defer srv.Close()
+
+	_, err := newTestEmbedClient(srv.URL).EmbedBatch(context.Background(), []string{"a", "b"})
+	if !errors.Is(err, ErrEmptyEmbedding) {
+		t.Fatalf("err = %v, want ErrEmptyEmbedding", err)
 	}
 }
 

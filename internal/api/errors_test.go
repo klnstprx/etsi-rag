@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/openai/openai-go"
 	"github.com/rs/zerolog"
+
+	"etsi-rag/internal/llm"
 )
 
 func TestWriteJSON_Logs5xxWithWrappedError(t *testing.T) {
@@ -86,5 +90,51 @@ func TestWriteJSON_Skips5xxWithoutWrappedError(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Errorf("AppError without Err should not log, got %q", buf.String())
+	}
+}
+
+func TestClassifyUpstreamError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode int
+		wantMsg  string
+	}{
+		{
+			name:     "empty completion -> 502",
+			err:      fmt.Errorf("agent chat: %w", llm.ErrEmptyCompletion),
+			wantCode: http.StatusBadGateway,
+			wantMsg:  "Empty response from LLM",
+		},
+		{
+			name:     "empty embedding -> 502",
+			err:      fmt.Errorf("embedding query: %w", llm.ErrEmptyEmbedding),
+			wantCode: http.StatusBadGateway,
+			wantMsg:  "Empty response from embedding service",
+		},
+		{
+			name:     "upstream HTTP error -> 502 bad gateway",
+			err:      fmt.Errorf("chat with tools: %w", &openai.Error{StatusCode: http.StatusTooManyRequests}),
+			wantCode: http.StatusBadGateway,
+			wantMsg:  "External service unavailable",
+		},
+		{
+			name:     "generic error -> 500",
+			err:      errors.New("something internal broke"),
+			wantCode: http.StatusInternalServerError,
+			wantMsg:  "Internal server error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyUpstreamError(tt.err)
+			if got.Code != tt.wantCode {
+				t.Errorf("code = %d, want %d", got.Code, tt.wantCode)
+			}
+			if got.Message != tt.wantMsg {
+				t.Errorf("message = %q, want %q", got.Message, tt.wantMsg)
+			}
+		})
 	}
 }

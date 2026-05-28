@@ -90,7 +90,7 @@ func (c *EmbedClient) Embed(ctx context.Context, text string) ([]float32, error)
 	}
 
 	if len(resp.Data) == 0 {
-		return nil, fmt.Errorf("no embedding returned")
+		return nil, ErrEmptyEmbedding
 	}
 
 	return float64sToFloat32s(resp.Data[0].Embedding), nil
@@ -118,6 +118,11 @@ func (c *EmbedClient) EmbedBatch(ctx context.Context, texts []string) ([][]float
 		})
 		if err != nil {
 			return nil, fmt.Errorf("creating batch embeddings: %w", err)
+		}
+		if len(resp.Data) != len(batch) {
+			// A short response would silently misalign chunks and embeddings
+			// downstream; treat any shortfall as an empty-response failure.
+			return nil, ErrEmptyEmbedding
 		}
 
 		// Sort by Index to guarantee input-order alignment regardless of server response order.
@@ -187,7 +192,7 @@ func (c *ChatClient) Chat(ctx context.Context, messages []openai.ChatCompletionM
 	}
 
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no choices returned")
+		return "", ErrEmptyCompletion
 	}
 
 	return resp.Choices[0].Message.Content, nil
@@ -237,6 +242,9 @@ func (c *ChatClient) ChatWithTools(ctx context.Context, messages []openai.ChatCo
 	})
 	if err != nil {
 		return nil, fmt.Errorf("chat with tools: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, ErrEmptyCompletion
 	}
 	return resp, nil
 }

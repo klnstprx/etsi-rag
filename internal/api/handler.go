@@ -107,7 +107,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Run agent
 	result, err := ag.Chat(r.Context(), sessionID, userMsg, nil)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
+		classifyUpstreamError(err).WriteJSON(w, r)
 		return
 	}
 
@@ -186,7 +186,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 
 	ingested, chunks, err := h.ingester.Ingest(r.Context(), docs)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
+		classifyUpstreamError(err).WriteJSON(w, r)
 		return
 	}
 
@@ -218,7 +218,7 @@ func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.retriever.Retrieve(r.Context(), req.Query, rag.RetrieveOpts{TopK: req.TopK})
 	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
+		classifyUpstreamError(err).WriteJSON(w, r)
 		return
 	}
 

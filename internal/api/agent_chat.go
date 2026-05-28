@@ -82,7 +82,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	result, err := ag.Chat(r.Context(), sessionID, req.Message, nil)
 	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
+		classifyUpstreamError(err).WriteJSON(w, r)
 		return
 	}
 
