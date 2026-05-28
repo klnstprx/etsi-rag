@@ -406,6 +406,17 @@ func (c *Crawler) embedStage(
 				embedSkipped++
 				continue
 			}
+			// force (reprocess) path. UMA's CMS serves identical content at the
+			// bare program URL and its /cms/menu/... sub-pages; they share a
+			// content hash and collapse to one docID. Recreating under item.URL
+			// would key documents.url to whichever colliding page is reprocessed
+			// last — flipping it off the canonical bare URL and silently breaking
+			// eval golden_urls (the !force dedup path above guards this on a live
+			// crawl; reprocess must guard it too). Preserve the more canonical of
+			// {existing, item.URL} — see preferCanonical in crawler.go.
+			if existingURL, err := c.store.GetDocumentURL(ctx, docID); err == nil && !preferCanonical(item.URL, existingURL) {
+				urlStr = existingURL
+			}
 			if err := c.store.DeleteDocument(ctx, docID); err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Str("doc_id", docID).Msg("delete stale document failed")
 				progress.EmbedFail.Add(1)

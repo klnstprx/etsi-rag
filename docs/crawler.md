@@ -131,6 +131,7 @@ Reprocess sets the embed stage's `force` flag, which changes two things vs. a re
 
 - The "content hash unchanged" early-out is skipped, so identical bytes still flow through chunking and embedding.
 - When the content-addressed `doc_id` already exists in `documents`, the stale row is dropped via `DeleteDocument` (chunks and embeddings cascade) and the document is re-ingested with the current embedder/chunker. Without this delete, `ingester.Ingest` would hit the `documents.id` PK and reprocess would silently skip everything.
+- The re-ingested document keeps the more **canonical** of its current `documents.url` and the page being reprocessed (`preferCanonical`, same rule as the live-crawl dedup path). UMA serves identical content at the bare program URL (`/grado-en-X/`) and its `/cms/menu/...` sub-pages, which collapse to one `doc_id`; without this, recreating under whichever colliding page is reprocessed last would flip `documents.url` off the bare URL and silently break lookups that key on it (e.g. eval `golden_urls`).
 
 This is the supported path after switching embedding model or dimension: save the new model/dimension in the admin config editor, then click **Reprocess**. The admin UI shows a warning toast on the embedding-section save when either field changed.
 
@@ -152,7 +153,7 @@ Consequences:
 - **`crawl_pages.doc_id` is many-to-one with `documents.id`** (multiple URLs can share a doc).
 - **When a URL's content changes**, its `crawl_pages.doc_id` points at a new document; the old one may remain if another URL still references it, or become an orphan.
 - **Orphan cleanup**: `PurgeOrphanDocuments` runs automatically at the end of every `runCrawl` / `runReprocess`. It deletes documents whose `id` is not in `SELECT doc_id FROM crawl_pages`; chunks and embeddings cascade via `ON DELETE CASCADE`.
-- **`documents.url`** stores a representative URL (first seen for this content). The full list of URLs surfacing a given document lives in `crawl_pages`.
+- **`documents.url`** stores a representative URL for the content. Among URLs that collide on the same `doc_id`, `preferCanonical` picks the most canonical one (fewest path segments, then shortest path) rather than whichever won the timing race — on both live crawl and reprocess. The full list of URLs surfacing a given document lives in `crawl_pages`.
 
 ## Files
 

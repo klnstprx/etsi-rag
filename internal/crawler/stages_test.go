@@ -143,6 +143,101 @@ func TestEmbedStage_Force_DeletesAndReingestsExistingDocument(t *testing.T) {
 	}
 }
 
+// TestEmbedStage_Force_KeepsCanonicalURL is the reprocess regression for the
+// 2026-05-29 URL-flip: when force=true (reprocess) re-derives a document whose
+// content also lives at a /cms/menu/... sub-page, deleting and recreating the
+// doc must NOT flip documents.url off the canonical bare URL. The bare URL was
+// already canonical; a sub-page reprocessed afterwards must not displace it.
+func TestEmbedStage_Force_KeepsCanonicalURL(t *testing.T) {
+	c, s := newEmbedStageHarness(t)
+	ctx := context.Background()
+
+	contentHash := "3333333333333333333333333333333333333333333333333333333333333333"
+	docID := StableDocID(contentHash)
+	bareURL := "https://www.uma.es/grado-en-ingenieria-del-software/"
+	if err := s.CreateDocument(ctx, &domain.Document{
+		ID:       docID,
+		Title:    "Grado",
+		Content:  "x",
+		URL:      &bareURL,
+		Language: domain.LanguageES,
+	}); err != nil {
+		t.Fatalf("seed CreateDocument: %v", err)
+	}
+
+	// Reprocess streams the sub-page (the bare URL is not separately re-fed
+	// because it shares this content hash and collapses to the same docID).
+	subPageURL := "https://www.uma.es/grado-en-ingenieria-del-software/cms/menu/informacion-grado/"
+	in := make(chan ParseItem, 1)
+	in <- ParseItem{
+		URL:         subPageURL,
+		Title:       "Grado",
+		Text:        "fresh content body for re-embedding",
+		ContentHash: contentHash,
+		ContentType: "html",
+		Source:      CrawlSourceRef{Key: "test"},
+	}
+	close(in)
+
+	progress := &RunProgress{}
+	c.embedStage(ctx, in, progress, time.Now(), func() {}, true)
+
+	if got := progress.Ingested.Load(); got != 1 {
+		t.Errorf("Ingested = %d, want 1 (force must re-ingest)", got)
+	}
+	gotURL, err := s.GetDocumentURL(ctx, docID)
+	if err != nil {
+		t.Fatalf("GetDocumentURL: %v", err)
+	}
+	if gotURL != bareURL {
+		t.Errorf("documents.url = %q, want %q (reprocess must keep canonical bare URL, not flip to sub-page)", gotURL, bareURL)
+	}
+}
+
+// TestEmbedStage_Force_PromotesToCanonicalURL is the inverse: when a prior bad
+// reprocess left documents.url on a sub-page, reprocessing the bare URL (same
+// content hash) must promote documents.url back to the canonical bare URL.
+func TestEmbedStage_Force_PromotesToCanonicalURL(t *testing.T) {
+	c, s := newEmbedStageHarness(t)
+	ctx := context.Background()
+
+	contentHash := "4444444444444444444444444444444444444444444444444444444444444444"
+	docID := StableDocID(contentHash)
+	subPageURL := "https://www.uma.es/grado-en-ingenieria-del-software/cms/menu/informacion-grado/"
+	if err := s.CreateDocument(ctx, &domain.Document{
+		ID:       docID,
+		Title:    "Grado",
+		Content:  "x",
+		URL:      &subPageURL,
+		Language: domain.LanguageES,
+	}); err != nil {
+		t.Fatalf("seed CreateDocument: %v", err)
+	}
+
+	bareURL := "https://www.uma.es/grado-en-ingenieria-del-software/"
+	in := make(chan ParseItem, 1)
+	in <- ParseItem{
+		URL:         bareURL,
+		Title:       "Grado",
+		Text:        "fresh content body for re-embedding",
+		ContentHash: contentHash,
+		ContentType: "html",
+		Source:      CrawlSourceRef{Key: "test"},
+	}
+	close(in)
+
+	progress := &RunProgress{}
+	c.embedStage(ctx, in, progress, time.Now(), func() {}, true)
+
+	gotURL, err := s.GetDocumentURL(ctx, docID)
+	if err != nil {
+		t.Fatalf("GetDocumentURL: %v", err)
+	}
+	if gotURL != bareURL {
+		t.Errorf("documents.url = %q, want %q (reprocess must promote to canonical bare URL)", gotURL, bareURL)
+	}
+}
+
 // TestEmbedStage_DedupSwapsToCanonicalURL verifies that when a content-hash
 // collision happens at the no-force dedup path, embedStage updates
 // documents.url to the more canonical of the two URLs. UMA's CMS serves
