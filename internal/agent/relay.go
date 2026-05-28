@@ -56,6 +56,11 @@ func drainStreams(
 	for {
 		select {
 		case <-ctx.Done():
+			// We stop draining and return without closing events. The agent
+			// goroutine is intentionally abandoned here: the same ctx is wired
+			// into Agent.ChatStream, so runToolLoop unwinds on its own and the
+			// goroutine exits. Its writes can't block beyond the tokens(64) /
+			// events(16) buffers, so the abandonment window is bounded.
 			return ctx.Err()
 
 		case tok, ok := <-tokens:

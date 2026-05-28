@@ -4,13 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"etsi-rag/internal/agent"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-
-	"etsi-rag/internal/agent"
 )
 
 // openaiSSESink implements agent.StreamSink for the public OpenAI-compatible
@@ -175,8 +174,9 @@ func prepareSSE(w http.ResponseWriter) (http.Flusher, error) {
 
 func randomHex(n int) string {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "0000000000000000"[:n*2]
-	}
+	// crypto/rand.Read never returns an error — it crashes the program
+	// irrecoverably on the (legacy-only) OS read failure rather than reporting
+	// it — so there is no error branch to handle here.
+	rand.Read(b)
 	return hex.EncodeToString(b)
 }

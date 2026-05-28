@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/go-chi/chi/v5/middleware"
+
 	"etsi-rag/internal/agent"
 )
 
@@ -106,8 +108,15 @@ func (h *Handler) agentChatStreaming(w http.ResponseWriter, r *http.Request, ag 
 
 	sink := &agentSSESink{w: w, flusher: flusher}
 	// A RelayChat error here almost always means the client disconnected
-	// mid-stream; headers are already flushed so there's nothing to surface.
-	_ = agent.RelayChat(r.Context(), ag, sessionID, message, sink)
+	// mid-stream; headers are already flushed so there's nothing to surface to
+	// the client — log at debug for observability.
+	if err := agent.RelayChat(r.Context(), ag, sessionID, message, sink); err != nil {
+		logger.Debug().
+			Err(err).
+			Str("path", r.URL.Path).
+			Str("request_id", middleware.GetReqID(r.Context())).
+			Msg("agent chat stream relay ended early (likely client disconnect)")
+	}
 }
 
 // agentSSESink implements agent.StreamSink for the proprietary API, emitting a

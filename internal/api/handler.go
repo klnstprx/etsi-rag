@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/openai/openai-go"
 
 	"etsi-rag/internal/agent"
@@ -142,9 +143,15 @@ func (h *Handler) chatSessionStreaming(w http.ResponseWriter, r *http.Request, a
 
 	sink := newOpenAISSESink(w, flusher, model)
 	// Errors from RelayChat almost always mean the client disconnected mid-stream
-	// (writes to w fail). There's nothing useful to do but log — we can't change
-	// the status code after headers have been flushed.
-	_ = agent.RelayChat(r.Context(), ag, sessionID, userMsg, sink)
+	// (writes to w fail). We can't change the status code after headers have been
+	// flushed, so just log at debug for observability.
+	if err := agent.RelayChat(r.Context(), ag, sessionID, userMsg, sink); err != nil {
+		logger.Debug().
+			Err(err).
+			Str("path", r.URL.Path).
+			Str("request_id", middleware.GetReqID(r.Context())).
+			Msg("chat stream relay ended early (likely client disconnect)")
+	}
 }
 
 // Ingest handles POST /v1/rag/ingest.
