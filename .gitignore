@@ -11,6 +11,12 @@ coverage.html
 
 # Database files
 data/
+
+# Model weights (mounted into the llama container; see models/README.md)
+models/*
+!models/.gitkeep
+!models/README.md
+
 *_templ.go
 internal/admin/static/styles.css
 

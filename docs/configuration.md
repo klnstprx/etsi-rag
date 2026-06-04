@@ -8,10 +8,10 @@ Centralized configuration via TOML files and environment variables.
 ## Loading Order
 
 ```
-config/config.default.toml  ->  config/{RUN_MODE}.toml  ->  APP__* env vars
+config/config.default.toml  ->  config/config.toml  ->  APP__* env vars
 ```
 
-Set `RUN_MODE` environment variable to load an overlay (e.g., `RUN_MODE=test` loads `config/test.toml`). Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__AGENT__TEMPERATURE=0.5`).
+Environment variables use `APP__` prefix with `__` as section separator (e.g., `APP__AGENT__TEMPERATURE=0.5`).
 
 On first run, if `config/config.toml` does not exist, `config.default.toml` is copied into place; from then on `config.toml` is the user-editable file (gitignored). The same template-copy pattern applies to `config/sources.toml` (seeded from `sources.default.toml`), which holds the crawl source list.
 
@@ -55,8 +55,7 @@ Deleting a source — whether via the admin UI or by hand-editing `sources.toml`
 For headless installs (remote box, container, CI) where you can't reach the admin UI, you have three paths in increasing precedence — the later one always wins:
 
 1. **Drop a complete `config/config.toml`** into the project before first launch. Include every section the deployment needs, including `[eval]` if the Python harness will run there. This is the simplest path and is what `ensureConfigFile` will pick up on first boot (no template copy).
-2. **Use a `RUN_MODE` overlay**: ship the baseline as `config.toml` and put environment-specific deltas in `config/<mode>.toml`, then start the server with `RUN_MODE=<mode>`. Useful for keeping secrets and host-specific endpoints out of the baseline.
-3. **`APP__*` env vars** for last-mile injection (secrets, port pinning, etc.). Example: `APP__AGENT__TEMPERATURE=0.3`, `APP__OBJECT_STORE__SECRET_KEY=...`.
+2. **`APP__*` env vars** for last-mile injection (secrets, port pinning, etc.). Example: `APP__AGENT__TEMPERATURE=0.3`, `APP__OBJECT_STORE__SECRET_KEY=...`.
 
 Admin-UI saves only rewrite the sections the Go config struct owns; foreign top-level sections (notably `[eval]`) round-trip unchanged. So a pre-provisioned `[eval]` block survives any later edit performed through the UI. See [Persistence](#persistence).
 

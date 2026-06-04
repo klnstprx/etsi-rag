@@ -1,0 +1,32 @@
+# Build artifacts (regenerated inside the builder stage)
+bin/
+internal/admin/static/styles.css
+**/*_templ.go
+coverage.out
+coverage.html
+
+# Runtime state — never bake a corpus or a user's live config into the image
+data/
+config/config.toml
+config/sources.toml
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# Python eval harness (not needed by the Go build)
+eval/results/
+eval/pairwise_results/
+**/__pycache__/
+
+# Docs / diagrams
+*.svg

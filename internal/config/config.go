@@ -22,8 +22,6 @@ const (
 
 	envPrefix    = "APP__"
 	envSeparator = "__"
-	envRunMode   = "RUN_MODE"
-	defaultMode  = "development"
 )
 
 // BackendConfig represents an LLM server endpoint.
@@ -256,7 +254,7 @@ func ensureConfigFile(configDir string) error {
 
 // Load reads configuration from files and environment variables.
 // It ensures config.toml exists (copying from config.default.toml if needed),
-// then loads config.toml → {RUN_MODE}.toml → APP__* env vars.
+// then loads config.toml → APP__* env vars.
 func Load(configDir string) (*Config, error) {
 	if err := ensureConfigFile(configDir); err != nil {
 		return nil, fmt.Errorf("ensuring config file: %w", err)
@@ -268,18 +266,6 @@ func Load(configDir string) (*Config, error) {
 	cfgPath := ConfigPath(configDir)
 	if err := k.Load(file.Provider(cfgPath), toml.Parser()); err != nil {
 		return nil, fmt.Errorf("loading %s: %w", ConfigFileName, err)
-	}
-
-	// Load environment-specific config if RUN_MODE is set
-	runMode := os.Getenv(envRunMode)
-	if runMode == "" {
-		runMode = defaultMode
-	}
-	modePath := configDir + "/" + runMode + ".toml"
-	if _, err := os.Stat(modePath); err == nil {
-		if err := k.Load(file.Provider(modePath), toml.Parser()); err != nil {
-			return nil, fmt.Errorf("loading %s: %w", modePath, err)
-		}
 	}
 
 	// Load environment variables with APP__ prefix

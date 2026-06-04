@@ -1,0 +1,137 @@
+# ============================================================
+# Container config — bind-mounted to /app/config/config.toml by
+# docker-compose. Differs from config.default.toml only where the
+# container network topology requires it (host bindings + service
+# DNS names). Keep the rest in sync with config.default.toml.
+#
+# config.Load applies code defaults for omitted fields but does NOT
+# merge with config.default.toml at runtime, so this file is complete.
+# ============================================================
+
+# ============================================================
+# Infrastructure
+# ============================================================
+
+[server]
+host = '0.0.0.0'                 # bind all interfaces so the port is reachable outside the container
+port = 3000
+read_timeout = 15
+write_timeout = 300
+request_timeout = 120
+idle_timeout = '60s'
+shutdown_timeout = '30s'
+
+[admin]
+backend_probe_timeout = '3s'
+backend_models_timeout = '5s'
+chat_stream_timeout = '5m'
+
+[database]
+path = 'data/etsi-rag.db'        # under /app/data — persisted via the app-data volume
+
+[object_store]
+endpoint = 'http://rustfs:9000'  # the rustfs compose service
+bucket = 'etsi-rag'
+access_key = 'rustfsadmin'       # must match RUSTFS_ACCESS_KEY in docker-compose.yml
+secret_key = 'rustfsadmin'       # must match RUSTFS_SECRET_KEY in docker-compose.yml
+region = 'us-east-1'
+
+[[backends]]
+name = 'local-llama'
+base_url = 'http://llama:1337/v1'  # the llama compose service
+api_key = ''
+enabled = true
+is_llama_cpp = true
+max_retries = 10
+
+# ============================================================
+# Pipeline (chunk → embed → retrieve → answer)
+# ============================================================
+
+[chunking]
+max_chunk_size = 256
+chunk_overlap = 32
+min_chunk_size = 64
+separators = ["\n\n", "\n", '. ', ' ', '']
+
+[embedding]
+backend = 'local-llama'
+model = 'Qwen3-Embedding-4B-Q8_0.gguf'  # filename resolved by the router from --models-dir
+dimension = 2560
+max_tokens = 512
+batch_size = 8
+
+[retrieval]
+top_k = 10
+max_context_tokens = 2048
+retrieval_mode = 'dense'
+
+[reranker]
+enabled = true
+backend = 'local-llama'
+model = 'bge-reranker-v2-m3'
+top_n = 30
+max_tokens = 0
+reserved_tokens = 16
+timeout = '30s'
+
+[agent]
+backend = 'local-llama'
+model = 'Qwen3-Embedding-8B-Q8_0.gguf'
+max_tokens = 1024
+temperature = 0.7
+context_window = 0
+max_iterations = 5
+tool_output_max_tokens = 0
+system_prompt = ''
+
+[agent.vision]
+enabled = false                          # set true only if the agent model is vision-capable
+max_images_per_call = 6
+max_image_bytes_per_call = 65536
+# The LLM backend (the llama container) fetches artifact URLs, so this must
+# resolve from inside that container — i.e. the app compose service name.
+public_base_url = 'http://app:3000'
+
+[session]
+max_messages = 10
+ttl_seconds = 3600
+
+# ============================================================
+# Ingest (crawler)
+# ============================================================
+
+[crawler]
+request_delay = '500ms'
+request_timeout = '30s'
+progress_log_interval = '30s'
+max_depth = 10
+max_pages = 5000
+concurrency = 4
+max_body_size = 10485760
+min_content_length = 200
+embed_workers = 1
+parse_workers = 4
+max_embed_fails = 10
+js_patterns = ['/centers/subject/']
+rejection_patterns = [
+    'página no encontrada',
+    'error 404',
+    'página en construcción',
+    'sitio en construcción',
+    'sin descripción disponible',
+]
+strip_query_params = [
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+    'fbclid', 'gclid', '_ga', 'ref', 'lang',
+]
+
+[crawler.pdf]
+heading_patterns = [
+    'DESCRIPCION', 'OBJETIVOS', 'CONTENIDOS', 'METODOLOGIA',
+    'EVALUACION', 'COMPETENCIAS', 'TEMARIO', 'BIBLIOGRAFIA',
+    'ACTIVIDADES FORMATIVAS', 'SISTEMA DE EVALUACION',
+    'RESULTADOS DE APRENDIZAJE', 'EQUIPO DOCENTE',
+    'RECOMENDACIONES', 'DISTRIBUCION DEL TRABAJO',
+]
+render_dpi = 120

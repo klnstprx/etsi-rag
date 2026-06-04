@@ -1,0 +1,107 @@
+# etsi-rag deployment.
+#
+#   app     — the Go server (built from ./Dockerfile)
+#   llama   — LLM/embedding/rerank backend (official llama.cpp CUDA image)
+#   rustfs  — S3-compatible object store (official image)
+#   createbucket — one-shot: creates the etsi-rag bucket on first boot
+#
+# Quick start:
+#   1. Install the NVIDIA Container Toolkit (for the llama GPU service).
+#   2. Drop your .gguf weights into ./models — filenames must match the
+#      `model = '...'` values in deploy/config.docker.toml (the router
+#      resolves models by filename from --models-dir, loading on first use).
+#   3. docker compose up --build
+#
+# Admin UI:      http://localhost:3000/admin
+# RustFS console: http://localhost:9001
+#
+# Override any scalar config value via env, e.g. APP__SERVER__PORT=8080.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      llama:
+        condition: service_started
+      createbucket:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist the SQLite corpus across restarts.
+      - app-data:/app/data
+      # Container config (service DNS names + 0.0.0.0 bind). Edit this file,
+      # not config.default.toml, to change deployment settings.
+      - ./deploy/config.docker.toml:/app/config/config.toml:ro
+    restart: unless-stopped
+
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    command:
+      - "--models-dir"
+      - "/models"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "1337"
+      - "--models-max"
+      - "4"
+      # Per-model args (e.g. --mmproj for vision, -c context size) need a
+      # router preset: add `--models-preset /models/presets.ini` and mount it.
+      # See docs/llama-server.md.
+    ports:
+      - "1337:1337"   # exposed for debugging; the app reaches it via service DNS
+    volumes:
+      - ./models:/models:ro
+    # GPU access via CDI — the one form that is portable across BOTH Docker
+    # and Podman (the compose `devices` field accepts CDI device names on both).
+    #
+    # Host prerequisite: install the NVIDIA Container Toolkit and generate a
+    # CDI spec once:
+    #   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+    # Toolkit >= 1.18 keeps it fresh automatically (nvidia-cdi-refresh service).
+    # Docker 28+ reads CDI by default; on 25–27 enable it with
+    #   {"features": {"cdi": true}} in /etc/docker/daemon.json.
+    #
+    # CPU-only? Remove the `devices` block and switch the image above to
+    # ghcr.io/ggml-org/llama.cpp:server-intel (expect much slower inference).
+    devices:
+      - "nvidia.com/gpu=all"   # or "nvidia.com/gpu=0" to pin a single GPU
+    restart: unless-stopped
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin   # must match object_store.access_key in config.docker.toml
+      RUSTFS_SECRET_KEY: rustfsadmin   # must match object_store.secret_key in config.docker.toml
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - rustfs-data:/data
+    restart: unless-stopped
+
+  # One-shot: create the bucket the app expects (it does not auto-create one).
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      rustfs:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set rustfs http://rustfs:9000 rustfsadmin rustfsadmin; do
+        echo 'waiting for rustfs...'; sleep 2;
+      done;
+      mc mb --ignore-existing rustfs/etsi-rag;
+      echo 'bucket ready';
+      "
+    restart: "no"
+
+volumes:
+  app-data:
+  rustfs-data:

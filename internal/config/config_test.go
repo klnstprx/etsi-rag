@@ -244,32 +244,6 @@ retrieval_mode = "wat"
 	}
 }
 
-func TestLoadModeOverride(t *testing.T) {
-	dir := writeTempConfig(t, `
-[server]
-port = 3000
-`)
-	// Write a mode-specific override file
-	modeToml := `
-[server]
-port = 3001
-`
-	if err := os.WriteFile(filepath.Join(dir, "test.toml"), []byte(modeToml), 0o644); err != nil {
-		t.Fatalf("writing test.toml: %v", err)
-	}
-
-	t.Setenv("RUN_MODE", "test")
-
-	cfg, err := Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.Server.Port != 3001 {
-		t.Errorf("port = %d, want 3001 (mode override)", cfg.Server.Port)
-	}
-}
-
 func TestLoadBackends(t *testing.T) {
 	cfg, err := Load(writeTempConfig(t, `
 [[backends]]
