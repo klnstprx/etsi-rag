@@ -128,7 +128,7 @@ batch_size = 2                # texts per embedding API call
 
 [retrieval]
 top_k = 10                   # number of chunks to retrieve
-max_context_tokens = 2048    # token budget for retrieved context
+max_context_tokens = 4092    # token budget for retrieved context (ADR-007 tuned value)
                              # invariant: chunking.max_chunk_size must be <= max_context_tokens
                              # (validated at load time; otherwise a single chunk can starve
                              # the retrieval budget)

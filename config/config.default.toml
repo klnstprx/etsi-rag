@@ -53,7 +53,9 @@ batch_size = 8
 
 [retrieval]
 top_k = 10
-max_context_tokens = 2048
+# Tuned operating point from the context-budget A/B (ADR-007): 4092 with
+# top_k=10; naive widening (8192/top_k=20) regressed answer quality.
+max_context_tokens = 4092
 # "dense"  — cosine similarity over query embedding (default).
 # "hybrid" — dense + BM25 merged via reciprocal-rank fusion. See ADR-008.
 retrieval_mode = 'dense'

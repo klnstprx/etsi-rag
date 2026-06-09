@@ -447,7 +447,7 @@ func (c *Config) applyDefaults() {
 		c.Retrieval.TopK = 10
 	}
 	if c.Retrieval.MaxContextTokens == 0 {
-		c.Retrieval.MaxContextTokens = 2048
+		c.Retrieval.MaxContextTokens = 4092
 	}
 	if c.Retrieval.RetrievalMode == "" {
 		c.Retrieval.RetrievalMode = "dense"

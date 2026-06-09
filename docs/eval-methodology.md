@@ -34,8 +34,8 @@ emitted — they were within-noise for the kind of comparisons we run.
 1. **Judge bias.** GPT-class judges score their own family's outputs
    higher (self-preference, ~10–30 points in published studies); reward
    fluent answers over factually weaker ones; conflate confidence with
-   correctness. See Zheng et al., *Judging LLM-as-a-Judge with MT-Bench
-   and Chatbot Arena* (NeurIPS 2023).
+   correctness. See Zheng et al., _Judging LLM-as-a-Judge with MT-Bench
+   and Chatbot Arena_ (NeurIPS 2023).
 2. **Reasoning instability.** Same judge, same input, different seed →
    different score. Even at temperature=0, output is non-deterministic
    across vLLM/llama.cpp versions. Per-row variance of ±5–15 points is
@@ -55,103 +55,16 @@ agent retrieved the gold doc** — top-5 was nearly identical across both
 runs and the gold wasn't there. Both agents fabricated different
 director names from the same off-topic candidate set.
 
-| Agent | Answer | Score |
-|---|---|---|
-| e4b | "Manuel Nicolás Enciso García-Oliveros" + multiple phones | 72 |
-| 26b-a4b | "Ernesto Pimentel Sánchez" + one phone | 5 |
+| Agent   | Answer                                                    | Score |
+| ------- | --------------------------------------------------------- | ----- |
+| e4b     | "Manuel Nicolás Enciso García-Oliveros" + multiple phones | 72    |
+| 26b-a4b | "Ernesto Pimentel Sánchez" + one phone                    | 5     |
 
 Both wrong against the gold; the 67-point gap is judge artefact (the
 e4b answer happened to contain phone-number tokens that partially
 matched the reference). This row's −67 weight in the aggregate
 attributed to "the bigger agent regressed" was a pure measurement
 error. Per-row variance like this is the rule, not the exception.
-
-## Five upgrade paths, ordered by defensibility-per-effort
-
-### 1. Lean on retrieval metrics (already have)
-
-`recall_at_k`, `MRR` are objective set-membership against gold URLs.
-Decades of IR literature, well-defined statistical tests, judge-
-independent. Across the four ADR-009 rerun configurations these moved
-unambiguously and are the load-bearing comparison.
-
-**Action:** in the memoria, lead the eval section with retrieval
-metrics. Frame LLM-judged Overall as a secondary trend signal with
-explicit acknowledgement of its limits (one paragraph citing Zheng
-et al.).
-
-### 2. Pairwise preference between configs [SHIPPED 2026-05-06]
-
-Instead of "score this answer 0–100," ask the judge "given two answers
-to the same question, which better answers it? A / B / tie." Output is
-a single bit per row. Translates to a defensible win-rate.
-
-**Why it helps:** eliminates absolute-score anchoring; reduces self-
-preference bias; standard in LMSYS Chatbot Arena, MT-Bench, AlpacaEval.
-
-**Implementation:** `eval/etsi_eval/pairwise.py` (judge module) +
-`eval/etsi_eval/pairwise_runner.py` (CLI). Each pair is judged TWICE
-with answer order swapped; a verdict only counts when both passes
-agree on the same underlying answer (`unstable` otherwise — that's the
-canonical positional-bias signature). Reports `wins_a` / `wins_b` /
-`ties` / `unstable`, win-rate over decisive verdicts only, and a
-two-sided binomial p-value vs the 50/50 null. Pure stdlib stats, no
-scipy. Per-category and per-difficulty breakdowns. See `eval/README.md`
-for invocation.
-
-**Headline statement gain:** "bge-m3 is preferred 47%, hybrid 35%, tied
-18% (n=83, judge=gpt-5.4-mini)" defends much better than "Overall mean
-80.5 vs 80.8."
-
-### 3. Human calibration on a sub-sample (~half a day)
-
-Pick 20–30 rows. Hand-annotate gold answers with sub-scores using the
-same rubric the judge uses. Compute:
-
-- **Cohen's κ** — inter-rater agreement between you and the judge.
-  κ > 0.4 is "moderate," > 0.6 is "substantial."
-- **Pearson's r** — correlation between your scores and judge scores.
-
-This is the cheapest credibility move. **Without this step, you cannot
-honestly defend the absolute scores.** With it, the memoria gets one
-defensible sentence: "On a held-out sample of 20 rows, the judge's
-per-row Overall correlated with author annotation at r=0.X (κ=0.Y),
-justifying its use as a relative-trend signal."
-
-**Concrete shape:** stratified random sample (a few rows per
-category/difficulty), hand-fill a CSV with author scores, small Python
-script computing κ and r.
-
-### 4. RAGAS / faithfulness via NLI (~one day)
-
-[RAGAS](https://github.com/explodinggradients/ragas) is the de facto
-standard for RAG eval. It decomposes answer-quality into:
-
-- **Faithfulness:** does each claim follow from the retrieved context?
-  (NLI model checks each sentence-level claim against context.)
-- **Answer relevance:** does the answer address the question?
-- **Context precision / recall:** what fraction of retrieved context is
-  actually relevant?
-
-Internally still uses an LLM for some judgements but the decomposition
-is more defensible than holistic 0–100 grading. **Citable framework
-adds credibility per page of the memoria.**
-
-**Concrete shape:** add `ragas` to `eval/pyproject.toml`, write a small
-adapter that takes a `results/TIMESTAMP.json` and emits RAGAS scores on
-the same rows. Report alongside our judge scores; agreement is mutual
-validation.
-
-### 5. Multi-judge ensemble
-
-Same eval against 2–3 different judges (gpt-5.4-mini + Claude Sonnet
-+ Gemini Flash, say); report median or majority score; disagreement
-between judges quantifies the noise floor. HELM and large leaderboards
-do this.
-
-**Cost:** ~3× judge bill per run. Probably overkill for the memoria
-unless you want to write specifically about judge-disagreement
-analysis. Pairwise preference is a better marginal-effort upgrade.
 
 ## Recommended memoria structure
 
@@ -187,13 +100,13 @@ memoria mention.
 
 ## References
 
-- Zheng, L. et al. (2023). *Judging LLM-as-a-Judge with MT-Bench and
-  Chatbot Arena.* NeurIPS 2023.
-- Es, S. et al. (2023). *RAGAS: Automated Evaluation of Retrieval
-  Augmented Generation.* arXiv:2309.15217.
-- Liu, Y. et al. (2023). *G-Eval: NLG Evaluation using GPT-4 with
-  Better Human Alignment.* EMNLP 2023.
-- Chiang, C. & Lee, H. (2023). *Can Large Language Models Be an
-  Alternative to Human Evaluations?* ACL 2023.
-- Cohen, J. (1960). *A Coefficient of Agreement for Nominal Scales.*
+- Zheng, L. et al. (2023). _Judging LLM-as-a-Judge with MT-Bench and
+  Chatbot Arena._ NeurIPS 2023.
+- Es, S. et al. (2023). _RAGAS: Automated Evaluation of Retrieval
+  Augmented Generation._ arXiv:2309.15217.
+- Liu, Y. et al. (2023). _G-Eval: NLG Evaluation using GPT-4 with
+  Better Human Alignment._ EMNLP 2023.
+- Chiang, C. & Lee, H. (2023). _Can Large Language Models Be an
+  Alternative to Human Evaluations?_ ACL 2023.
+- Cohen, J. (1960). _A Coefficient of Agreement for Nominal Scales._
   Educational and Psychological Measurement.

@@ -78,7 +78,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 512},
 		{"retrieval.top_k", cfg.Retrieval.TopK, 10},
-		{"retrieval.max_context_tokens", cfg.Retrieval.MaxContextTokens, 2048},
+		{"retrieval.max_context_tokens", cfg.Retrieval.MaxContextTokens, 4092},
 		{"chunking.max_chunk_size", cfg.Chunking.MaxChunkSize, 256},
 		{"chunking.chunk_overlap", cfg.Chunking.ChunkOverlap, 32},
 		{"chunking.min_chunk_size", cfg.Chunking.MinChunkSize, 64},
