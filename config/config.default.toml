@@ -56,9 +56,11 @@ top_k = 10
 # Tuned operating point from the context-budget A/B (ADR-007): 4092 with
 # top_k=10; naive widening (8192/top_k=20) regressed answer quality.
 max_context_tokens = 4092
-# "dense"  — cosine similarity over query embedding (default).
-# "hybrid" — dense + BM25 merged via reciprocal-rank fusion. See ADR-008.
-retrieval_mode = 'dense'
+# "dense"  — cosine similarity over query embedding.
+# "hybrid" — dense + BM25 keyword search merged via reciprocal-rank fusion.
+# Hybrid combined with the reranker below is the evaluated/shipped stack (ADR-008,
+# ADR-009); fall back to "dense" only if no BM25 candidate pool is wanted.
+retrieval_mode = 'hybrid'
 
 # Cross-encoder reranker (opt-in). When enabled, retrieval over-fetches a
 # wider candidate pool and re-scores it with a llama.cpp /rerank model before
@@ -76,7 +78,11 @@ timeout = '30s'               # per-request deadline; cold-load forgiving
 
 [agent]
 backend = 'local-llama'
-model = 'Qwen3-Embedding-8B-Q8_0.gguf'
+# MUST be a chat/instruct model — never an embedding model. Gemma 4 E4B (the
+# agent used in evaluation) is a sensible default; substitute any instruct model
+# your backend serves. Reasoning models that emit hidden "thinking" tokens need
+# max_tokens raised well above their reasoning budget, or they return empty text.
+model = 'gemma-4-E4B-it-Q8_K_XL.gguf'
 max_tokens = 1024
 temperature = 0.7
 context_window = 0                # 0 = auto-detect (llama.cpp /props)
