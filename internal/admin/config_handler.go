@@ -303,7 +303,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 					Value:   cfg.Retrieval.RetrievalMode,
 					Type:    "enum",
 					Options: []string{"dense", "hybrid"},
-					Hint:    "dense = cosine over embeddings; hybrid = dense + BM25 via reciprocal-rank fusion (ADR-008)",
+					Hint:    "dense = cosine over embeddings; hybrid = dense + BM25 via reciprocal-rank fusion",
 				},
 			},
 		},
