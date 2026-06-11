@@ -241,6 +241,32 @@ func TestExtractPDFText_Integration(t *testing.T) {
 	})
 }
 
+func TestIsPlaceholderPDFTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  bool
+	}{
+		{"subject1", true},
+		{"Subject 1", true},
+		{"document", true},
+		{"Document1", true},
+		{"untitled", true},
+		{"Sin título", true},
+		{"PowerPoint Presentation", true},
+		{"Microsoft Word - guia.docx", true},
+		{"Slide 1", true},
+		{"", true},
+		{"Guía Docente Cálculo I", false},
+		{"Plan de Estudios GIST", false},
+		{"Normativa de permanencia", false},
+	}
+	for _, tt := range tests {
+		if got := isPlaceholderPDFTitle(tt.title); got != tt.want {
+			t.Errorf("isPlaceholderPDFTitle(%q) = %v, want %v", tt.title, got, tt.want)
+		}
+	}
+}
+
 func TestExtractPDFTitle_Integration(t *testing.T) {
 	if _, err := exec.LookPath("pdfinfo"); err != nil {
 		t.Skip("pdfinfo not available")

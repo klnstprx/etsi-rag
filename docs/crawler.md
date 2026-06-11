@@ -48,7 +48,7 @@ Raw bytes are stored in RustFS before extraction (`crawl/{html|pdf}/{url_sha256}
 ## Content Extraction
 
 - **HTML**: `go-shiori/go-readability` for main content extraction (strips boilerplate). Link extraction uses separate `golang.org/x/net/html` walker (needs full DOM including nav/sidebar).
-- **PDF**: `pdftotext -enc UTF-8` (reading-order mode) via `poppler`, with post-processing to produce structured markdown. Title extracted via `pdfinfo` when available.
+- **PDF**: `pdftotext -enc UTF-8` (reading-order mode) via `poppler`, with post-processing to produce structured markdown. Title extracted via `pdfinfo` when available; placeholder metadata titles ("subject1", "Document1", "Microsoft Word - ...") are rejected and the URL-derived filename title is used instead.
 
 Parser emits markdown: headings, lists, bold/italic, links. This markdown is stored, embedded, and served to the LLM as-is.
 

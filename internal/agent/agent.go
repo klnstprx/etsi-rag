@@ -256,6 +256,12 @@ func (a *Agent) runToolLoop(
 
 	var turnMessages []openai.ChatCompletionMessageParamUnion
 
+	// Tools dedupe within a single call; across calls the same document (and
+	// its page images) can resurface, so the accumulated UI-facing lists are
+	// deduped here.
+	seenCitations := make(map[string]struct{})
+	seenImages := make(map[string]struct{})
+
 	for range maxIter {
 		var resp *openai.ChatCompletion
 		var err error
@@ -337,8 +343,18 @@ func (a *Agent) runToolLoop(
 			} else {
 				resultText = toolRes.Text
 				callCitations = toolRes.Citations
-				if citations != nil && len(callCitations) > 0 {
-					*citations = append(*citations, callCitations...)
+				if citations != nil {
+					for _, c := range callCitations {
+						key := c.URL
+						if key == "" {
+							key = c.Title
+						}
+						if _, dup := seenCitations[key]; dup {
+							continue
+						}
+						seenCitations[key] = struct{}{}
+						*citations = append(*citations, c)
+					}
 				}
 			}
 
@@ -380,8 +396,15 @@ func (a *Agent) runToolLoop(
 					Int("dropped_images", toolImages).
 					Msg("tool returned images but agent has no VisionGetter installed — image attachment disabled")
 			}
-			if images != nil && len(attachedImages) > 0 {
-				*images = append(*images, attachedImages...)
+			if images != nil {
+				for _, img := range attachedImages {
+					key := img.DocID + "\x00" + img.Ref
+					if _, dup := seenImages[key]; dup {
+						continue
+					}
+					seenImages[key] = struct{}{}
+					*images = append(*images, img)
+				}
 			}
 
 			if events != nil {

@@ -258,6 +258,44 @@ func TestChat_WithToolCall(t *testing.T) {
 	}
 }
 
+// Two tool calls returning the same citations and images must yield one
+// deduplicated entry each in the final ChatResult — the UI renders these
+// lists directly.
+func TestChat_DeduplicatesCitationsAndImagesAcrossToolCalls(t *testing.T) {
+	srv := newSequentialLLM(t, []map[string]any{
+		toolCallResp("search", "call-1", `{"query":"a"}`),
+		toolCallResp("search", "call-2", `{"query":"b"}`),
+		chatResp("done"),
+	})
+	defer srv.Close()
+
+	tool := newStubTool("search", "Search", func(ctx context.Context, argsJSON string) (ToolResult, error) {
+		return ToolResult{
+			Text: "content",
+			Citations: []Citation{
+				{Title: "Doc", URL: "https://example.com/doc-1"},
+				{Title: "Untitled"}, // no URL: dedupe by title
+			},
+			Images: []ImageRef{{DocID: "d1", Ref: "p1", URL: "/v1/artifacts/tok.png"}},
+		}, nil
+	})
+
+	ag, ss := newTestAgent(t, srv, []Tool{tool}, 5)
+	ag.SetVisionGetter(func() (bool, string) { return true, "http://localhost:8080" })
+	sessionID := ss.Create()
+
+	res, err := ag.Chat(context.Background(), sessionID, "q", nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(res.Citations) != 2 {
+		t.Errorf("Citations len = %d, want 2 (deduplicated across tool calls), got %+v", len(res.Citations), res.Citations)
+	}
+	if len(res.Images) != 1 {
+		t.Errorf("Images len = %d, want 1 (deduplicated across tool calls), got %+v", len(res.Images), res.Images)
+	}
+}
+
 func TestChat_MaxIterationsExceeded(t *testing.T) {
 	// LLM always returns a tool call — should hit max iterations
 	responses := make([]map[string]any, 3)

@@ -79,10 +79,22 @@ func extractPDFTitle(ctx context.Context, pdfPath string) string {
 		title, _ := strings.CutPrefix(line, "Title:")
 		title = strings.TrimSpace(title)
 		if title != "" {
+			if isPlaceholderPDFTitle(title) {
+				return ""
+			}
 			return title
 		}
 	}
 	return ""
+}
+
+// placeholderPDFTitle matches metadata titles that authoring tools stamp by
+// default ("subject1", "Document1", "PowerPoint Presentation", ...). These are
+// worse than the URL-derived fallback, so extractPDFTitle treats them as empty.
+var placeholderPDFTitle = regexp.MustCompile(`(?i)^(subject|document|doc|untitled|title|slide|book|presentation|presentación|sin título|microsoft word|powerpoint presentation)[ _-]?\d*\b`)
+
+func isPlaceholderPDFTitle(title string) bool {
+	return strings.TrimSpace(title) == "" || placeholderPDFTitle.MatchString(strings.TrimSpace(title))
 }
 
 // pdfTextToMarkdown converts raw pdftotext output to structured markdown with

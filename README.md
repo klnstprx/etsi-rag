@@ -146,3 +146,9 @@ make reset-db      # Rename DB to a timestamped .bak so a fresh schema migrates
 - **openai-go** — LLM SDK
 - **go-rod** — headless Chrome for JS pages
 - **go-readability** — content extraction
+
+## License
+
+Licensed under the **GNU Affero General Public License v3.0** — see [LICENSE](LICENSE).
+
+Copyright © 2026 Ignacy Borzestowski. Developed as a Final Degree Project (Trabajo de Fin de Grado) for the ETSI Informática, Universidad de Málaga.
