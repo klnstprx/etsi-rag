@@ -25,6 +25,17 @@ import (
 var staticFiles embed.FS
 
 // Handler serves the admin UI.
+// Capacities reports the live effective values for the capacity fields whose
+// config semantics are "0 = auto" (agent context window, embedding/reranker
+// max tokens). Implemented by the server's runtime probe holder. The config
+// page uses it to display what is actually in effect next to the editable
+// operator intent, which itself round-trips untouched (a 0 stays 0 on save).
+type Capacities interface {
+	AgentContextWindow() int
+	EmbeddingMaxTokens() int
+	RerankerMaxTokens() int
+}
+
 type Handler struct {
 	store        *store.SQLiteStore
 	config       *config.Config
@@ -40,6 +51,7 @@ type Handler struct {
 	logger       zerolog.Logger
 	onConfigSave func()
 	baseCtx      context.Context
+	capacities   Capacities // may be nil (tests); hints then omit effective values
 }
 
 // HandlerConfig holds dependencies for the admin handler.
@@ -57,6 +69,7 @@ type HandlerConfig struct {
 	ObjStore     *objectstore.Client
 	Logger       zerolog.Logger
 	OnConfigSave func()
+	Capacities   Capacities
 	// BaseCtx is a server-lifetime context used for background goroutines
 	// (e.g. crawl runs) that outlive the request they were spawned from.
 	// Cancelled when the server shuts down.
@@ -84,6 +97,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		logger:       cfg.Logger,
 		onConfigSave: cfg.OnConfigSave,
 		baseCtx:      baseCtx,
+		capacities:   cfg.Capacities,
 	}
 }
 

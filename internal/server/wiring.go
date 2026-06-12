@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/backend"
@@ -102,10 +103,11 @@ func (s *Server) attachReranker() {
 		return
 	}
 
+	rerankMaxTokens := s.probed.RerankerMaxTokens()
 	rc, err := s.resolveRerankClient(s.cfg.Reranker.Backend, llm.RerankClientConfig{
 		Model:          s.cfg.Reranker.Model,
 		Counter:        counter,
-		MaxTokens:      s.cfg.Reranker.MaxTokens,
+		MaxTokens:      rerankMaxTokens,
 		ReservedTokens: s.cfg.Reranker.ReservedTokens,
 		Timeout:        s.cfg.Reranker.Timeout,
 	})
@@ -120,7 +122,7 @@ func (s *Server) attachReranker() {
 		Str("backend", s.cfg.Reranker.Backend).
 		Str("model", s.cfg.Reranker.Model).
 		Int("top_n", s.cfg.Reranker.TopN).
-		Int("max_tokens", s.cfg.Reranker.MaxTokens).
+		Int("max_tokens", rerankMaxTokens).
 		Msg("reranker enabled")
 }
 
@@ -183,6 +185,7 @@ func (s *Server) probeLlamaCppBackends() {
 		probed[key] = props
 		s.logger.Info().Str("backend", b.Name).Str("model", st.model).
 			Int("n_ctx", props.ContextSize).
+			Int("total_slots", props.TotalSlots).
 			Int("n_embd", props.EmbeddingDim).
 			Str("model_path", props.ModelPath).
 			Str("model_alias", props.ModelAlias).
@@ -210,24 +213,30 @@ func (s *Server) probeLlamaCppBackends() {
 		}
 	}
 
-	// Apply embedding-specific results
+	// Apply probed results into the runtime holder (NOT s.cfg — config is the
+	// fallback, not a write-back target; persisting probe residue destroyed the
+	// "0 = auto" semantics). The reported n_ctx is already the per-request
+	// limit the server enforces (see backend.LlamaCppProps.ContextSize) and is
+	// taken verbatim; the embedding stage also records the vector dimension.
 	embKey := s.cfg.Embedding.Backend + ":" + s.cfg.Embedding.Model
 	if props, ok := probed[embKey]; ok {
 		if props.ContextSize > 0 {
-			s.cfg.Embedding.MaxTokens = props.ContextSize
+			s.probed.setEmbeddingMaxTokens(props.ContextSize)
 		}
 		if props.EmbeddingDim > 0 {
-			s.cfg.Embedding.Dimension = props.EmbeddingDim
+			s.probed.setEmbeddingDimension(props.EmbeddingDim)
 		}
 	}
 
-	// Apply agent context window
+	// Apply agent context window.
 	agentKey := s.cfg.Agent.Backend + ":" + s.cfg.Agent.Model
-	if props, ok := probed[agentKey]; ok && props.ContextSize > 0 {
-		s.cfg.Agent.ContextWindow = props.ContextSize
-		if s.cfg.Agent.MaxTokens > props.ContextSize {
-			s.logger.Warn().Int("max_tokens", s.cfg.Agent.MaxTokens).Int("context_window", props.ContextSize).
-				Msg("agent max_tokens exceeds context window")
+	if props, ok := probed[agentKey]; ok {
+		if props.ContextSize > 0 {
+			s.probed.setAgentContextWindow(props.ContextSize)
+			if s.cfg.Agent.MaxTokens > props.ContextSize {
+				s.logger.Warn().Int("max_tokens", s.cfg.Agent.MaxTokens).Int("context_window", props.ContextSize).
+					Msg("agent max_tokens exceeds probed context window")
+			}
 		}
 	}
 
@@ -235,8 +244,10 @@ func (s *Server) probeLlamaCppBackends() {
 	// inside RerankClient. The /props probe loads the reranker model into the
 	// router so the first /rerank call doesn't pay cold-load latency.
 	rerankKey := s.cfg.Reranker.Backend + ":" + s.cfg.Reranker.Model
-	if props, ok := probed[rerankKey]; ok && props.ContextSize > 0 {
-		s.cfg.Reranker.MaxTokens = props.ContextSize
+	if props, ok := probed[rerankKey]; ok {
+		if props.ContextSize > 0 {
+			s.probed.setRerankerMaxTokens(props.ContextSize)
+		}
 	}
 }
 
@@ -266,10 +277,39 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 		s.logger.Warn().Err(err).Msg("agent token counter not available, tool output guards disabled")
 	}
 
+	// Derive the per-request token budget. ContextWindow is the probed effective
+	// per-slot window (probe wins, config is fallback). Fixed is measured from
+	// the system prompt + tool schemas; a measurement failure leaves Fixed at 0
+	// so the guard still works off the reserves alone rather than disabling it.
+	budget := agent.Budget{
+		ContextWindow:  s.probed.AgentContextWindow(),
+		Generation:     s.cfg.Agent.MaxTokens,
+		UserReserve:    s.cfg.Agent.UserReserveTokens,
+		HistoryReserve: s.cfg.Agent.HistoryReserveTokens,
+	}
+	if agentCounter != nil {
+		// Bounded: the llama.cpp counter retries network errors with exponential
+		// backoff (minutes against a dead backend), and buildAgent runs inside
+		// the admin-save handler — an unbounded measurement would hang the save.
+		mctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		fixed, ferr := agent.MeasureFixed(mctx, agentCounter, systemPrompt, tools)
+		cancel()
+		if ferr != nil {
+			s.logger.Warn().Err(ferr).Msg("failed to measure fixed agent token cost, proceeding with Fixed=0")
+		} else {
+			budget.Fixed = fixed
+		}
+	}
+
+	// Surface the token-budget invariants on the dashboard. Replayed here so
+	// both server.New and rebuildClients publish from the same place; the
+	// agent-disabled branches Clear these instead (see clearBudgetIssues).
+	s.publishBudgetIssues(budget, s.cfg.Agent.ToolOutputMaxTokens)
+
 	a := agent.NewAgent(
 		client, tools, systemPrompt,
 		s.cfg.Agent.MaxIterations, agentCounter,
-		s.cfg.Agent.ContextWindow, s.cfg.Agent.ToolOutputMaxTokens,
+		budget, s.cfg.Agent.ToolOutputMaxTokens,
 		s.sessionStore, s.logger,
 	)
 	a.SetVisionGetter(func() (bool, string) {

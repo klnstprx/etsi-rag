@@ -52,6 +52,7 @@ type Server struct {
 	sources        *sources.Registry
 	crawler        *crawler.Crawler
 	diag           *diag.Registry
+	probed         *probedProps
 
 	apiHandler   *api.Handler
 	adminHandler *admin.Handler
@@ -88,7 +89,12 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
-	sqliteStore := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
+	// probedProps holds auto-detected model/server capacities (probe wins,
+	// config is fallback). Constructed BEFORE the store so the dimension
+	// closure reads the resolved value (probed → fallback cfg) rather than the
+	// raw config field.
+	probed := newProbedProps(cfg, logger)
+	sqliteStore := store.NewSQLiteStore(db, probed.EmbeddingDimension)
 
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	// IMPORTANT: any non-fatal startup error in this function should also call
@@ -100,6 +106,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		logger:     logger,
 		store:      sqliteStore,
 		diag:       diag.New(),
+		probed:     probed,
 		baseCtx:    baseCtx,
 		baseCancel: baseCancel,
 	}
@@ -123,7 +130,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	}
 	s.publishProbeResult(issueEmbeddingCounter, err)
 	s.probeLlamaCppBackends()
-	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, cfg.Embedding.MaxTokens)
+	chunker := chunking.NewStructureAwareChunker(cfg.Chunking, embeddingCounter, s.probed.EmbeddingMaxTokens())
 
 	// Build the retrieval and ingest sides. Both share the same embedder
 	// handle so a config-reload swap reaches them in lockstep.
@@ -167,6 +174,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		agentClient, err := s.resolveChatClient(chatName, chatCfg)
 		if err != nil {
 			logger.Warn().Err(err).Msg("agent backend not available, agent disabled")
+			s.clearBudgetIssues()
 		} else {
 			agentInstance = s.buildAgent(agentClient)
 			logger.Info().Str("backend", cfg.Agent.Backend).
@@ -178,6 +186,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	} else {
 		logger.Warn().Msg("no [agent] backend configured, agent disabled")
 		s.diag.Set(issueAgentNoBackend)
+		s.clearBudgetIssues()
 	}
 	s.agentHandle = agent.NewHandle(agentInstance)
 
@@ -207,6 +216,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 		ObjStore:     objStore,
 		Logger:       logger,
 		BaseCtx:      s.baseCtx,
+		Capacities:   probed,
 	})
 	s.adminHandler.SetOnConfigSave(s.rebuildClients)
 

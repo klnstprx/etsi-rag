@@ -649,9 +649,14 @@ func TestChat_RequestBody(t *testing.T) {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("path = %s, want /chat/completions", r.URL.Path)
 		}
-		// max_tokens should be 100 (from newTestChatClient)
-		if mt, ok := req["max_tokens"].(float64); !ok || int64(mt) != 100 {
-			t.Errorf("max_tokens = %v, want 100", req["max_tokens"])
+		// max_completion_tokens should be 100 (from newTestChatClient);
+		// the deprecated max_tokens must not be sent — OpenAI rejects it
+		// on newer models ("use 'max_completion_tokens' instead").
+		if mt, ok := req["max_completion_tokens"].(float64); !ok || int64(mt) != 100 {
+			t.Errorf("max_completion_tokens = %v, want 100", req["max_completion_tokens"])
+		}
+		if _, present := req["max_tokens"]; present {
+			t.Errorf("max_tokens = %v, want absent", req["max_tokens"])
 		}
 		// temperature should be 0.5
 		if temp, ok := req["temperature"].(float64); !ok || temp != 0.5 {

@@ -17,7 +17,21 @@ import (
 // own properties — including a structured "modalities" object. We commit to
 // that shape rather than scanning speculative field names.
 type LlamaCppProps struct {
-	ContextSize    int    // default_generation_settings.n_ctx
+	// ContextSize is default_generation_settings.n_ctx — already the
+	// per-request limit the server enforces (the slot's n_ctx; llama.cpp
+	// server-context.cpp sets slot.n_ctx = llama_n_ctx_seq and reports
+	// exactly that in /props). Do NOT divide it by TotalSlots: with the
+	// unified KV cache the slots share one buffer dynamically, and in split
+	// mode the server already reports the per-slot share here. Verified
+	// empirically against the router build (n_ctx=32768, total_slots=4):
+	// a 9.6k-token prompt is accepted and a 33.6k one rejected at 32768.
+	//
+	// The value is a property of the running child process, not of the
+	// model: with llama-server memory fitting (--fit on) a child launched
+	// under VRAM pressure can come up with a smaller context than the same
+	// model served later, so callers must treat it as valid-at-probe-time.
+	ContextSize    int
+	TotalSlots     int    // total_slots (server n_parallel) — informational, logged for concurrency insight
 	EmbeddingDim   int    // /v1/models data[].meta.n_embd, with /v1/embeddings probe fallback
 	ModelPath      string // model_path
 	ModelAlias     string // model_alias — echoes the ?model= query, useful for log correlation
@@ -60,6 +74,7 @@ func FetchLlamaCppProps(ctx context.Context, baseURL, model string, client *http
 
 	props := &LlamaCppProps{
 		ContextSize:    propsResult.props.DefaultGenerationSettings.NCtx,
+		TotalSlots:     propsResult.props.TotalSlots,
 		ModelPath:      propsResult.props.ModelPath,
 		ModelAlias:     propsResult.props.ModelAlias,
 		SupportsVision: propsResult.props.Modalities.Vision,
@@ -128,6 +143,9 @@ type propsResponse struct {
 	DefaultGenerationSettings struct {
 		NCtx int `json:"n_ctx"`
 	} `json:"default_generation_settings"`
+	// total_slots is a top-level sibling of default_generation_settings, NOT
+	// nested inside it.
+	TotalSlots int    `json:"total_slots"`
 	ModelPath  string `json:"model_path"`
 	ModelAlias string `json:"model_alias"`
 	Modalities struct {

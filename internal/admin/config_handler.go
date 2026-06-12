@@ -20,7 +20,7 @@ import (
 // active-link highlight updates on every navigation; the full-page path wraps
 // the same shell in the layout.
 func (h *Handler) ConfigPage(w http.ResponseWriter, r *http.Request) {
-	sections := configToSections(h.config)
+	sections := configToSections(h.config, h.capacities)
 	if len(sections) == 0 {
 		http.Error(w, "no config sections", http.StatusInternalServerError)
 		return
@@ -117,6 +117,8 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Agent.ContextWindow = formInt(r, "context_window", h.config.Agent.ContextWindow)
 		h.config.Agent.MaxIterations = formInt(r, "max_iterations", h.config.Agent.MaxIterations)
 		h.config.Agent.ToolOutputMaxTokens = formInt(r, "tool_output_max_tokens", h.config.Agent.ToolOutputMaxTokens)
+		h.config.Agent.HistoryReserveTokens = formInt(r, "history_reserve_tokens", h.config.Agent.HistoryReserveTokens)
+		h.config.Agent.UserReserveTokens = formInt(r, "user_reserve_tokens", h.config.Agent.UserReserveTokens)
 		submitted := strings.TrimSpace(r.FormValue("system_prompt"))
 		if submitted == "" || submitted == strings.TrimSpace(prompts.Agent) {
 			h.config.Agent.SystemPrompt = ""
@@ -177,7 +179,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 	// the rejected values so the user can see what they typed, then revert the
 	// in-memory config so the live pipeline keeps the previous valid state.
 	if err := h.config.Validate(); err != nil {
-		rejected := findSection(configToSections(h.config), section)
+		rejected := findSection(configToSections(h.config, h.capacities), section)
 		*h.config = oldCfg
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if rejected != nil {
@@ -190,7 +192,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 	if err := config.WriteTo(h.config, h.configPath); err != nil {
 		h.logger.Error().Err(err).Msg("writing config")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if saved := findSection(configToSections(h.config), section); saved != nil {
+		if saved := findSection(configToSections(h.config, h.capacities), section); saved != nil {
 			templates.ConfigSectionForm(*saved).Render(r.Context(), w)
 		}
 		templates.Toast("Error saving config: "+err.Error(), "error").Render(r.Context(), w)
@@ -201,7 +203,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info().Str("section", section).Msg("config saved")
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if saved := findSection(configToSections(h.config), section); saved != nil {
+	if saved := findSection(configToSections(h.config, h.capacities), section); saved != nil {
 		templates.ConfigSectionForm(*saved).Render(r.Context(), w)
 	}
 	templates.Toast(fmt.Sprintf("Section '%s' saved", section), "success").Render(r.Context(), w)
@@ -213,7 +215,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 // configToSections groups config fields into UI cards. Each section carries a
 // Group label so the page can render Infrastructure / Pipeline / Ingest as
 // separate visual blocks.
-func configToSections(cfg *config.Config) []templates.ConfigSection {
+func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSection {
 	backendNames := make([]string, len(cfg.Backends))
 	for i, b := range cfg.Backends {
 		backendNames[i] = b.Name
@@ -286,7 +288,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "backend", Label: "Backend", Value: cfg.Embedding.Backend, Type: "select", Options: backendNames},
 				{Key: "model", Label: "Model", Value: cfg.Embedding.Model, Type: "model", Options: backendNames},
 				{Key: "dimension", Label: "Dimension", Value: strconv.Itoa(cfg.Embedding.Dimension), Type: "number"},
-				{Key: "max_tokens", Label: "Max Tokens", Value: strconv.Itoa(cfg.Embedding.MaxTokens), Type: "number"},
+				{Key: "max_tokens", Label: "Max Tokens (0 = auto-detect)", Value: strconv.Itoa(cfg.Embedding.MaxTokens), Type: "number", Hint: effectiveNote("0 follows the llama.cpp /props probe; a non-zero value overrides it. A 512-token floor applies when neither is available.", caps, Capacities.EmbeddingMaxTokens)},
 				{Key: "batch_size", Label: "Batch Size", Value: strconv.Itoa(cfg.Embedding.BatchSize), Type: "number"},
 			},
 		},
@@ -322,7 +324,7 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "backend", Label: "Backend", Value: cfg.Reranker.Backend, Type: "select", Options: backendNames},
 				{Key: "model", Label: "Model", Value: cfg.Reranker.Model, Type: "model", Options: backendNames},
 				{Key: "top_n", Label: "Candidate Pool Size (top_n)", Value: strconv.Itoa(cfg.Reranker.TopN), Type: "number", Hint: "Must be >= retrieval.top_k. Typical: 30."},
-				{Key: "max_tokens", Label: "Max Tokens (0 = auto-detect via /props)", Value: strconv.Itoa(cfg.Reranker.MaxTokens), Type: "number"},
+				{Key: "max_tokens", Label: "Max Tokens (0 = auto-detect)", Value: strconv.Itoa(cfg.Reranker.MaxTokens), Type: "number", Hint: effectiveNote("Per-doc truncation budget. 0 follows the llama.cpp /props probe; a non-zero value overrides it.", caps, Capacities.RerankerMaxTokens)},
 				{Key: "reserved_tokens", Label: "Reserved Tokens", Value: strconv.Itoa(cfg.Reranker.ReservedTokens), Type: "number", Hint: "BOS/EOS/separator budget held back from per-doc truncation."},
 				{Key: "timeout_s", Label: "Timeout (s)", Value: strconv.FormatInt(int64(cfg.Reranker.Timeout/time.Second), 10), Type: "number", Hint: "Per-request deadline. Default 30s absorbs cold-load on the router."},
 			},
@@ -336,9 +338,11 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 				{Key: "model", Label: "Model", Value: cfg.Agent.Model, Type: "model", Options: backendNames},
 				{Key: "max_tokens", Label: "Max Tokens", Value: strconv.Itoa(cfg.Agent.MaxTokens), Type: "number"},
 				{Key: "temperature", Label: "Temperature", Value: fmt.Sprintf("%.2f", cfg.Agent.Temperature), Type: "text"},
-				{Key: "context_window", Label: "Context Window (auto-detected)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number"},
+				{Key: "context_window", Label: "Context Window (0 = auto-detect)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number", Hint: effectiveNote("0 follows the llama.cpp /props probe automatically (re-read at startup and on every save); a non-zero value overrides it.", caps, Capacities.AgentContextWindow)},
 				{Key: "max_iterations", Label: "Max Tool Iterations", Value: strconv.Itoa(cfg.Agent.MaxIterations), Type: "number"},
-				{Key: "tool_output_max_tokens", Label: "Tool Output Max Tokens (0 = auto, context_window/4)", Value: strconv.Itoa(cfg.Agent.ToolOutputMaxTokens), Type: "number"},
+				{Key: "tool_output_max_tokens", Label: "Tool Output Max Tokens (0 = auto from budget)", Value: strconv.Itoa(cfg.Agent.ToolOutputMaxTokens), Type: "number", Hint: "Caps tokens per tool result. 0 derives the cap from the token budget pool (context window minus generation, fixed prompt/schema cost, and the history/user reserves)."},
+				{Key: "history_reserve_tokens", Label: "History Reserve (tokens)", Value: strconv.Itoa(cfg.Agent.HistoryReserveTokens), Type: "number", Hint: "Headroom held back from the context window for session history when deriving the tool budget."},
+				{Key: "user_reserve_tokens", Label: "User Reserve (tokens)", Value: strconv.Itoa(cfg.Agent.UserReserveTokens), Type: "number", Hint: "Headroom held back from the context window for the incoming user message when deriving the tool budget."},
 				{Key: "system_prompt", Label: "System Prompt (clear to restore default)", Value: effectivePrompt(cfg), Type: "textarea", Hint: "Template variables: {{.DocumentCount}}, {{.ChunkCount}}"},
 			},
 		},
@@ -387,6 +391,18 @@ func configToSections(cfg *config.Config) []templates.ConfigSection {
 			},
 		},
 	}
+}
+
+// effectiveNote appends the live probe-resolved value to a hint when a
+// Capacities source is wired and reports a usable value.
+func effectiveNote(hint string, caps Capacities, get func(Capacities) int) string {
+	if caps == nil {
+		return hint
+	}
+	if v := get(caps); v > 0 {
+		return fmt.Sprintf("%s Effective now: %d tokens.", hint, v)
+	}
+	return hint
 }
 
 // findSection looks up a section in a slice produced by configToSections.

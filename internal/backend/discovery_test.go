@@ -196,6 +196,65 @@ func TestFetchLlamaCppProps_VisionDetection(t *testing.T) {
 	}
 }
 
+// TestFetchLlamaCppProps_TotalSlots covers decoding the top-level total_slots
+// field (a sibling of default_generation_settings, NOT nested inside it).
+// total_slots is informational only: the n_ctx the server reports in
+// default_generation_settings is already the per-request limit it enforces
+// (the slot's n_ctx), so ContextSize must be taken verbatim and NEVER divided
+// by total_slots — slots share a unified KV buffer dynamically.
+func TestFetchLlamaCppProps_TotalSlots(t *testing.T) {
+	tests := []struct {
+		name      string
+		propsBody string
+		wantCtx   int
+		wantSlots int
+	}{
+		{
+			name:      "n_ctx verbatim despite 4 slots",
+			propsBody: `{"default_generation_settings":{"n_ctx":32768},"total_slots":4,"model_path":"/m.gguf"}`,
+			wantCtx:   32768,
+			wantSlots: 4,
+		},
+		{
+			name:      "total_slots absent (older builds)",
+			propsBody: `{"default_generation_settings":{"n_ctx":4096},"model_path":"/m.gguf"}`,
+			wantCtx:   4096,
+			wantSlots: 0,
+		},
+		{
+			name:      "single slot",
+			propsBody: `{"default_generation_settings":{"n_ctx":8192},"total_slots":1,"model_path":"/m.gguf"}`,
+			wantCtx:   8192,
+			wantSlots: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /props", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tt.propsBody))
+			})
+			mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(`{"data":[]}`))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			props, err := FetchLlamaCppProps(context.Background(), srv.URL, "any", nil)
+			if err != nil {
+				t.Fatalf("FetchLlamaCppProps: %v", err)
+			}
+			if props.ContextSize != tt.wantCtx {
+				t.Errorf("ContextSize = %d, want %d", props.ContextSize, tt.wantCtx)
+			}
+			if props.TotalSlots != tt.wantSlots {
+				t.Errorf("TotalSlots = %d, want %d", props.TotalSlots, tt.wantSlots)
+			}
+		})
+	}
+}
+
 func TestFetchLlamaCppPropsUnreachable(t *testing.T) {
 	_, err := FetchLlamaCppProps(context.Background(), "http://127.0.0.1:1", "", nil)
 	if err == nil {

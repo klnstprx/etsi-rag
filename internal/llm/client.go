@@ -182,10 +182,10 @@ func NewChatClient(cfg ChatClientConfig) *ChatClient {
 // Chat generates a response from a conversation.
 func (c *ChatClient) Chat(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
 	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Messages:    messages,
-		Model:       c.model,
-		MaxTokens:   openai.Int(c.maxTokens),
-		Temperature: openai.Float(c.temperature),
+		Messages:            messages,
+		Model:               c.model,
+		MaxCompletionTokens: openai.Int(c.maxTokens),
+		Temperature:         openai.Float(c.temperature),
 	})
 	if err != nil {
 		return "", fmt.Errorf("chat completion: %w", err)
@@ -208,10 +208,10 @@ func (c *ChatClient) ChatStream(ctx context.Context, messages []openai.ChatCompl
 		defer close(errc)
 
 		stream := c.client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
-			Messages:    messages,
-			Model:       c.model,
-			MaxTokens:   openai.Int(c.maxTokens),
-			Temperature: openai.Float(c.temperature),
+			Messages:            messages,
+			Model:               c.model,
+			MaxCompletionTokens: openai.Int(c.maxTokens),
+			Temperature:         openai.Float(c.temperature),
 		})
 
 		for stream.Next() {
@@ -234,11 +234,11 @@ func (c *ChatClient) ChatStream(ctx context.Context, messages []openai.ChatCompl
 // ChatWithTools generates a response that may include tool calls.
 func (c *ChatClient) ChatWithTools(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolParam) (*openai.ChatCompletion, error) {
 	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Messages:    messages,
-		Model:       c.model,
-		MaxTokens:   openai.Int(c.maxTokens),
-		Temperature: openai.Float(c.temperature),
-		Tools:       tools,
+		Messages:            messages,
+		Model:               c.model,
+		MaxCompletionTokens: openai.Int(c.maxTokens),
+		Temperature:         openai.Float(c.temperature),
+		Tools:               tools,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("chat with tools: %w", err)
@@ -276,11 +276,11 @@ func (c *ChatClient) ChatStreamWithTools(
 
 		acc := openai.ChatCompletionAccumulator{}
 		stream := c.client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
-			Messages:    messages,
-			Model:       c.model,
-			MaxTokens:   openai.Int(c.maxTokens),
-			Temperature: openai.Float(c.temperature),
-			Tools:       tools,
+			Messages:            messages,
+			Model:               c.model,
+			MaxCompletionTokens: openai.Int(c.maxTokens),
+			Temperature:         openai.Float(c.temperature),
+			Tools:               tools,
 		})
 
 		for stream.Next() {

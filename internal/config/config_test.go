@@ -76,7 +76,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"server.request_timeout", cfg.Server.RequestTimeout, 120},
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 1024},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
-		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 512},
+		{"agent.history_reserve_tokens", cfg.Agent.HistoryReserveTokens, 1280},
+		{"agent.user_reserve_tokens", cfg.Agent.UserReserveTokens, 512},
+		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 0}, // 0 = auto (probe); safe floor applied at consumption
 		{"retrieval.top_k", cfg.Retrieval.TopK, 10},
 		{"retrieval.max_context_tokens", cfg.Retrieval.MaxContextTokens, 4092},
 		{"chunking.max_chunk_size", cfg.Chunking.MaxChunkSize, 256},
@@ -132,6 +134,8 @@ read_timeout = 30
 max_tokens = 4096
 temperature = 0.3
 max_iterations = 10
+history_reserve_tokens = 2000
+user_reserve_tokens = 800
 
 [embedding]
 max_tokens = 2048
@@ -157,6 +161,8 @@ concurrency = 8
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30},
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 4096},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 10},
+		{"agent.history_reserve_tokens", cfg.Agent.HistoryReserveTokens, 2000},
+		{"agent.user_reserve_tokens", cfg.Agent.UserReserveTokens, 800},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 2048},
 		{"chunking.max_chunk_size", cfg.Chunking.MaxChunkSize, 512},
 		{"chunking.chunk_overlap", cfg.Chunking.ChunkOverlap, 64},

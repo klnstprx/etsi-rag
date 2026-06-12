@@ -49,7 +49,7 @@ type Agent struct {
 	system              string
 	maxIter             int
 	counter             tokencount.Counter
-	contextWindow       int
+	budget              Budget
 	toolOutputMaxTokens int
 	sessionStore        *session.Store
 	logger              zerolog.Logger
@@ -57,11 +57,13 @@ type Agent struct {
 }
 
 // NewAgent creates a new agent with the given configuration.
-// counter and contextWindow enable tool output size guards. If either is nil/zero,
-// the guard is disabled and a warning is logged. toolOutputMaxTokens overrides the
-// default (contextWindow/4) ceiling when > 0.
-func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, counter tokencount.Counter, contextWindow, toolOutputMaxTokens int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
-	if counter == nil || contextWindow <= 0 {
+// counter and budget enable the per-tool-result size guard. If counter is nil
+// or budget.ContextWindow <= 0, the guard is disabled and a warning is logged.
+// toolOutputMaxTokens is an explicit operator override: when > 0 it is used as
+// the cap directly; otherwise the cap is derived from budget.ToolPool() with a
+// 256-token floor.
+func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, counter tokencount.Counter, budget Budget, toolOutputMaxTokens int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
+	if counter == nil || budget.ContextWindow <= 0 {
 		logger.Warn().Msg("agent tool output guards disabled (no token counter or context window)")
 	}
 	return &Agent{
@@ -70,7 +72,7 @@ func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, 
 		system:              system,
 		maxIter:             maxIter,
 		counter:             counter,
-		contextWindow:       contextWindow,
+		budget:              budget,
 		toolOutputMaxTokens: toolOutputMaxTokens,
 		sessionStore:        sessionStore,
 		logger:              logger,
@@ -471,20 +473,20 @@ func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string) (
 // checkToolResult validates that a tool result fits within the context budget.
 // If the result is too large, it returns an error message instead so the LLM
 // can self-correct (e.g., refine a query). Returns the result unchanged if
-// within budget or if guards are disabled (no counter/context window).
+// within budget or if guards are disabled (no counter / zero context window).
 //
 // The ceiling is either an explicitly configured toolOutputMaxTokens (>0) or
-// an auto-derived default of contextWindow/4 with a 256-token floor.
+// the budget pool left for a tool result, budget.ToolPool(), with a 256-token
+// floor so an over-subscribed budget can't reject every result outright.
 func (a *Agent) checkToolResult(ctx context.Context, toolName string, result string) string {
 	counter := a.counter
-	contextWindow := a.contextWindow
-	if counter == nil || contextWindow <= 0 {
+	if counter == nil || a.budget.ContextWindow <= 0 {
 		return result
 	}
 
 	maxTokens := a.toolOutputMaxTokens
 	if maxTokens <= 0 {
-		maxTokens = max(contextWindow/4, 256)
+		maxTokens = max(a.budget.ToolPool(), 256)
 	}
 
 	tokens, err := counter.Count(ctx, result)

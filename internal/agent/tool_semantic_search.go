@@ -8,6 +8,7 @@ import (
 
 	"github.com/openai/openai-go"
 
+	"etsi-rag/internal/domain"
 	"etsi-rag/internal/rag"
 	"etsi-rag/internal/store"
 )
@@ -85,15 +86,31 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		return ToolResult{Text: "No relevant documents found."}, nil
 	}
 
-	// BuildContext is token-aware and always emits at least the top-1 chunk
-	// (truncated if needed). Its output is our authoritative result — do not
-	// fall back to an unbounded formatter.
+	// BuildContext is token-aware: it packs whole chunks in rank order until
+	// the budget is hit, and returns an empty context if even the top-1 chunk
+	// does not fit. Its output is our authoritative result — do not fall back
+	// to an unbounded formatter.
 	ragContext, err := t.Retriever.BuildContext(ctx, results)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("building context: %w", err)
 	}
 
 	refs := rag.SourcesFromRetrieval(results)
+	citations := dedupCitations(refs)
+
+	// Chunk content is already marker-free (the chunker strips markers during
+	// emission); ImageRefs lives on the chunk record. Resolve refs to artifact
+	// URLs so the agent loop can inject them as a synthetic user message when
+	// the backend supports vision.
+	images := t.collectImages(ctx, results)
+
+	return ToolResult{Text: ragContext, Citations: citations, Images: images}, nil
+}
+
+// dedupCitations converts source references into UI-facing citations,
+// deduplicating by URL when present and falling back to the reference ID for
+// entries without a URL. Order of first occurrence is preserved.
+func dedupCitations(refs []domain.SourceReference) []Citation {
 	citations := make([]Citation, 0, len(refs))
 	seen := make(map[string]struct{}, len(refs))
 	for _, r := range refs {
@@ -112,14 +129,7 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 		}
 		citations = append(citations, c)
 	}
-
-	// Chunk content is already marker-free (the chunker strips markers during
-	// emission); ImageRefs lives on the chunk record. Resolve refs to artifact
-	// URLs so the agent loop can inject them as a synthetic user message when
-	// the backend supports vision.
-	images := t.collectImages(ctx, results)
-
-	return ToolResult{Text: ragContext, Citations: citations, Images: images}, nil
+	return citations
 }
 
 // collectImages walks retrieved chunks' ImageRefs (stamped by the chunker at

@@ -24,7 +24,7 @@ func TestAgentChat_NonStream(t *testing.T) {
 	chatClient := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
 	})
-	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	sessionID := h.sessionStore.Create()
@@ -55,7 +55,7 @@ func TestAgentChat_NonStream(t *testing.T) {
 
 func TestAgentChat_EmptyMessageRejected(t *testing.T) {
 	h, _ := setupTestHandler(t)
-	ag := agent.NewAgent(nil, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(nil, nil, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	// agent present but message empty -> 400 before agent use
 	h.agentHandle.Set(ag)
 
@@ -78,7 +78,7 @@ func TestAgentChat_Stream(t *testing.T) {
 	chatClient := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
 	})
-	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	sessionID := h.sessionStore.Create()
@@ -141,7 +141,7 @@ func TestAgentChat_Stream_EmitsToolEvents(t *testing.T) {
 	chatClient := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
 	})
-	ag := agent.NewAgent(chatClient, []agent.Tool{stubEchoTool()}, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, []agent.Tool{stubEchoTool()}, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	body, _ := json.Marshal(AgentChatRequest{Message: "call echo", Stream: true})

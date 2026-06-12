@@ -494,7 +494,7 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 		Temperature: 0,
 	})
 
-	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	// Create a session in the shared store
@@ -590,7 +590,7 @@ func TestChatCompletions_Streaming_HappyPath(t *testing.T) {
 		MaxTokens:   100,
 		Temperature: 0,
 	})
-	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "You are a test assistant.", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	sessionID := h.sessionStore.Create()
@@ -662,7 +662,7 @@ func TestChatCompletions_Streaming_NoSessionHeaderMintsOne(t *testing.T) {
 	chatClient := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
 	})
-	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	body, _ := json.Marshal(ChatCompletionRequest{
@@ -729,7 +729,7 @@ func TestChatCompletions_Streaming_StaysPure(t *testing.T) {
 		BaseURL: srv.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
 	})
 	echo := stubEchoTool()
-	ag := agent.NewAgent(chatClient, []agent.Tool{echo}, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, []agent.Tool{echo}, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	body, _ := json.Marshal(ChatCompletionRequest{
@@ -792,7 +792,7 @@ func TestChatCompletions_Streaming_OverRealSocket(t *testing.T) {
 	chatClient := llm.NewChatClient(llm.ChatClientConfig{
 		BaseURL: upstream.URL, Model: "test-model", MaxTokens: 100, Temperature: 0,
 	})
-	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, 0, 0, h.sessionStore, zerolog.Nop())
+	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
 	router := NewRouter(h, zerolog.Nop(), 30*time.Second)

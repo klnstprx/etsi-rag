@@ -147,6 +147,71 @@ func TestDiag_SourcesEmptyClearedAfterReplace(t *testing.T) {
 	}
 }
 
+// TestDiag_BudgetPublishedAndCleared exercises the buildAgent → publishBudgetIssues
+// path end to end: with an agent backend whose effective context window cannot
+// fit a full retrieval result, agent.budget is set; removing the backend (or
+// fixing the budget) clears it again.
+func TestDiag_BudgetPublishedAndCleared(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true},
+	}
+	cfg.Embedding.Backend = "test"
+	cfg.Embedding.Model = "test-model"
+	cfg.Agent.Backend = "test"
+	cfg.Agent.Model = "test-model"
+	cfg.Agent.MaxIterations = 5
+	// Force the budget too small to hold a full retrieval result: a 2000-token
+	// window minus 1024 generation and the default reserves leaves a tiny pool,
+	// while max_context_tokens asks for 4000.
+	cfg.Agent.ContextWindow = 2000
+	cfg.Agent.MaxTokens = 1024
+	cfg.Agent.HistoryReserveTokens = 1280
+	cfg.Agent.UserReserveTokens = 512
+	cfg.Retrieval.MaxContextTokens = 4000
+
+	srv := startupTestServer(t, cfg, "")
+
+	if !srv.diag.Has(issueAgentBudget.ID) {
+		t.Fatalf("expected agent.budget at boot when pool < max_context_tokens; snapshot=%+v", srv.diag.Snapshot())
+	}
+
+	// Removing the agent backend must clear the stale budget error.
+	srv.cfg.Agent.Backend = ""
+	srv.rebuildClients()
+	if srv.diag.Has(issueAgentBudget.ID) {
+		t.Errorf("agent.budget should be cleared after removing the agent backend; snapshot=%+v", srv.diag.Snapshot())
+	}
+}
+
+// TestDiag_BudgetNotSetWhenHealthy confirms the happy path leaves no budget
+// issue: a large window comfortably fits max_context_tokens.
+func TestDiag_BudgetNotSetWhenHealthy(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Backends = []config.BackendConfig{
+		{Name: "test", BaseURL: "http://localhost:9999/v1", Enabled: true},
+	}
+	cfg.Embedding.Backend = "test"
+	cfg.Embedding.Model = "test-model"
+	cfg.Agent.Backend = "test"
+	cfg.Agent.Model = "test-model"
+	cfg.Agent.MaxIterations = 5
+	cfg.Agent.ContextWindow = 16384
+	cfg.Agent.MaxTokens = 1024
+	cfg.Retrieval.MaxContextTokens = 2048
+	cfg.Retrieval.TopK = 5
+	cfg.Chunking.MaxChunkSize = 256
+
+	srv := startupTestServer(t, cfg, "")
+
+	if srv.diag.Has(issueAgentBudget.ID) {
+		t.Errorf("agent.budget should not fire with a healthy window; snapshot=%+v", srv.diag.Snapshot())
+	}
+	if srv.diag.Has(issueRetrievalTopKClip.ID) {
+		t.Errorf("retrieval.topk_clip should not fire when top_k chunks fit; snapshot=%+v", srv.diag.Snapshot())
+	}
+}
+
 // Touch config so the import remains used even if a future test removes the
 // last config.* reference.
 var _ = config.Config{}

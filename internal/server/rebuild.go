@@ -45,7 +45,7 @@ func (s *Server) rebuildClients() {
 	s.publishProbeResult(issueEmbeddingCounter, err)
 	s.probeLlamaCppBackends()
 	s.retriever.SetCounter(counter)
-	s.ingester.SetChunker(chunking.NewStructureAwareChunker(s.cfg.Chunking, counter, s.cfg.Embedding.MaxTokens))
+	s.ingester.SetChunker(chunking.NewStructureAwareChunker(s.cfg.Chunking, counter, s.probed.EmbeddingMaxTokens()))
 
 	// Reranker — re-evaluate every save so toggling enabled takes effect.
 	s.attachReranker()
@@ -58,6 +58,8 @@ func (s *Server) rebuildClients() {
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("agent client rebuild failed")
 			s.agentHandle.Set(nil)
+			// No agent → its budget can't be evaluated; drop stale invariants.
+			s.clearBudgetIssues()
 		} else {
 			s.agentHandle.Set(s.buildAgent(ac))
 			s.logger.Info().Str("backend", s.cfg.Agent.Backend).Msg("agent rebuilt")
@@ -66,5 +68,6 @@ func (s *Server) rebuildClients() {
 	} else {
 		s.agentHandle.Set(nil)
 		s.diag.Set(issueAgentNoBackend)
+		s.clearBudgetIssues()
 	}
 }

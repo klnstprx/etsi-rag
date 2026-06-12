@@ -116,15 +116,23 @@ type EmbeddingConfig struct {
 
 // AgentConfig holds agent/chat stage settings.
 type AgentConfig struct {
-	Backend             string            `koanf:"backend"`
-	Model               string            `koanf:"model"`
-	MaxTokens           int               `koanf:"max_tokens"`
-	Temperature         float64           `koanf:"temperature"`
-	ContextWindow       int               `koanf:"context_window"`         // total context window (auto-detected for llama.cpp)
-	MaxIterations       int               `koanf:"max_iterations"`         // max tool-calling iterations
-	ToolOutputMaxTokens int               `koanf:"tool_output_max_tokens"` // max tokens allowed per tool result; 0 = auto (context_window/4)
-	SystemPrompt        string            `koanf:"system_prompt"`          // empty = use prompts/agent.md
-	Vision              AgentVisionConfig `koanf:"vision"`
+	Backend       string  `koanf:"backend"`
+	Model         string  `koanf:"model"`
+	MaxTokens     int     `koanf:"max_tokens"`
+	Temperature   float64 `koanf:"temperature"`
+	ContextWindow int     `koanf:"context_window"` // 0 = auto (follow the /props probe); non-zero = explicit operator override
+	MaxIterations int     `koanf:"max_iterations"` // max tool-calling iterations
+	// ToolOutputMaxTokens caps tokens per tool result. 0 = auto-derive from the
+	// agent's token budget pool (see agent.Budget.ToolPool, with a 256 floor).
+	ToolOutputMaxTokens int `koanf:"tool_output_max_tokens"`
+	// HistoryReserveTokens reserves headroom from the context window for session
+	// history when deriving the agent's tool budget.
+	HistoryReserveTokens int `koanf:"history_reserve_tokens"`
+	// UserReserveTokens reserves headroom from the context window for the
+	// incoming user message when deriving the agent's tool budget.
+	UserReserveTokens int               `koanf:"user_reserve_tokens"`
+	SystemPrompt      string            `koanf:"system_prompt"` // empty = use prompts/agent.md
+	Vision            AgentVisionConfig `koanf:"vision"`
 }
 
 // AgentVisionConfig holds image-attachment settings for the agent stage.
@@ -436,6 +444,12 @@ func (c *Config) applyDefaults() {
 	if c.Agent.MaxIterations == 0 {
 		c.Agent.MaxIterations = 5
 	}
+	if c.Agent.HistoryReserveTokens == 0 {
+		c.Agent.HistoryReserveTokens = 1280
+	}
+	if c.Agent.UserReserveTokens == 0 {
+		c.Agent.UserReserveTokens = 512
+	}
 	if c.Agent.Vision.MaxImagesPerCall == 0 {
 		c.Agent.Vision.MaxImagesPerCall = 6
 	}
@@ -470,9 +484,6 @@ func (c *Config) applyDefaults() {
 		c.Session.TTLSeconds = 3600
 	}
 
-	if c.Embedding.MaxTokens == 0 {
-		c.Embedding.MaxTokens = 512
-	}
 	if c.Embedding.BatchSize == 0 {
 		c.Embedding.BatchSize = 2
 	}

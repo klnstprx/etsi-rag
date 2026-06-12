@@ -123,7 +123,7 @@ separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators used whe
 backend = 'local-llama'       # references backend by name
 model = 'embedding-model'
 dimension = 2560
-max_tokens = 512              # embedding context window
+max_tokens = 0                # 0 = auto-detect via /props; non-zero overrides (512-token floor when neither is available)
 batch_size = 2                # texts per embedding API call
 
 [retrieval]
@@ -143,7 +143,7 @@ backend = 'local-llama'       # MUST have is_llama_cpp = true; /rerank is a llam
 model = 'bge-reranker-v2-m3'  # BAAI 568M multilingual cross-encoder; selected after eval sweep
 top_n = 30                    # candidate pool size; must be >= retrieval.top_k
                               # (validated at load time and at admin save)
-max_tokens = 0                # 0 = auto-detect via /props (n_ctx); used as the per-doc truncation budget
+max_tokens = 0                # 0 = auto-detect via /props; non-zero overrides. Per-doc truncation budget.
 reserved_tokens = 16          # BOS/EOS/separator budget held back from per-doc truncation
 timeout = '30s'               # per-request deadline; the default is cold-load forgiving
                               # because router-loaded reranker models load lazily
@@ -151,11 +151,16 @@ timeout = '30s'               # per-request deadline; the default is cold-load f
 [agent]
 backend = 'local-llama'
 model = 'chat-model'
-max_tokens = 1024             # output token limit
+max_tokens = 1024             # output token limit (the agent budget's generation reserve)
 temperature = 0.7
-context_window = 0            # total context window (auto-detected for llama.cpp, 0 = unknown)
+context_window = 0            # 0 = auto: follow the /props probe (re-read at startup and on every
+                              # config save); a non-zero value is an explicit operator override.
+                              # The probe never writes its reading back to config.toml.
 max_iterations = 5            # max tool-calling iterations per turn
-tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto (context_window/4, min 256)
+tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto-derive from the agent token budget
+                              # pool (context_window - generation - fixed - reserves, min 256)
+history_reserve_tokens = 1280 # token headroom reserved from the context window for session history
+user_reserve_tokens = 512     # token headroom reserved from the context window for the incoming user message
 system_prompt = ''            # custom system prompt text/template (empty = use embedded prompts/agent.tmpl)
                               # available template vars: {{.DocumentCount}}, {{.ChunkCount}}
 
@@ -237,11 +242,13 @@ judge_model   = 'claude-sonnet-4-6'
 
 `probeLlamaCppBackends()` probes each unique llama.cpp backend once at startup and after config changes:
 
-- **Embedding**: auto-detects `max_tokens` (n_ctx) and `dimension` (n_embd)
-- **Agent**: auto-detects `context_window` (n_ctx)
-- **Reranker**: auto-detects `max_tokens` (n_ctx); also has the side-effect of asking the router to load the reranker model so the first `/rerank` request avoids cold-load latency
-- Logs a warning if `max_tokens` exceeds the probed `context_window`
-- Non-llama.cpp backends are skipped; set `context_window` manually if needed
+- **Effective context size**: `/props` reports `n_ctx` as the per-request limit the server enforces (the slot's `n_ctx`); `total_slots` is informational and never divides it. The value is a property of the running child process (with `--fit on` it can differ between launches), so it is re-read at startup and on every config reload. Keys whose value is 0 (= auto) follow the probe; a non-zero value is an explicit operator override. The config page shows the live effective value in each field's hint while the editable field carries the operator intent, so saving a section never bakes a probed reading over a 0.
+- **Embedding**: auto-detects `max_tokens` (effective context) and `dimension` (n_embd)
+- **Agent**: auto-detects `context_window` (effective context)
+- **Reranker**: auto-detects `max_tokens` (effective context); also has the side-effect of asking the router to load the reranker model so the first `/rerank` request avoids cold-load latency
+- Logs a warning if the agent `max_tokens` exceeds the probed effective context window
+- Probe results are held in a runtime holder (`probedProps`), **not** written back to config: a probed value (>0) wins, a zero probe falls back to the live config value. This keeps the `0 = auto` semantics intact and avoids persisting stale residue into `config.toml`.
+- Non-llama.cpp backends are skipped; set `context_window` / `max_tokens` manually if needed
 
 ## Persistence
 

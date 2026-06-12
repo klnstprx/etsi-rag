@@ -31,6 +31,83 @@ func TestSemanticSearchTool_Execute_NoFilter(t *testing.T) {
 	}
 }
 
+func TestDedupCitations(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	tests := []struct {
+		name string
+		refs []domain.SourceReference
+		want []Citation
+	}{
+		{
+			name: "empty input",
+			refs: nil,
+			want: []Citation{},
+		},
+		{
+			name: "all unique URLs",
+			refs: []domain.SourceReference{
+				{ID: "a", Title: "Alpha", URL: strPtr("https://example.com/a")},
+				{ID: "b", Title: "Beta", URL: strPtr("https://example.com/b")},
+			},
+			want: []Citation{
+				{Title: "Alpha", URL: "https://example.com/a"},
+				{Title: "Beta", URL: "https://example.com/b"},
+			},
+		},
+		{
+			name: "duplicate URLs deduped, first wins",
+			refs: []domain.SourceReference{
+				{ID: "a", Title: "Alpha", URL: strPtr("https://example.com/a")},
+				{ID: "a2", Title: "Alpha copy", URL: strPtr("https://example.com/a")},
+				{ID: "b", Title: "Beta", URL: strPtr("https://example.com/b")},
+			},
+			want: []Citation{
+				{Title: "Alpha", URL: "https://example.com/a"},
+				{Title: "Beta", URL: "https://example.com/b"},
+			},
+		},
+		{
+			name: "nil and empty URLs deduped by ID",
+			refs: []domain.SourceReference{
+				{ID: "a", Title: "Alpha"},
+				{ID: "a", Title: "Alpha again"},
+				{ID: "b", Title: "Beta", URL: strPtr("")},
+				{ID: "b", Title: "Beta again", URL: strPtr("")},
+			},
+			want: []Citation{
+				{Title: "Alpha"},
+				{Title: "Beta", URL: ""},
+			},
+		},
+		{
+			name: "empty URL falls back to ID key, distinct IDs kept",
+			refs: []domain.SourceReference{
+				{ID: "a", Title: "Alpha", URL: strPtr("")},
+				{ID: "b", Title: "Beta", URL: strPtr("")},
+			},
+			want: []Citation{
+				{Title: "Alpha", URL: ""},
+				{Title: "Beta", URL: ""},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dedupCitations(tc.refs)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d citations, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("citation %d: got %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 // setupSemanticSearchFixture builds an in-memory store + RAG pipeline +
 // SemanticSearchTool. Mirrors setupReadDocFixture but exposes the tool
 // directly for tag/scope testing.

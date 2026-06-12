@@ -7,10 +7,25 @@ External services and system dependencies required to run the project.
 
 Any OpenAI-compatible server works. The project is designed around `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
-- Provides `/v1/chat/completions`, `/v1/embeddings`, and `/tokenize` endpoints
+- Provides `/v1/chat/completions`, `/v1/embeddings`, `/tokenize`, and `/props` endpoints
 - Set `is_llama_cpp = true` in backend config to enable the `/tokenize` endpoint for precise token counting
 - Supports F16 and quantized models on GPU and CPU
 - Features: parallel decoding, continuous batching, speculative decoding, function calling
+
+### Context capacity (`/props`)
+
+`/props` reports `default_generation_settings.n_ctx` as the **per-request**
+limit the server enforces (the slot's `n_ctx`), alongside an informational
+`total_slots` count. Do not divide by `total_slots`: with the unified KV cache
+(default when the slot count is auto) slots share one buffer dynamically, and
+in split mode the server already reports the per-slot share. Note the value is
+a property of the running child process, not the model — with memory fitting
+(`--fit on`) a child launched under VRAM pressure can come up with a smaller
+context than the same model served later. The project probes `/props` at
+startup (and on every config reload) and uses the reported value verbatim as
+the agent's effective context window when deriving the token budget. A config
+value of 0 (= auto, the default) follows the probe; a non-zero value is an
+explicit operator override. Probe readings are never persisted to config.
 
 See [docs/llama-server.md](llama-server.md) for the full llama-server reference.
 

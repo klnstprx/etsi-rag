@@ -48,7 +48,7 @@ separators = ["\n\n", "\n", '. ', ' ', '']
 backend = 'local-llama'
 model = 'Qwen3-Embedding-4B-Q8_0.gguf'
 dimension = 2560
-max_tokens = 512
+max_tokens = 0   # 0 = auto-detect via /props; non-zero overrides. 512-token floor when neither is available.
 batch_size = 8
 
 [retrieval]
@@ -72,7 +72,7 @@ enabled = true
 backend = 'local-llama'
 model = 'bge-reranker-v2-m3'  # BAAI 568M multilingual cross-encoder; selected after eval sweep (ADR-009)
 top_n = 30                    # candidate pool size; must be >= retrieval.top_k
-max_tokens = 0                # 0 = auto-detect via /props (n_ctx)
+max_tokens = 0                # 0 = auto-detect via /props; non-zero overrides
 reserved_tokens = 16          # BOS/EOS/separator budget held back from per-doc truncation
 timeout = '30s'               # per-request deadline; cold-load forgiving
 
@@ -85,9 +85,15 @@ backend = 'local-llama'
 model = 'gemma-4-E4B-it-Q8_K_XL.gguf'
 max_tokens = 1024
 temperature = 0.7
-context_window = 0                # 0 = auto-detect (llama.cpp /props)
+# 0 = auto: follow the llama.cpp /props probe (the per-request n_ctx the
+# server actually enforces, re-read at startup and on every config save).
+# A non-zero value is an explicit operator override. Probe readings are never
+# written back to this file.
+context_window = 0
 max_iterations = 5
-tool_output_max_tokens = 0        # 0 = auto (context_window / 4, floor 256)
+tool_output_max_tokens = 0        # 0 = auto-derive from the agent token budget pool (floor 256)
+history_reserve_tokens = 1280     # token headroom reserved from the context window for session history
+user_reserve_tokens = 512         # token headroom reserved from the context window for the incoming user message
 system_prompt = ''                # empty = use prompts/agent.md
 
 [agent.vision]

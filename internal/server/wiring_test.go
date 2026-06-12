@@ -36,13 +36,18 @@ func testServer(t *testing.T, cfg *config.Config) *Server {
 		db.Close()
 		t.Fatal(err)
 	}
-	st := store.NewSQLiteStore(db, func() int { return cfg.Embedding.Dimension })
+	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)
+	// Mirror server.New: the store's dimension closure reads the resolved value
+	// (probe wins, cfg fallback) so a probe updates what the store enforces.
+	probed := newProbedProps(cfg, logger)
+	st := store.NewSQLiteStore(db, probed.EmbeddingDimension)
 	t.Cleanup(func() { st.Close() })
 
 	return &Server{
 		cfg:    cfg,
 		store:  st,
-		logger: zerolog.New(os.Stderr).Level(zerolog.Disabled),
+		logger: logger,
+		probed: probed,
 	}
 }
 
@@ -52,7 +57,7 @@ func defaultConfig() *config.Config {
 		Database: config.DatabaseConfig{Path: ":memory:"},
 		Embedding: config.EmbeddingConfig{
 			Dimension: 4,
-			MaxTokens: 512,
+			MaxTokens: 0, // 0 = auto: follow the probe (effective default 512 when unprobed)
 			BatchSize: 32,
 		},
 		Retrieval: config.RetrievalConfig{TopK: 5, MaxContextTokens: 2048},
@@ -248,20 +253,28 @@ func TestProbeLlamaCppBackends_AppliesValues(t *testing.T) {
 	s := testServer(t, cfg)
 	s.probeLlamaCppBackends()
 
-	if cfg.Embedding.MaxTokens != 4096 {
-		t.Errorf("Embedding.MaxTokens = %d, want 4096", cfg.Embedding.MaxTokens)
+	// Probe results land in the runtime holder (NOT cfg — config is the
+	// fallback, never a write-back target). No total_slots in the mock, so the
+	// effective context equals the raw n_ctx.
+	if got := s.probed.EmbeddingMaxTokens(); got != 4096 {
+		t.Errorf("probed embeddingMaxTokens() = %d, want 4096", got)
 	}
-	if cfg.Embedding.Dimension != 768 {
-		t.Errorf("Embedding.Dimension = %d, want 768", cfg.Embedding.Dimension)
+	if got := s.probed.EmbeddingDimension(); got != 768 {
+		t.Errorf("probed embeddingDimension() = %d, want 768", got)
 	}
-	if cfg.Agent.ContextWindow != 4096 {
-		t.Errorf("Agent.ContextWindow = %d, want 4096", cfg.Agent.ContextWindow)
+	if got := s.probed.AgentContextWindow(); got != 4096 {
+		t.Errorf("probed agentContextWindow() = %d, want 4096", got)
+	}
+	// cfg must be left untouched.
+	if cfg.Embedding.MaxTokens != 0 {
+		t.Errorf("cfg.Embedding.MaxTokens = %d, want 0 (unchanged)", cfg.Embedding.MaxTokens)
 	}
 }
 
 func TestProbeLlamaCppBackends_AppliesRerankerContext(t *testing.T) {
-	// /props returns n_ctx=4096 — verify the probe writes that into
-	// cfg.Reranker.MaxTokens so RerankClient.fitToContext has a real budget.
+	// /props returns n_ctx=4096 — verify the probe records that in the runtime
+	// holder so RerankClient.fitToContext (wired via s.probed.rerankerMaxTokens)
+	// has a real budget.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -288,8 +301,8 @@ func TestProbeLlamaCppBackends_AppliesRerankerContext(t *testing.T) {
 	s := testServer(t, cfg)
 	s.probeLlamaCppBackends()
 
-	if cfg.Reranker.MaxTokens != 4096 {
-		t.Errorf("Reranker.MaxTokens = %d, want 4096", cfg.Reranker.MaxTokens)
+	if got := s.probed.RerankerMaxTokens(); got != 4096 {
+		t.Errorf("probed rerankerMaxTokens() = %d, want 4096", got)
 	}
 }
 

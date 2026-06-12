@@ -517,6 +517,100 @@ func TestConfigSave_Agent_ClearPrompt(t *testing.T) {
 	}
 }
 
+func TestConfigSave_Agent_ReserveTokens(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	form := url.Values{
+		"backend":                {""},
+		"model":                  {""},
+		"max_tokens":             {"1024"},
+		"temperature":            {"0.5"},
+		"context_window":         {"8192"},
+		"max_iterations":         {"10"},
+		"tool_output_max_tokens": {"0"},
+		"history_reserve_tokens": {"900"},
+		"user_reserve_tokens":    {"700"},
+		"system_prompt":          {""},
+	}
+	req := postForm("/admin/config/agent", form)
+	req = withChiParam(req, "section", "agent")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Agent.HistoryReserveTokens != 900 {
+		t.Errorf("HistoryReserveTokens = %d, want 900", h.config.Agent.HistoryReserveTokens)
+	}
+	if h.config.Agent.UserReserveTokens != 700 {
+		t.Errorf("UserReserveTokens = %d, want 700", h.config.Agent.UserReserveTokens)
+	}
+}
+
+// fakeCapacities satisfies Capacities for rendering tests.
+type fakeCapacities struct{ agentCtx, embMax, rerankMax int }
+
+func (f fakeCapacities) AgentContextWindow() int { return f.agentCtx }
+func (f fakeCapacities) EmbeddingMaxTokens() int { return f.embMax }
+func (f fakeCapacities) RerankerMaxTokens() int  { return f.rerankMax }
+
+// TestConfigSave_Agent_ContextWindowAutoRoundTrip locks the 0 = auto contract:
+// a form that posts context_window=0 must keep 0 in config (the probe stays in
+// charge), never the effective value the UI displays alongside it.
+func TestConfigSave_Agent_ContextWindowAutoRoundTrip(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+	h.config.Agent.ContextWindow = 0
+
+	form := url.Values{
+		"backend":                {""},
+		"model":                  {""},
+		"max_tokens":             {"1024"},
+		"temperature":            {"0.5"},
+		"context_window":         {"0"},
+		"max_iterations":         {"10"},
+		"tool_output_max_tokens": {"0"},
+		"history_reserve_tokens": {"1280"},
+		"user_reserve_tokens":    {"512"},
+		"system_prompt":          {""},
+	}
+	req := postForm("/admin/config/agent", form)
+	req = withChiParam(req, "section", "agent")
+	w := httptest.NewRecorder()
+
+	h.ConfigSave(w, req)
+
+	if h.config.Agent.ContextWindow != 0 {
+		t.Errorf("ContextWindow = %d, want 0 (auto must survive a save)", h.config.Agent.ContextWindow)
+	}
+}
+
+// TestConfigSections_ContextWindowShowsIntentNotEffective locks the rendering
+// contract: the editable field carries the config value (operator intent, 0 =
+// auto) while the live probe-resolved value appears only in the hint.
+func TestConfigSections_ContextWindowShowsIntentNotEffective(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Agent.ContextWindow = 0
+	caps := fakeCapacities{agentCtx: 16384, embMax: 4096, rerankMax: 2048}
+
+	sections := configToSections(cfg, caps)
+	agent := findSection(sections, "agent")
+	if agent == nil {
+		t.Fatal("agent section not found")
+	}
+	for _, f := range agent.Fields {
+		if f.Key != "context_window" {
+			continue
+		}
+		if f.Value != "0" {
+			t.Errorf("context_window field value = %q, want \"0\" (operator intent, not effective)", f.Value)
+		}
+		if !strings.Contains(f.Hint, "16384") {
+			t.Errorf("context_window hint = %q, want it to carry the effective value 16384", f.Hint)
+		}
+		return
+	}
+	t.Fatal("context_window field not found")
+}
+
 func TestConfigSave_Agent_DefaultTextNormalized(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
