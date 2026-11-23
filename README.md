@@ -12,8 +12,8 @@ sudo apt install poppler-utils chromium    # Debian/Ubuntu
 brew install poppler chromium              # macOS
 paru -S poppler chromium                   # Arch
 
-# Build tooling (must be on $PATH; `make build` shells out to both)
-go install github.com/a-h/templ/cmd/templ@latest
+# Build tooling: `make build` runs templ at the version pinned in go.mod
+# (via `go run`), so only tailwindcss must be on $PATH.
 # tailwindcss: download the standalone CLI for your platform onto $PATH
 # https://github.com/tailwindlabs/tailwindcss/releases
 
@@ -50,40 +50,52 @@ The store starts empty — content is ingested by crawling the configured source
 The agent, embedding, and reranker stages all talk to an OpenAI-compatible endpoint. In router mode, llama-server serves every model from one port, loading each on first reference:
 
 ```bash
-llama-server --models-preset ~/Models/preset.ini -ngl 99 --port 1337 --host 0.0.0.0 -fit on
+llama-server --models-preset ~/Models/preset.ini --port 1337 --host 127.0.0.1
 ```
 
-The preset assigns per-model settings (multimodal projector, context size, sampling) that don't belong in `config.toml`. Model paths must be absolute. A minimal `~/Models/preset.ini`:
+The preset assigns per-model settings (multimodal projector, context size, sampling, GPU placement) that don't belong in `config.toml`. Model paths must be absolute. The section names are the model identifiers the server exposes; the ones below match the `model` values in `config.default.toml`. This preset fits the whole stack on one 24 GB GPU (about 21.2 GiB):
 
 ```ini
 version = 1
 
-[gemma4-12b]
+[gemma-4-12b-it-Q8_K_XL.gguf]
 model = /home/you/Models/gemma-4-12b-it-GGUF/gemma-4-12b-it-UD-Q8_K_XL.gguf
 mmproj = /home/you/Models/gemma-4-12b-it-GGUF/mmproj-F32.gguf
 c = 32768
+parallel = 1
 temp = 1.0
 top-p = 0.95
 top-k = 64
+jinja = true
+flash-attn = on
+reasoning = off
+n-gpu-layers = all
+fit = off
+
+[Octen-Embedding-4B.Q8_0.gguf]
+model = /home/you/Models/Octen-Embedding-4B/Octen-Embedding-4B.Q8_0.gguf
+embedding = true
+c = 8192
+parallel = 1
+jinja = true
+n-gpu-layers = all
+fit = off
 
 [bge-reranker-v2-m3]
 model = /home/you/Models/bge-reranker-v2-m3-GGUF/bge-reranker-v2-m3-Q8_0.gguf
 reranking = true
+c = 8192
+parallel = 1
 b = 8192
 ub = 8192
 jinja = true
-fit = on
-
-[octen-embedding-4b]
-model = /home/you/Models/Octen-Embedding-4B/Octen-Embedding-4B.Q8_0.gguf
-embedding = true
-b = 8192
-ub = 8192
-jinja = true
-fit = on
+n-gpu-layers = all
+fit = off
 ```
 
-The reranker and embedder each process a whole input in one physical batch, so `b`/`ub` must cover their longest input; at llama-server's default of 512, longer inputs fail with HTTP 500. The section names (`gemma4-12b`, etc.) are the model identifiers the server exposes — the `model` values in each `config.toml` stage must match them.
+- **Context and slots:** without `c` and `parallel`, llama-server sizes each model's KV cache for its full training context times four slots. Octen alone then takes about 10 GB and the 12B no longer fits.
+- **Placement:** `n-gpu-layers = all` with `fit = off` keeps every model fully on the GPU. Don't pass `-ngl` on the command line; it overrides `fit` for every model.
+- **Reranker batch:** the reranker scores each query–passage pair in one physical batch, so its `b`/`ub` must cover its context; at llama-server's default of 512, longer pairs fail with HTTP 500. The embedder's inputs are single chunks (`[chunking] max_chunk_size`), well within the default.
 
 ### RustFS (object storage)
 

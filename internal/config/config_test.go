@@ -609,6 +609,23 @@ func TestAgentVisionDefaults(t *testing.T) {
 	}
 }
 
+func TestAgentVisionDefaultsToInlineImages(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, ``))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.Vision.ImageTransport != ImageTransportInline {
+		t.Errorf("agent.vision.image_transport = %q, want %q", cfg.Agent.Vision.ImageTransport, ImageTransportInline)
+	}
+}
+
+func TestLoadRejectsUnknownImageTransport(t *testing.T) {
+	_, err := Load(writeTempConfig(t, "[agent.vision]\nimage_transport = 'ftp'\n"))
+	if err == nil || !strings.Contains(err.Error(), "image_transport") {
+		t.Fatalf("Load error = %v, want an image_transport error", err)
+	}
+}
+
 func TestMaskAPIKey(t *testing.T) {
 	tests := []struct {
 		key  string

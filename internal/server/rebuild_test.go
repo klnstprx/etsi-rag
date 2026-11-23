@@ -137,6 +137,7 @@ func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
 	cfg.Agent.MaxIterations = 5
 	cfg.Agent.Vision.Enabled = true
 	cfg.Agent.Vision.MaxImagesPerCall = 4
+	cfg.Agent.Vision.ImageTransport = config.ImageTransportURL
 	cfg.Agent.Vision.PublicBaseURL = "http://localhost:3000"
 
 	logger := zerolog.New(os.Stderr).Level(zerolog.Disabled)

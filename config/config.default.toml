@@ -103,7 +103,8 @@ system_prompt = ''                # empty = use prompts/agent.md
 enabled = false                   # operator asserts the configured agent.model is vision-capable
 max_images_per_call = 6           # cap on image artifacts attached per tool call
 max_image_bytes_per_call = 65536  # cap on image_url byte length per tool call
-public_base_url = ''              # absolute URL prefix for /v1/artifacts/{token}.png; empty disables image attachment
+image_transport = 'inline'        # 'inline': send image bytes as data URIs; 'url': send public_base_url links the backend fetches
+public_base_url = ''              # url transport only: absolute URL prefix for /v1/artifacts/{token}.png (llama.cpp also needs --media-allow-private-urls for a local address)
 
 [session]
 max_messages = 10

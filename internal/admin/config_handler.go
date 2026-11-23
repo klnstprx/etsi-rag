@@ -132,6 +132,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Agent.Vision.Enabled = r.FormValue("enabled") == "true"
 		h.config.Agent.Vision.MaxImagesPerCall = formInt(r, "max_images_per_call", h.config.Agent.Vision.MaxImagesPerCall)
 		h.config.Agent.Vision.MaxImageBytesPerCall = int64(formInt(r, "max_image_bytes_per_call", int(h.config.Agent.Vision.MaxImageBytesPerCall)))
+		h.config.Agent.Vision.ImageTransport = strings.TrimSpace(r.FormValue("image_transport"))
 		h.config.Agent.Vision.PublicBaseURL = strings.TrimSpace(r.FormValue("public_base_url"))
 	case "database":
 		h.config.Database.Path = r.FormValue("path")
@@ -346,7 +347,8 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 				{Key: "enabled", Label: "Vision enabled", Value: strconv.FormatBool(cfg.Agent.Vision.Enabled), Type: "checkbox", Hint: "Tick when the configured agent.model accepts image_url content blocks (mmproj for llama.cpp; -vision/-mm models on hosted providers)."},
 				{Key: "max_images_per_call", Label: "Max Images Per Tool Call", Value: strconv.Itoa(cfg.Agent.Vision.MaxImagesPerCall), Type: "number"},
 				{Key: "max_image_bytes_per_call", Label: "Max Image-URL Bytes Per Call", Value: strconv.FormatInt(cfg.Agent.Vision.MaxImageBytesPerCall, 10), Type: "number"},
-				{Key: "public_base_url", Label: "Public Base URL", Value: cfg.Agent.Vision.PublicBaseURL, Type: "text", Hint: "Absolute URL the LLM uses to fetch /v1/artifacts/... e.g. http://localhost:8080. Required for image attachment."},
+				{Key: "image_transport", Label: "Image Transport", Value: cfg.Agent.Vision.ImageTransport, Type: "select", Options: []string{"inline", "url"}, Hint: "inline sends the image bytes in the request (no fetch by the backend); url sends Public Base URL links the backend fetches."},
+				{Key: "public_base_url", Label: "Public Base URL", Value: cfg.Agent.Vision.PublicBaseURL, Type: "text", Hint: "url transport only: absolute URL the LLM uses to fetch /v1/artifacts/... e.g. http://localhost:8080. llama.cpp also needs --media-allow-private-urls for a local address."},
 			},
 		},
 		{

@@ -176,9 +176,11 @@ enabled = false                   # operator asserts the configured agent.model 
                                   # admin UI shows a hint when llama.cpp /props detects --mmproj on the model
 max_images_per_call = 6           # cap on image artifacts attached per tool call
 max_image_bytes_per_call = 65536  # cap on total image_url URL bytes attached per tool call
-public_base_url = ''              # absolute base URL prefixed onto /v1/artifacts/{token}.png so the LLM
-                                  # backend can fetch image content blocks (e.g. 'http://localhost:8080');
-                                  # empty disables image attachment even when enabled = true
+image_transport = 'inline'        # 'inline' (default): each image goes into the request as a data URI;
+                                  # 'url': the backend fetches public_base_url + /v1/artifacts/{token}.png
+public_base_url = ''              # url transport only (e.g. 'http://localhost:8080'); empty disables image
+                                  # attachment. llama.cpp refuses private addresses unless started with
+                                  # --media-allow-private-urls
 
 [session]
 max_messages = 10             # max messages per session

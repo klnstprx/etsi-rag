@@ -57,6 +57,17 @@ route (configurable `[agent].public_base_url`). HTTP URLs over inline data:
 URLs avoid the 33% base64 expansion repeated per turn and let the LLM
 backend cache fetches.
 
+**Addendum (2026-11): inline is now the default.** llama.cpp's server now
+refuses to fetch media from local or private addresses unless started with
+`--media-allow-private-urls` (upstream SSRF fix 8954f1948). A self-hosted
+deployment's `public_base_url` is such an address, so the request failed with
+HTTP 400 and the whole agent turn failed with it. `[agent.vision]
+image_transport = 'inline'` (the default) has the app load each artifact
+from the object store and send it as a data URI; the backend fetches
+nothing, and an image that fails to load is dropped instead of failing the
+turn. The cost is the base64 expansion noted above. `image_transport =
+'url'` keeps the original behaviour for backends that can reach the app.
+
 Rejected alternatives:
 - Image parts inside the tool message (raw JSON shenanigans): non-portable
   across OpenAI-compliant backends.

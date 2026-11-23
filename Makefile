@@ -11,9 +11,14 @@ build: admin fmt
 	@mkdir -p $(BIN_DIR)
 	go build -o $(BIN_DIR)/server ./cmd/server
 
+# templ generator version, pinned to the runtime in go.mod: generated code
+# from a different CLI version does not compile against it.
+TEMPL_VERSION := $(shell go list -m -f '{{.Version}}' github.com/a-h/templ)
+TEMPL := go run github.com/a-h/templ/cmd/templ@$(TEMPL_VERSION)
+
 # Generate templ files
 templ:
-	templ generate
+	$(TEMPL) generate
 
 # Build Tailwind CSS
 tailwind:
@@ -41,7 +46,7 @@ run: build
 
 # Development mode with watchers
 dev:
-	templ generate --watch &
+	$(TEMPL) generate --watch &
 	tailwindcss -i internal/admin/static/input.css -o internal/admin/static/styles.css --watch &
 	go run ./cmd/server
 

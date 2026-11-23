@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
 
 	"etsi-rag/internal/agent"
 	"etsi-rag/internal/backend"
+	"etsi-rag/internal/config"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/prompts"
 	"etsi-rag/internal/rag"
@@ -358,16 +360,42 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 		s.sessionStore, s.logger,
 	)
 	a.SetVisionGetter(s.agentVision)
+	if s.objStore != nil {
+		a.SetImageInliner(s.inlineArtifact)
+	}
 	return a
 }
 
 // agentVision is the agent's VisionGetter. It reads the live config so admin
-// toggles apply without rebuilding the agent.
+// toggles apply without rebuilding the agent. The inline transport reports an
+// empty base URL, which tells the agent to embed the image bytes.
 func (s *Server) agentVision() (bool, string) {
-	if !s.cfg.Agent.Vision.Enabled {
+	v := s.cfg.Agent.Vision
+	if !v.Enabled {
 		return false, ""
 	}
-	return true, s.cfg.Agent.Vision.PublicBaseURL
+	if v.ImageTransport == config.ImageTransportURL {
+		return true, v.PublicBaseURL
+	}
+	return true, ""
+}
+
+// inlineArtifact is the agent's ImageInliner: it loads a tool image's bytes
+// from the object store and returns them as a data URI.
+func (s *Server) inlineArtifact(ctx context.Context, img agent.ImageRef) (string, error) {
+	art, err := s.store.Artifact(ctx, img.DocID, img.Ref)
+	if err != nil {
+		return "", fmt.Errorf("looking up artifact: %w", err)
+	}
+	data, err := s.objStore.Get(ctx, art.ObjectStoreKey)
+	if err != nil {
+		return "", fmt.Errorf("fetching artifact bytes: %w", err)
+	}
+	mime := art.MimeType
+	if mime == "" {
+		mime = "image/png"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
 // agentSystemPrompt renders the system prompt template with current data.

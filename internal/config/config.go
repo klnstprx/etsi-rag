@@ -144,8 +144,21 @@ type AgentVisionConfig struct {
 	Enabled              bool   `koanf:"enabled"`                  // operator asserts the configured agent.model has vision; gates image attachment
 	MaxImagesPerCall     int    `koanf:"max_images_per_call"`      // max image artifacts attached per tool call; 0 = default 6
 	MaxImageBytesPerCall int64  `koanf:"max_image_bytes_per_call"` // max bytes of image_url URLs (text length, not image data) per tool call; 0 = default 65536
-	PublicBaseURL        string `koanf:"public_base_url"`          // absolute base URL prefixed onto /v1/artifacts/... paths so the LLM backend can fetch them; empty disables image attachment
+	ImageTransport       string `koanf:"image_transport"`          // "inline" (default): send image bytes as data URIs; "url": send public_base_url links the backend fetches
+	PublicBaseURL        string `koanf:"public_base_url"`          // url transport only: absolute base URL prefixed onto /v1/artifacts/... paths; empty disables image attachment
 }
+
+// Image transports for [agent.vision].image_transport.
+const (
+	// ImageTransportInline embeds each image's bytes in the request as a data
+	// URI, so the LLM backend never fetches anything. llama.cpp refuses to
+	// fetch media from private addresses by default, which rules out a
+	// localhost public_base_url.
+	ImageTransportInline = "inline"
+	// ImageTransportURL sends public_base_url + /v1/artifacts/{token}.png and
+	// lets the backend fetch it.
+	ImageTransportURL = "url"
+)
 
 // DatabaseConfig holds SQLite database settings.
 type DatabaseConfig struct {
@@ -403,6 +416,15 @@ func (c *Config) Validate() error {
 			c.Retrieval.RetrievalMode,
 		)
 	}
+	switch c.Agent.Vision.ImageTransport {
+	case "", ImageTransportInline, ImageTransportURL:
+		// ok; empty means the inline default
+	default:
+		return fmt.Errorf(
+			"agent.vision.image_transport = %q is not supported; use %q or %q",
+			c.Agent.Vision.ImageTransport, ImageTransportInline, ImageTransportURL,
+		)
+	}
 	if err := c.Crawler.validateRateLimit(); err != nil {
 		return err
 	}
@@ -507,6 +529,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Agent.Vision.MaxImageBytesPerCall == 0 {
 		c.Agent.Vision.MaxImageBytesPerCall = 65536
+	}
+	if c.Agent.Vision.ImageTransport == "" {
+		c.Agent.Vision.ImageTransport = ImageTransportInline
 	}
 
 	if c.Retrieval.TopK == 0 {

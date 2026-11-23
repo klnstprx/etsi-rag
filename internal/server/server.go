@@ -41,6 +41,7 @@ type Server struct {
 	logger     zerolog.Logger
 
 	store          *store.SQLiteStore
+	objStore       *objectstore.Client // nil when the object store is unavailable
 	sessionStore   *session.Store
 	embedderHandle *llm.EmbedderHandle
 	agentHandle    *agent.Handle
@@ -128,6 +129,7 @@ func New(cfg *config.Config, configPath string, logger zerolog.Logger) (*Server,
 	s.attachReranker()
 
 	objStore := s.attachObjectStore()
+	s.objStore = objStore
 
 	// Sources: in-memory registry seeded from sources.toml, reconciled
 	// against any orphaned crawl_pages rows whose source_key disappeared.

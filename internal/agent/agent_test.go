@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -998,6 +999,86 @@ func TestChat_ToolEventVisionAttachedWhenEnabled(t *testing.T) {
 	}
 	if !doneEvt.VisionAttached {
 		t.Error("VisionAttached should be true when vision is enabled")
+	}
+}
+
+// TestChat_ImagesInlinedWhenBaseURLEmpty covers inline transport: with no
+// base URL and an inliner installed, each image_url carries the inliner's
+// data URI, so the backend never has to fetch anything.
+func TestChat_ImagesInlinedWhenBaseURLEmpty(t *testing.T) {
+	images := []ImageRef{
+		{DocID: "doc-1", Ref: "p1", URL: "/v1/artifacts/aaa.png"},
+		{DocID: "doc-1", Ref: "p2", URL: "/v1/artifacts/bbb.png"},
+	}
+
+	var recorded []map[string]any
+	srv := recordingLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("answer"),
+	}, &recorded)
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	ag.SetVisionGetter(func() (bool, string) { return true, "" })
+	ag.SetImageInliner(func(_ context.Context, img ImageRef) (string, error) {
+		return "data:image/png;base64," + img.Ref, nil
+	})
+
+	res, err := ag.Chat(context.Background(), ss.Create(), "x", nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(res.Images) != 2 {
+		t.Fatalf("ChatResult.Images len = %d, want 2", len(res.Images))
+	}
+	urls := findImageURLs(recorded[1])
+	want := []string{"data:image/png;base64,p1", "data:image/png;base64,p2"}
+	if len(urls) != len(want) {
+		t.Fatalf("image_url parts = %v, want %v", urls, want)
+	}
+	for i := range want {
+		if urls[i] != want[i] {
+			t.Errorf("image url[%d] = %q, want %q", i, urls[i], want[i])
+		}
+	}
+}
+
+// TestChat_InlineFailureDropsOnlyThatImage: an image that cannot be loaded
+// is left out, and the rest are still attached and the turn still answers.
+func TestChat_InlineFailureDropsOnlyThatImage(t *testing.T) {
+	images := []ImageRef{
+		{DocID: "doc-1", Ref: "missing", URL: "/v1/artifacts/aaa.png"},
+		{DocID: "doc-1", Ref: "p2", URL: "/v1/artifacts/bbb.png"},
+	}
+
+	var recorded []map[string]any
+	srv := recordingLLM(t, []map[string]any{
+		toolCallResp("search_with_images", "tc1", `{"query":"x"}`),
+		chatResp("answer"),
+	}, &recorded)
+	defer srv.Close()
+
+	ag, ss := newTestAgent(t, srv, []Tool{imagesToolWithRefs(images)}, 5)
+	ag.SetVisionGetter(func() (bool, string) { return true, "" })
+	ag.SetImageInliner(func(_ context.Context, img ImageRef) (string, error) {
+		if img.Ref == "missing" {
+			return "", errors.New("object not found")
+		}
+		return "data:image/png;base64," + img.Ref, nil
+	})
+
+	res, err := ag.Chat(context.Background(), ss.Create(), "x", nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.Response != "answer" {
+		t.Errorf("Response = %q, want %q", res.Response, "answer")
+	}
+	if len(res.Images) != 1 || res.Images[0].Ref != "p2" {
+		t.Errorf("ChatResult.Images = %v, want only p2", res.Images)
+	}
+	if urls := findImageURLs(recorded[1]); len(urls) != 1 || urls[0] != "data:image/png;base64,p2" {
+		t.Errorf("image_url parts = %v, want only p2's data URI", urls)
 	}
 }
 

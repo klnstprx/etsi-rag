@@ -91,8 +91,10 @@ system_prompt = ''
 enabled = false                          # set true only if the agent model is vision-capable
 max_images_per_call = 6
 max_image_bytes_per_call = 65536
-# The LLM backend (the llama container) fetches artifact URLs, so this must
-# resolve from inside that container — i.e. the app compose service name.
+image_transport = 'inline'               # images go to the model as data URIs; nothing is fetched
+# Only for image_transport = 'url': the llama container fetches artifact URLs,
+# so this must resolve from inside it (the app service name), and llama-server
+# needs --media-allow-private-urls because the address is private.
 public_base_url = 'http://app:3000'
 
 [session]

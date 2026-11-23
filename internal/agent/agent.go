@@ -41,9 +41,15 @@ type ToolCallRecord struct {
 
 // VisionGetter returns whether the configured chat backend supports vision
 // content blocks and the absolute public base URL prefixed onto path-only
-// artifact URLs (e.g. "http://host:port"). Wired through a getter rather
+// artifact URLs (e.g. "http://host:port"). An empty baseURL selects inline
+// transport, which needs an ImageInliner. Wired through a getter rather
 // than cached fields so admin-UI toggles take effect without a restart.
 type VisionGetter func() (supportsVision bool, baseURL string)
+
+// ImageInliner returns a tool image as a data URI
+// ("data:image/png;base64,..."), so the LLM backend receives the bytes in the
+// request instead of fetching a URL.
+type ImageInliner func(ctx context.Context, img ImageRef) (string, error)
 
 // Agent orchestrates LLM tool-calling loops with session management.
 // Fields are set once by NewAgent and never mutated — live config reload
@@ -58,6 +64,7 @@ type Agent struct {
 	sessionStore  *session.Store
 	logger        zerolog.Logger
 	vision        VisionGetter
+	inline        ImageInliner
 }
 
 // NewAgent creates a new agent with the given configuration.
@@ -93,6 +100,10 @@ func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, 
 // are not surfaced to the LLM. The getter is called per tool call to honour
 // admin toggles without restart.
 func (a *Agent) SetVisionGetter(g VisionGetter) { a.vision = g }
+
+// SetImageInliner installs the loader used when the VisionGetter reports an
+// empty base URL (inline transport).
+func (a *Agent) SetImageInliner(f ImageInliner) { a.inline = f }
 
 // Chat handles a session-managed conversation turn.
 // It loads session history, runs the tool-calling loop, persists all messages,
@@ -296,9 +307,9 @@ func (a *Agent) callTool(ctx context.Context, tc openai.ChatCompletionMessageToo
 	resultText = a.checkToolResult(ctx, name, resultText)
 
 	var attached []ImageRef
-	var baseURL string
+	var imageURLs []string
 	if !toolErr {
-		attached, baseURL = a.visionImages(name, toolRes.Images)
+		attached, imageURLs = a.visionImages(ctx, name, toolRes.Images)
 	}
 
 	if events != nil {
@@ -330,7 +341,7 @@ func (a *Agent) callTool(ctx context.Context, tc openai.ChatCompletionMessageToo
 	// openai-go v1.12.0's tool-message Content union is text-only, so images
 	// ride in a synthetic user turn right after the tool's text.
 	if len(attached) > 0 {
-		msgs = append(msgs, buildImageUserMessage(baseURL, attached))
+		msgs = append(msgs, buildImageUserMessage(imageURLs))
 	}
 
 	return toolCall{
@@ -346,10 +357,11 @@ func (a *Agent) callTool(ctx context.Context, tc openai.ChatCompletionMessageToo
 	}
 }
 
-// visionImages returns the tool images to forward to the LLM and the base URL
-// to prefix them with. Withheld images are logged with the reason so a missed
-// admin toggle or empty config doesn't silently degrade retrieval quality.
-func (a *Agent) visionImages(tool string, images []ImageRef) ([]ImageRef, string) {
+// visionImages returns the tool images to forward to the LLM and the
+// image_url value for each. Withheld images are logged with the reason so a
+// missed admin toggle or empty config doesn't silently degrade retrieval
+// quality.
+func (a *Agent) visionImages(ctx context.Context, tool string, images []ImageRef) ([]ImageRef, []string) {
 	if a.vision == nil {
 		if len(images) > 0 {
 			a.logger.Warn().
@@ -357,7 +369,7 @@ func (a *Agent) visionImages(tool string, images []ImageRef) ([]ImageRef, string
 				Int("dropped_images", len(images)).
 				Msg("tool returned images but agent has no VisionGetter installed — image attachment disabled")
 		}
-		return nil, ""
+		return nil, nil
 	}
 
 	vision, baseURL := a.vision()
@@ -367,23 +379,50 @@ func (a *Agent) visionImages(tool string, images []ImageRef) ([]ImageRef, string
 		// not actionable in itself.
 		a.logger.Debug().
 			Str("tool", tool).
-			Bool("vision_enabled", vision && baseURL != "").
+			Bool("vision_enabled", vision).
 			Msg("no images returned by tool")
-		return nil, ""
+		return nil, nil
 	case vision && baseURL != "":
-		return images, baseURL
+		urls := make([]string, len(images))
+		for i, img := range images {
+			urls[i] = baseURL + img.URL
+		}
+		return images, urls
+	case vision && a.inline != nil:
+		return a.inlineImages(ctx, tool, images)
 	case vision:
 		a.logger.Warn().
 			Str("tool", tool).
 			Int("dropped_images", len(images)).
-			Msg("backend supports vision but [agent].public_base_url is empty — image attachment disabled")
+			Msg("vision is enabled but there is neither an image inliner nor a [agent.vision].public_base_url — image attachment disabled")
 	default:
 		a.logger.Warn().
 			Str("tool", tool).
 			Int("dropped_images", len(images)).
 			Msg("tool returned images but agent.vision.enabled=false — image attachment disabled")
 	}
-	return nil, ""
+	return nil, nil
+}
+
+// inlineImages resolves each image to a data URI. An image that fails to load
+// is dropped and logged; the others are still attached.
+func (a *Agent) inlineImages(ctx context.Context, tool string, images []ImageRef) ([]ImageRef, []string) {
+	attached := make([]ImageRef, 0, len(images))
+	urls := make([]string, 0, len(images))
+	for _, img := range images {
+		uri, err := a.inline(ctx, img)
+		if err != nil {
+			a.logger.Warn().Err(err).
+				Str("tool", tool).
+				Str("doc_id", img.DocID).
+				Str("ref", img.Ref).
+				Msg("could not inline tool image; dropping it")
+			continue
+		}
+		attached = append(attached, img)
+		urls = append(urls, uri)
+	}
+	return attached, urls
 }
 
 func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string) (ToolResult, error) {
@@ -423,21 +462,21 @@ func (a *Agent) checkToolResult(ctx context.Context, toolName string, result str
 }
 
 // buildImageUserMessage builds a {role:user, content:[text+image_url parts]}
-// message from a list of image refs, prefixing baseURL onto each path-only
-// URL so the LLM backend can fetch it. The leading text part is a brief
-// instruction so the model knows the images are tool-derived context.
-func buildImageUserMessage(baseURL string, images []ImageRef) openai.ChatCompletionMessageParamUnion {
-	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images)+1)
+// message with one image_url part per URL (absolute links or data URIs). The
+// leading text part is a brief instruction so the model knows the images are
+// tool-derived context.
+func buildImageUserMessage(urls []string) openai.ChatCompletionMessageParamUnion {
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(urls)+1)
 	parts = append(parts, openai.ChatCompletionContentPartUnionParam{
 		OfText: &openai.ChatCompletionContentPartTextParam{
 			Text: "The previous tool returned the following page images for visual context:",
 		},
 	})
-	for _, img := range images {
+	for _, u := range urls {
 		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
 			OfImageURL: &openai.ChatCompletionContentPartImageParam{
 				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-					URL: baseURL + img.URL,
+					URL: u,
 				},
 			},
 		})
