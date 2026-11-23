@@ -2,6 +2,8 @@ package crawler
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/ingest"
 	"etsi-rag/internal/llm"
+	"etsi-rag/internal/markers"
 	"etsi-rag/internal/store"
 	"etsi-rag/internal/testutil"
 )
@@ -32,13 +35,15 @@ func (stagesTestEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]flo
 	return out, nil
 }
 
-// newEmbedStageHarness wires an in-memory SQLite store + Ingester + Crawler
+// newEmbedStageHarness wires a temporary SQLite store + Ingester + Crawler
 // stub sufficient to drive embedStage. objStore is left nil; tests must avoid
 // items with Artifacts.
 func newEmbedStageHarness(t *testing.T) (*Crawler, *store.SQLiteStore) {
 	t.Helper()
 
-	db, err := store.OpenDB(":memory:")
+	// A file, not :memory:, because each pooled connection to :memory: opens
+	// its own empty database, and the pipeline's stages write concurrently.
+	db, err := store.OpenDB(filepath.Join(t.TempDir(), "crawler.db"))
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
@@ -57,7 +62,7 @@ func newEmbedStageHarness(t *testing.T) (*Crawler, *store.SQLiteStore) {
 		512,
 	)
 	h := llm.NewEmbedderHandle(stagesTestEmbedder{})
-	ing := ingest.NewIngester(s, h, chunker)
+	ing := ingest.New(s, h, chunker)
 
 	c := &Crawler{
 		store:    s,
@@ -104,12 +109,12 @@ func TestEmbedStage_Force_DeletesAndReingestsExistingDocument(t *testing.T) {
 		Text:        "fresh content body for re-embedding",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{Key: "test"},
+		SourceKey:   "test",
 	}
 	close(in)
 
 	progress := &RunProgress{}
-	c.embedStage(ctx, in, progress, time.Now(), func() {}, true)
+	c.embedStage(ctx, in, progress, func() {}, true)
 
 	if got := progress.Ingested.Load(); got != 1 {
 		t.Errorf("Ingested = %d, want 1 (force=true must re-ingest existing doc)", got)
@@ -121,17 +126,17 @@ func TestEmbedStage_Force_DeletesAndReingestsExistingDocument(t *testing.T) {
 		t.Errorf("EmbedFail = %d, want 0", got)
 	}
 
-	doc, err := s.GetDocument(ctx, docID)
+	doc, err := s.Document(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetDocument after reprocess: %v", err)
+		t.Fatalf("Document after reprocess: %v", err)
 	}
 	if doc.Title != "fresh title" {
 		t.Errorf("doc.Title = %q, want %q (re-ingest replaced stale row)", doc.Title, "fresh title")
 	}
 
-	chunks, err := s.GetChunksByDocument(ctx, docID)
+	chunks, err := s.ChunksByDocument(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetChunksByDocument: %v", err)
+		t.Fatalf("ChunksByDocument: %v", err)
 	}
 	if len(chunks) == 0 {
 		t.Fatal("expected fresh chunks after re-ingest, got none")
@@ -146,8 +151,9 @@ func TestEmbedStage_Force_DeletesAndReingestsExistingDocument(t *testing.T) {
 // TestEmbedStage_Force_KeepsCanonicalURL is the reprocess regression for the
 // 2026-05-29 URL-flip: when force=true (reprocess) re-derives a document whose
 // content also lives at a /cms/menu/... sub-page, deleting and recreating the
-// doc must NOT flip documents.url off the canonical bare URL. The bare URL was
-// already canonical; a sub-page reprocessed afterwards must not displace it.
+// doc must NOT flip documents.url or its title off the canonical bare page. The
+// bare URL was already canonical; a sub-page reprocessed afterwards must not
+// displace it.
 func TestEmbedStage_Force_KeepsCanonicalURL(t *testing.T) {
 	c, s := newEmbedStageHarness(t)
 	ctx := context.Background()
@@ -157,7 +163,7 @@ func TestEmbedStage_Force_KeepsCanonicalURL(t *testing.T) {
 	bareURL := "https://www.uma.es/grado-en-ingenieria-del-software/"
 	if err := s.CreateDocument(ctx, &domain.Document{
 		ID:       docID,
-		Title:    "Grado",
+		Title:    "Grado en Ingeniería del Software",
 		Content:  "x",
 		URL:      &bareURL,
 		Language: domain.LanguageES,
@@ -171,26 +177,27 @@ func TestEmbedStage_Force_KeepsCanonicalURL(t *testing.T) {
 	in := make(chan ParseItem, 1)
 	in <- ParseItem{
 		URL:         subPageURL,
-		Title:       "Grado",
+		Title:       "Información del grado",
 		Text:        "fresh content body for re-embedding",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{Key: "test"},
+		SourceKey:   "test",
 	}
 	close(in)
 
 	progress := &RunProgress{}
-	c.embedStage(ctx, in, progress, time.Now(), func() {}, true)
+	c.embedStage(ctx, in, progress, func() {}, true)
 
 	if got := progress.Ingested.Load(); got != 1 {
 		t.Errorf("Ingested = %d, want 1 (force must re-ingest)", got)
 	}
-	gotURL, err := s.GetDocumentURL(ctx, docID)
+	doc, err := s.Document(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetDocumentURL: %v", err)
+		t.Fatalf("Document: %v", err)
 	}
-	if gotURL != bareURL {
-		t.Errorf("documents.url = %q, want %q (reprocess must keep canonical bare URL, not flip to sub-page)", gotURL, bareURL)
+	if doc.URL == nil || *doc.URL != bareURL || doc.Title != "Grado en Ingeniería del Software" {
+		t.Errorf("document url, title = %v, %q; want the canonical page's %q, %q (reprocess must not flip to the sub-page)",
+			doc.URL, doc.Title, bareURL, "Grado en Ingeniería del Software")
 	}
 }
 
@@ -222,16 +229,16 @@ func TestEmbedStage_Force_PromotesToCanonicalURL(t *testing.T) {
 		Text:        "fresh content body for re-embedding",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{Key: "test"},
+		SourceKey:   "test",
 	}
 	close(in)
 
 	progress := &RunProgress{}
-	c.embedStage(ctx, in, progress, time.Now(), func() {}, true)
+	c.embedStage(ctx, in, progress, func() {}, true)
 
-	gotURL, err := s.GetDocumentURL(ctx, docID)
+	gotURL, err := s.DocumentURL(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetDocumentURL: %v", err)
+		t.Fatalf("DocumentURL: %v", err)
 	}
 	if gotURL != bareURL {
 		t.Errorf("documents.url = %q, want %q (reprocess must promote to canonical bare URL)", gotURL, bareURL)
@@ -244,7 +251,7 @@ func TestEmbedStage_Force_PromotesToCanonicalURL(t *testing.T) {
 // identical content at /grado-en-X/ and at /grado-en-X/cms/menu/.../, and
 // without this swap documents.url is whichever URL won the timing race —
 // non-deterministic across crawls and breaks eval lookups against the bare
-// URL.
+// URL. The title moves with the URL so the two describe the same page.
 func TestEmbedStage_DedupSwapsToCanonicalURL(t *testing.T) {
 	c, s := newEmbedStageHarness(t)
 	ctx := context.Background()
@@ -256,7 +263,7 @@ func TestEmbedStage_DedupSwapsToCanonicalURL(t *testing.T) {
 	subPageURL := "https://www.uma.es/grado-en-ingenieria-del-software/cms/menu/informacion-grado/"
 	if err := s.CreateDocument(ctx, &domain.Document{
 		ID:       docID,
-		Title:    "Grado",
+		Title:    "Información del grado",
 		Content:  "x",
 		URL:      &subPageURL,
 		Language: domain.LanguageES,
@@ -273,22 +280,25 @@ func TestEmbedStage_DedupSwapsToCanonicalURL(t *testing.T) {
 		Text:        "x",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{Key: "test"},
+		SourceKey:   "test",
 	}
 	close(in)
 
 	progress := &RunProgress{}
-	c.embedStage(ctx, in, progress, time.Now(), func() {}, false)
+	c.embedStage(ctx, in, progress, func() {}, false)
 
 	if got := progress.Skipped.Load(); got != 1 {
 		t.Errorf("Skipped = %d, want 1", got)
 	}
-	gotURL, err := s.GetDocumentURL(ctx, docID)
+	doc, err := s.Document(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetDocumentURL: %v", err)
+		t.Fatalf("Document: %v", err)
 	}
-	if gotURL != bareURL {
-		t.Errorf("documents.url = %q, want %q (bare URL has fewer segments — should win)", gotURL, bareURL)
+	if doc.URL == nil || *doc.URL != bareURL {
+		t.Errorf("documents.url = %v, want %q (bare URL has fewer segments — should win)", doc.URL, bareURL)
+	}
+	if doc.Title != "Grado" {
+		t.Errorf("documents.title = %q, want the canonical page's %q", doc.Title, "Grado")
 	}
 }
 
@@ -320,16 +330,16 @@ func TestEmbedStage_DedupKeepsCanonicalURL(t *testing.T) {
 		Text:        "x",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{Key: "test"},
+		SourceKey:   "test",
 	}
 	close(in)
 
 	progress := &RunProgress{}
-	c.embedStage(ctx, in, progress, time.Now(), func() {}, false)
+	c.embedStage(ctx, in, progress, func() {}, false)
 
-	gotURL, err := s.GetDocumentURL(ctx, docID)
+	gotURL, err := s.DocumentURL(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetDocumentURL: %v", err)
+		t.Fatalf("DocumentURL: %v", err)
 	}
 	if gotURL != bareURL {
 		t.Errorf("documents.url = %q, want %q (deeper URL must not displace canonical)", gotURL, bareURL)
@@ -364,12 +374,12 @@ func TestEmbedStage_NoForce_SkipsExistingDocument(t *testing.T) {
 		Text:        "fresh text",
 		ContentHash: contentHash,
 		ContentType: "html",
-		Source:      CrawlSourceRef{Key: "test"},
+		SourceKey:   "test",
 	}
 	close(in)
 
 	progress := &RunProgress{}
-	c.embedStage(ctx, in, progress, time.Now(), func() {}, false)
+	c.embedStage(ctx, in, progress, func() {}, false)
 
 	if got := progress.Skipped.Load(); got != 1 {
 		t.Errorf("Skipped = %d, want 1 (force=false must skip existing doc)", got)
@@ -377,11 +387,67 @@ func TestEmbedStage_NoForce_SkipsExistingDocument(t *testing.T) {
 	if got := progress.Ingested.Load(); got != 0 {
 		t.Errorf("Ingested = %d, want 0", got)
 	}
-	doc, err := s.GetDocument(ctx, docID)
+	doc, err := s.Document(ctx, docID)
 	if err != nil {
-		t.Fatalf("GetDocument: %v", err)
+		t.Fatalf("Document: %v", err)
 	}
 	if doc.Title != "kept title" {
 		t.Errorf("doc.Title = %q, want %q (no-force must not overwrite)", doc.Title, "kept title")
+	}
+}
+
+// runParseStage feeds items through parseStage and returns what it emits.
+func runParseStage(t *testing.T, cfg config.CrawlerConfig, items ...CrawlItem) []ParseItem {
+	t.Helper()
+	c := &Crawler{config: cfg, logger: zerolog.Nop()}
+	in := make(chan CrawlItem, len(items))
+	for _, item := range items {
+		in <- item
+	}
+	close(in)
+	out := make(chan ParseItem, len(items))
+	c.parseStage(context.Background(), in, out, &RunProgress{})
+	close(out)
+	var got []ParseItem
+	for item := range out {
+		got = append(got, item)
+	}
+	return got
+}
+
+// htmlItem is a parsed HTML page, with a screenshot when shot is non-nil.
+func htmlItem(url, text string, shot []byte) CrawlItem {
+	return CrawlItem{URL: url, ContentType: "html", HTMLParsed: &HTMLResult{Title: "t", Text: text}, Screenshot: shot}
+}
+
+// TestParseStage_ScreenshotKeepsContentHash is the regression test for a
+// failed screenshot changing the page's document: the [[image:full]] marker
+// must not take part in the content hash.
+func TestParseStage_ScreenshotKeepsContentHash(t *testing.T) {
+	text := strings.Repeat("Normativa de permanencia. ", 10)
+	got := runParseStage(t, config.CrawlerConfig{MinContentLen: 200},
+		htmlItem("https://www.uma.es/a/", text, []byte("png")),
+		htmlItem("https://www.uma.es/a/", text, nil),
+	)
+	if len(got) != 2 {
+		t.Fatalf("parse stage emitted %d items, want 2", len(got))
+	}
+	if !strings.HasPrefix(got[0].Text, markers.Format("full")) {
+		t.Errorf("screenshot page text has no full marker: %q", got[0].Text)
+	}
+	if got[0].ContentHash != got[1].ContentHash {
+		t.Errorf("content hash with screenshot %s != without %s", got[0].ContentHash, got[1].ContentHash)
+	}
+}
+
+// TestParseStage_ScreenshotDoesNotPassMinLength checks that the marker does
+// not count toward min_content_length.
+func TestParseStage_ScreenshotDoesNotPassMinLength(t *testing.T) {
+	short := strings.Repeat("x", 190)
+	got := runParseStage(t, config.CrawlerConfig{MinContentLen: 200},
+		htmlItem("https://www.uma.es/a/", short, []byte("png")),
+	)
+	if len(got) != 0 {
+		t.Errorf("parse stage emitted a %d-byte page below min_content_length=200", len(got[0].Text))
 	}
 }

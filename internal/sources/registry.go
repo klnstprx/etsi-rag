@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/rs/zerolog"
-
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/diag"
 	"etsi-rag/internal/domain"
@@ -55,15 +53,14 @@ type Registry struct {
 	mu      sync.RWMutex
 	path    string
 	sources []domain.CrawlSource
-	logger  zerolog.Logger
 	diag    *diag.Registry // optional; nil = no diagnostic surfacing
 }
 
 // New constructs a Registry pointed at path. The snapshot starts empty until
 // Load (or Replace) succeeds. Diag is optional: when set, Load and Replace
 // publish IssueParse/IssueEmpty so the admin dashboard can surface them.
-func New(path string, logger zerolog.Logger) *Registry {
-	return &Registry{path: path, logger: logger}
+func New(path string) *Registry {
+	return &Registry{path: path}
 }
 
 // SetDiag attaches a diag registry. Pass nil to detach.
@@ -90,11 +87,7 @@ func (r *Registry) Load() error {
 		r.publishParse(err)
 		return fmt.Errorf("loading %s: %w", r.path, err)
 	}
-	r.mu.Lock()
-	r.sources = loaded
-	r.mu.Unlock()
-	r.publishParse(nil)
-	r.publishEmpty(len(loaded) == 0)
+	r.set(loaded)
 	return nil
 }
 
@@ -119,13 +112,17 @@ func (r *Registry) Replace(sources []domain.CrawlSource) error {
 	}
 	// Defensive copy on the way in so a caller mutating the slice after
 	// Replace returns cannot retroactively change the Registry's view.
-	stored := append([]domain.CrawlSource(nil), sources...)
+	r.set(append([]domain.CrawlSource(nil), sources...))
+	return nil
+}
+
+// set swaps in a validated snapshot and refreshes the diagnostics it implies.
+func (r *Registry) set(srcs []domain.CrawlSource) {
 	r.mu.Lock()
-	r.sources = stored
+	r.sources = srcs
 	r.mu.Unlock()
 	r.publishParse(nil)
-	r.publishEmpty(len(stored) == 0)
-	return nil
+	r.publishEmpty(len(srcs) == 0)
 }
 
 // publishParse sets or clears IssueParse on the attached diag registry. nil

@@ -3,6 +3,7 @@ package tokencount
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -114,19 +115,42 @@ func TestLlamaCppCounterDetokenizeEmpty(t *testing.T) {
 	}
 }
 
+// TestLlamaCppCounterError checks which failures count as the backend being
+// down (ErrBackend) and which reject the text itself, since the crawler's
+// embed-failure breaker counts only the former.
 func TestLlamaCppCounterError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
+	status := func(code int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
 
-	ctx := context.Background()
-	// Disable retries so the test fails fast instead of waiting through backoff.
-	c := NewLlamaCppCounter(srv.URL, "test-model", nil).WithMaxRetries(0)
+	tests := []struct {
+		name        string
+		url         string
+		wantBackend bool
+	}{
+		{"5xx after retries", status(http.StatusInternalServerError), true},
+		{"connection refused", closed.URL, true},
+		{"4xx rejection", status(http.StatusBadRequest), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Disable retries so the test fails fast instead of waiting through backoff.
+			c := NewLlamaCppCounter(tt.url, "test-model", nil).WithMaxRetries(0)
 
-	_, err := c.Count(ctx, "test")
-	if err == nil {
-		t.Error("expected error for 500 response")
+			_, err := c.Count(context.Background(), "test")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, ErrBackend); got != tt.wantBackend {
+				t.Errorf("errors.Is(err, ErrBackend) = %v, want %v (err: %v)", got, tt.wantBackend, err)
+			}
+		})
 	}
 }
 

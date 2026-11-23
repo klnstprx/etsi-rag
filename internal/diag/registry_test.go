@@ -36,10 +36,10 @@ func TestRegistry_SetSnapshotClear(t *testing.T) {
 func TestRegistry_SetOverwritesByID(t *testing.T) {
 	r := diag.New()
 	r.Set(diag.Issue{ID: "a", Severity: diag.SeverityWarn, Detail: "v1"})
-	t1, _ := r.Get("a")
+	t1, _ := find(r, "a")
 	time.Sleep(2 * time.Millisecond)
 	r.Set(diag.Issue{ID: "a", Severity: diag.SeverityWarn, Detail: "v2"})
-	t2, _ := r.Get("a")
+	t2, _ := find(r, "a")
 
 	if t2.Detail != "v2" {
 		t.Errorf("Detail = %q, want v2", t2.Detail)
@@ -67,11 +67,8 @@ func TestRegistry_RecheckClearsOnNil(t *testing.T) {
 	r.Set(template)
 	r.Register("probe", template, func(ctx context.Context) error { return nil })
 
-	errs := r.Recheck(context.Background())
-	if len(errs) != 0 {
-		t.Errorf("got errs = %v, want none", errs)
-	}
-	if r.Has("probe") {
+	r.Recheck(context.Background())
+	if _, ok := find(r, "probe"); ok {
 		t.Error("issue should have been cleared")
 	}
 }
@@ -85,11 +82,8 @@ func TestRegistry_RecheckSetsOnError(t *testing.T) {
 	probeErr := errors.New("dial tcp: refused")
 	r.Register("probe", template, func(ctx context.Context) error { return probeErr })
 
-	errs := r.Recheck(context.Background())
-	if len(errs) != 1 || errs[0] != probeErr {
-		t.Errorf("errs = %v, want [%v]", errs, probeErr)
-	}
-	got, ok := r.Get("probe")
+	r.Recheck(context.Background())
+	got, ok := find(r, "probe")
 	if !ok {
 		t.Fatal("issue should have been set")
 	}
@@ -115,29 +109,12 @@ func TestRegistry_RecheckSkipsRequiresRestart(t *testing.T) {
 		return nil
 	})
 
-	r.Recheck(context.Background()) // no ids → skip RequiresRestart
+	r.Recheck(context.Background())
 	if called {
-		t.Error("RequiresRestart issue should not be rechecked without explicit id")
+		t.Error("RequiresRestart issue should not be rechecked")
 	}
-	if !r.Has("objstore") {
+	if _, ok := find(r, "objstore"); !ok {
 		t.Error("RequiresRestart issue should remain set")
-	}
-
-	// Explicit id bypasses the skip.
-	r.Recheck(context.Background(), "objstore")
-	if !called {
-		t.Error("explicit id should bypass RequiresRestart skip")
-	}
-	if r.Has("objstore") {
-		t.Error("issue should have been cleared after explicit recheck (returned nil)")
-	}
-}
-
-func TestRegistry_RecheckUnknownIDIsNoOp(t *testing.T) {
-	r := diag.New()
-	errs := r.Recheck(context.Background(), "nope")
-	if len(errs) != 0 {
-		t.Errorf("unknown id should produce no errors, got %v", errs)
 	}
 }
 
@@ -180,8 +157,18 @@ func TestRegistry_ConcurrentSetRecheckSnapshot(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			_ = r.Recheck(context.Background())
+			r.Recheck(context.Background())
 		}()
 	}
 	wg.Wait()
+}
+
+// find looks an issue up through Snapshot, the registry's only read path.
+func find(r *diag.Registry, id string) (diag.Issue, bool) {
+	for _, i := range r.Snapshot() {
+		if i.ID == id {
+			return i, true
+		}
+	}
+	return diag.Issue{}, false
 }

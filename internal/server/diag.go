@@ -157,11 +157,10 @@ func (s *Server) publishProbeResult(template diag.Issue, err error) {
 //
 // RequiresRestart issues (objectstore.unavailable, embedding.warm,
 // crawler.disabled) are NOT registered — there is no in-process probe that
-// would meaningfully re-run them, and Recheck(no-args) skips them anyway.
+// would meaningfully re-run them, and Recheck skips them anyway.
 func (s *Server) registerDiagRechecks() {
 	s.diag.Register(issueEmbeddingBackend.ID, issueEmbeddingBackend, func(ctx context.Context) error {
-		name, cfg := s.embedClientConfig()
-		_, err := s.resolveEmbedClient(name, cfg)
+		_, err := s.resolveEmbedClient()
 		return err
 	})
 
@@ -175,8 +174,7 @@ func (s *Server) registerDiagRechecks() {
 		if s.cfg.Agent.Backend == "" {
 			return nil
 		}
-		name, cfg := s.chatClientConfig()
-		_, err := s.resolveChatClient(name, cfg)
+		_, err := s.resolveChatClient()
 		return err
 	})
 

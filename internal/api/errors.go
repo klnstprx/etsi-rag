@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -57,21 +56,10 @@ func (e *AppError) WriteJSON(w http.ResponseWriter, r *http.Request) {
 			Str("request_id", middleware.GetReqID(r.Context())).
 			Msg("request error")
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(e.Code)
-	json.NewEncoder(w).Encode(e)
+	writeJSON(w, e.Code, e)
 }
 
 // Error constructors
-
-// ErrConfig creates a configuration error.
-func ErrConfig(err error) *AppError {
-	return &AppError{
-		Code:    http.StatusInternalServerError,
-		Message: "Configuration error",
-		Err:     err,
-	}
-}
 
 // ErrBadGateway creates an external service error.
 func ErrBadGateway(err error) *AppError {
@@ -79,14 +67,6 @@ func ErrBadGateway(err error) *AppError {
 		Code:    http.StatusBadGateway,
 		Message: "External service unavailable",
 		Err:     err,
-	}
-}
-
-// ErrDimensionMismatch creates a dimension mismatch error.
-func ErrDimensionMismatch(expected, got int) *AppError {
-	return &AppError{
-		Code:    http.StatusBadRequest,
-		Message: fmt.Sprintf("Embedding dimension mismatch: expected %d, got %d", expected, got),
 	}
 }
 
@@ -103,14 +83,6 @@ func ErrEmptyEmbeddingResponse() *AppError {
 	return &AppError{
 		Code:    http.StatusBadGateway,
 		Message: "Empty response from embedding service",
-	}
-}
-
-// ErrSessionNotFound creates a session not found error.
-func ErrSessionNotFound(sessionID string) *AppError {
-	return &AppError{
-		Code:    http.StatusNotFound,
-		Message: fmt.Sprintf("Session not found: %s", sessionID),
 	}
 }
 

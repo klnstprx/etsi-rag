@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/rs/zerolog"
-
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/sources"
@@ -40,13 +38,9 @@ func writeFile(t *testing.T, contents string) string {
 	return path
 }
 
-func disabledLogger() zerolog.Logger {
-	return zerolog.New(os.Stderr).Level(zerolog.Disabled)
-}
-
 func TestRegistry_Load_Valid(t *testing.T) {
 	path := writeFile(t, validToml)
-	r := sources.New(path, disabledLogger())
+	r := sources.New(path)
 
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -65,7 +59,7 @@ func TestRegistry_Load_Valid(t *testing.T) {
 
 func TestRegistry_Load_InvalidLeavesSnapshotUntouched(t *testing.T) {
 	good := writeFile(t, validToml)
-	r := sources.New(good, disabledLogger())
+	r := sources.New(good)
 	if err := r.Load(); err != nil {
 		t.Fatalf("initial Load: %v", err)
 	}
@@ -99,7 +93,7 @@ seed_url = 'https://example.com/x2/'
 func TestRegistry_Replace_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.toml")
-	r := sources.New(path, disabledLogger())
+	r := sources.New(path)
 
 	in := []domain.CrawlSource{
 		{Key: "x", Name: "X", SeedURL: "https://example.com/x/", Description: "Hub X", Tags: []string{"foo"}, Enabled: true},
@@ -128,7 +122,7 @@ func TestRegistry_Replace_RoundTrip(t *testing.T) {
 func TestRegistry_Replace_InvalidLeavesStateUntouched(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.toml")
-	r := sources.New(path, disabledLogger())
+	r := sources.New(path)
 
 	good := []domain.CrawlSource{
 		{Key: "ok", Name: "OK", SeedURL: "https://example.com/", Enabled: true},
@@ -163,7 +157,7 @@ func TestRegistry_Replace_InvalidLeavesStateUntouched(t *testing.T) {
 }
 
 func TestRegistry_KnownKeys(t *testing.T) {
-	r := sources.New(filepath.Join(t.TempDir(), "sources.toml"), disabledLogger())
+	r := sources.New(filepath.Join(t.TempDir(), "sources.toml"))
 	if err := r.Replace([]domain.CrawlSource{
 		{Key: "a", Name: "A", SeedURL: "https://example.com/", Enabled: true},
 		{Key: "b", Name: "B", SeedURL: "https://example.com/", Enabled: false},
@@ -178,7 +172,7 @@ func TestRegistry_KnownKeys(t *testing.T) {
 }
 
 func TestRegistry_SnapshotIsDefensiveCopy(t *testing.T) {
-	r := sources.New(filepath.Join(t.TempDir(), "sources.toml"), disabledLogger())
+	r := sources.New(filepath.Join(t.TempDir(), "sources.toml"))
 	if err := r.Replace([]domain.CrawlSource{
 		{Key: "a", Name: "A", SeedURL: "https://example.com/", Tags: []string{"x"}, Enabled: true},
 	}); err != nil {
@@ -202,7 +196,7 @@ func TestRegistry_SnapshotIsDefensiveCopy(t *testing.T) {
 }
 
 func TestRegistry_ConcurrentSnapshotReplace(t *testing.T) {
-	r := sources.New(filepath.Join(t.TempDir(), "sources.toml"), disabledLogger())
+	r := sources.New(filepath.Join(t.TempDir(), "sources.toml"))
 	if err := r.Replace([]domain.CrawlSource{
 		{Key: "a", Name: "A", SeedURL: "https://example.com/", Enabled: true},
 	}); err != nil {

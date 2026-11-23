@@ -6,6 +6,9 @@ import (
 	"etsi-rag/internal/store"
 )
 
+// rrfK is the canonical RRF constant from Cormack et al. (see FuseRRF).
+const rrfK = 60.0
+
 // FuseRRF merges two ranked SearchResult lists by Reciprocal Rank Fusion.
 //
 // For each input list, the rank-i contribution to a chunk's fused score is

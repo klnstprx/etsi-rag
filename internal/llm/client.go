@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -31,13 +32,35 @@ func resolveMaxRetries(n int) int {
 	}
 }
 
+// defaultBatchSize is the embedding sub-batch size when the config leaves it unset.
+const defaultBatchSize = 32
+
+// defaultEmbedRequestTimeout bounds each embedding request attempt when the
+// config leaves it unset, so a stalled backend fails the call instead of
+// hanging a crawl. It is far above a full sub-batch on a local llama-server.
+const defaultEmbedRequestTimeout = 2 * time.Minute
+
+// newOpenAI builds an SDK client for an OpenAI-compatible backend. llama.cpp
+// ignores the API key, but the SDK requires one to be set.
+func newOpenAI(baseURL, apiKey string, opts ...option.RequestOption) *openai.Client {
+	if apiKey == "" {
+		apiKey = "not-needed"
+	}
+	c := openai.NewClient(append([]option.RequestOption{
+		option.WithBaseURL(baseURL),
+		option.WithAPIKey(apiKey),
+	}, opts...)...)
+	return &c
+}
+
 // EmbedClientConfig holds everything needed to construct an embedding client.
 type EmbedClientConfig struct {
-	BaseURL    string
-	APIKey     string
-	Model      string
-	BatchSize  int
-	MaxRetries int
+	BaseURL        string
+	APIKey         string
+	Model          string
+	BatchSize      int
+	MaxRetries     int
+	RequestTimeout time.Duration // per attempt; 0 = defaultEmbedRequestTimeout
 }
 
 // EmbedClient wraps the OpenAI client for embedding operations.
@@ -54,24 +77,19 @@ type EmbedClient struct {
 // breaker doesn't trip on a recoverable outage. openai-go uses exponential
 // backoff with jitter. See DefaultMaxRetries for the fallback budget.
 func NewEmbedClient(cfg EmbedClientConfig) *EmbedClient {
-	apiKey := cfg.APIKey
-	if apiKey == "" {
-		apiKey = "not-needed"
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(cfg.BaseURL),
-		option.WithAPIKey(apiKey),
-		option.WithMaxRetries(resolveMaxRetries(cfg.MaxRetries)),
-	)
-
 	batchSize := cfg.BatchSize
 	if batchSize <= 0 {
-		batchSize = 32
+		batchSize = defaultBatchSize
 	}
-
+	timeout := cfg.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultEmbedRequestTimeout
+	}
 	return &EmbedClient{
-		client:    &client,
+		client: newOpenAI(cfg.BaseURL, cfg.APIKey,
+			option.WithMaxRetries(resolveMaxRetries(cfg.MaxRetries)),
+			option.WithRequestTimeout(timeout),
+		),
 		model:     cfg.Model,
 		batchSize: batchSize,
 	}
@@ -99,15 +117,10 @@ func (c *EmbedClient) Embed(ctx context.Context, text string) ([]float32, error)
 // EmbedBatch generates embeddings for multiple texts, splitting into
 // sub-batches of batchSize to limit memory pressure on the server.
 func (c *EmbedClient) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	batchSize := c.batchSize
-	if batchSize <= 0 {
-		batchSize = 32
-	}
-
 	result := make([][]float32, 0, len(texts))
 
-	for i := 0; i < len(texts); i += batchSize {
-		end := min(i+batchSize, len(texts))
+	for i := 0; i < len(texts); i += c.batchSize {
+		end := min(i+c.batchSize, len(texts))
 		batch := texts[i:end]
 
 		resp, err := c.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
@@ -160,86 +173,29 @@ type ChatClient struct {
 //
 // See NewEmbedClient for retry rationale.
 func NewChatClient(cfg ChatClientConfig) *ChatClient {
-	apiKey := cfg.APIKey
-	if apiKey == "" {
-		apiKey = "not-needed"
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(cfg.BaseURL),
-		option.WithAPIKey(apiKey),
-		option.WithMaxRetries(resolveMaxRetries(cfg.MaxRetries)),
-	)
-
 	return &ChatClient{
-		client:      &client,
+		client:      newOpenAI(cfg.BaseURL, cfg.APIKey, option.WithMaxRetries(resolveMaxRetries(cfg.MaxRetries))),
 		model:       cfg.Model,
 		maxTokens:   cfg.MaxTokens,
 		temperature: cfg.Temperature,
 	}
 }
 
-// Chat generates a response from a conversation.
-func (c *ChatClient) Chat(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
-	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Messages:            messages,
-		Model:               c.model,
-		MaxCompletionTokens: openai.Int(c.maxTokens),
-		Temperature:         openai.Float(c.temperature),
-	})
-	if err != nil {
-		return "", fmt.Errorf("chat completion: %w", err)
-	}
-
-	if len(resp.Choices) == 0 {
-		return "", ErrEmptyCompletion
-	}
-
-	return resp.Choices[0].Message.Content, nil
-}
-
-// ChatStream generates a streaming response, sending tokens to a channel.
-func (c *ChatClient) ChatStream(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (<-chan string, <-chan error) {
-	tokens := make(chan string, 64)
-	errc := make(chan error, 1)
-
-	go func() {
-		defer close(tokens)
-		defer close(errc)
-
-		stream := c.client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
-			Messages:            messages,
-			Model:               c.model,
-			MaxCompletionTokens: openai.Int(c.maxTokens),
-			Temperature:         openai.Float(c.temperature),
-		})
-
-		for stream.Next() {
-			chunk := stream.Current()
-			for _, choice := range chunk.Choices {
-				if choice.Delta.Content != "" {
-					tokens <- choice.Delta.Content
-				}
-			}
-		}
-
-		if err := stream.Err(); err != nil {
-			errc <- fmt.Errorf("streaming chat: %w", err)
-		}
-	}()
-
-	return tokens, errc
-}
-
-// ChatWithTools generates a response that may include tool calls.
-func (c *ChatClient) ChatWithTools(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolParam) (*openai.ChatCompletion, error) {
-	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+// params builds the request shared by the blocking and streaming calls, so
+// both send the same model, sampling settings and tools.
+func (c *ChatClient) params(messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolParam) openai.ChatCompletionNewParams {
+	return openai.ChatCompletionNewParams{
 		Messages:            messages,
 		Model:               c.model,
 		MaxCompletionTokens: openai.Int(c.maxTokens),
 		Temperature:         openai.Float(c.temperature),
 		Tools:               tools,
-	})
+	}
+}
+
+// ChatWithTools generates a response that may include tool calls.
+func (c *ChatClient) ChatWithTools(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion, tools []openai.ChatCompletionToolParam) (*openai.ChatCompletion, error) {
+	resp, err := c.client.Chat.Completions.New(ctx, c.params(messages, tools))
 	if err != nil {
 		return nil, fmt.Errorf("chat with tools: %w", err)
 	}
@@ -275,13 +231,7 @@ func (c *ChatClient) ChatStreamWithTools(
 		defer close(resultCh)
 
 		acc := openai.ChatCompletionAccumulator{}
-		stream := c.client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
-			Messages:            messages,
-			Model:               c.model,
-			MaxCompletionTokens: openai.Int(c.maxTokens),
-			Temperature:         openai.Float(c.temperature),
-			Tools:               tools,
-		})
+		stream := c.client.Chat.Completions.NewStreaming(ctx, c.params(messages, tools))
 
 		for stream.Next() {
 			chunk := stream.Current()

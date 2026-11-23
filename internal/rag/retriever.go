@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/rs/zerolog"
+
+	"etsi-rag/internal/chunking"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/llm"
@@ -46,13 +49,24 @@ type RetrieveOpts struct {
 // space" is enforced by construction (one handle, one swap point on config
 // reload).
 type Retriever struct {
-	mu           sync.RWMutex
-	store        *store.SQLiteStore
-	embedder     *llm.EmbedderHandle
-	counter      tokencount.Counter
-	config       config.RetrievalConfig
-	reranker     llm.Reranker
-	rerankerPool int // candidate pool size for the rerank input; 0 = no over-fetch
+	mu       sync.RWMutex
+	store    *store.SQLiteStore
+	embedder *llm.EmbedderHandle
+	counter  tokencount.Counter
+	config   config.RetrievalConfig
+	rerank   RerankerSetup
+}
+
+// RerankerSetup configures the rerank step of Retrieve. A nil Reranker
+// disables it, and the other fields are then ignored.
+type RerankerSetup struct {
+	Reranker llm.Reranker
+	// Pool is the candidate-pool depth fed into the rerank input.
+	Pool int
+	// TitleInText sends each candidate as "title > breadcrumb:\nbody" instead
+	// of the body alone; see config.RerankerConfig.TitleInText.
+	TitleInText bool
+	Logger      zerolog.Logger
 }
 
 // NewRetriever creates a Retriever wired against the given dependencies.
@@ -81,14 +95,11 @@ func (r *Retriever) SetConfig(cfg config.RetrievalConfig) {
 	r.mu.Unlock()
 }
 
-// SetReranker swaps the reranker (thread-safe). Pass r=nil to disable rerank
-// entirely, in which case poolSize is ignored. poolSize is the candidate-pool
-// depth fed into the rerank input — Retrieve over-fetches up to this many
-// candidates from each retriever (dense or hybrid) before reranking.
-func (r *Retriever) SetReranker(re llm.Reranker, poolSize int) {
+// SetReranker swaps the rerank step (thread-safe). Retrieve over-fetches up to
+// setup.Pool candidates from each retriever (dense or hybrid) before reranking.
+func (r *Retriever) SetReranker(setup RerankerSetup) {
 	r.mu.Lock()
-	r.reranker = re
-	r.rerankerPool = poolSize
+	r.rerank = setup
 	r.mu.Unlock()
 }
 
@@ -104,13 +115,12 @@ func (r *Retriever) getConfig() config.RetrievalConfig {
 	return r.config
 }
 
-// getReranker returns the current reranker (may be nil) and its candidate-pool
-// depth. Holding the read lock briefly is enough — callers should not retain
-// the returned Reranker across config-rebuild boundaries.
-func (r *Retriever) getReranker() (llm.Reranker, int) {
+// getReranker returns the current rerank setup. Holding the read lock briefly
+// is enough — callers should not retain it across config-rebuild boundaries.
+func (r *Retriever) getReranker() RerankerSetup {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.reranker, r.rerankerPool
+	return r.rerank
 }
 
 // Retrieve finds relevant chunks for a query.
@@ -122,68 +132,58 @@ func (r *Retriever) getReranker() (llm.Reranker, int) {
 // When a reranker is set on the retriever (see SetReranker), Retrieve
 // over-fetches a wider candidate pool, asks the reranker to re-score it, and
 // trims the result to top-k. Reranker failures (network, timeout, tokenization
-// trouble) fall through silently to the un-reranked ordering — chats must not
-// fail because a reranker is offline.
+// trouble) are logged and fall through to the un-reranked ordering — chats
+// must not fail because a reranker is offline.
 func (r *Retriever) Retrieve(ctx context.Context, query string, opts RetrieveOpts) (*RetrievalResult, error) {
 	embedder := r.embedder.Get()
 	if embedder == nil {
 		return nil, fmt.Errorf("embedding backend not configured")
 	}
 	cfg := r.getConfig()
+	hybrid := cfg.RetrievalMode == "hybrid"
+	if !hybrid && cfg.RetrievalMode != "" && cfg.RetrievalMode != "dense" {
+		return nil, fmt.Errorf("unsupported retrieval_mode: %q", cfg.RetrievalMode)
+	}
 
 	k := cfg.TopK
 	if opts.TopK != nil {
 		k = *opts.TopK
 	}
 
-	reranker, rerankerPool := r.getReranker()
+	// pool is how many candidates reach the reranker (or the result, without one).
+	rerank := r.getReranker()
+	pool := k
+	if rerank.Reranker != nil {
+		pool = max(k, rerank.Pool)
+	}
+
+	embedding, err := embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embedding query: %w", err)
+	}
 
 	var candidates []store.SearchResult
-	switch cfg.RetrievalMode {
-	case "", "dense":
-		fetch := k
-		if reranker != nil && rerankerPool > fetch {
-			fetch = rerankerPool
-		}
-		embedding, err := embedder.Embed(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("embedding query: %w", err)
-		}
-		results, err := r.store.SearchSimilar(ctx, embedding, fetch)
-		if err != nil {
-			return nil, fmt.Errorf("searching: %w", err)
-		}
-		candidates = results
-
-	case "hybrid":
-		kEach := max(k*3, 30)
-		if reranker != nil && rerankerPool > kEach {
-			kEach = rerankerPool
-		}
-		embedding, err := embedder.Embed(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("embedding query: %w", err)
-		}
-		dense, err := r.store.SearchSimilar(ctx, embedding, kEach)
+	if hybrid {
+		// Each list over-fetches so fusion has overlap to reward.
+		perList := max(k*3, 30, pool)
+		dense, err := r.store.SearchSimilar(ctx, embedding, perList)
 		if err != nil {
 			return nil, fmt.Errorf("dense search: %w", err)
 		}
-		sparse, err := r.store.SearchKeyword(ctx, query, kEach)
+		sparse, err := r.store.SearchKeyword(ctx, query, perList)
 		if err != nil {
 			return nil, fmt.Errorf("keyword search: %w", err)
 		}
-		fuseTo := k
-		if reranker != nil && rerankerPool > fuseTo {
-			fuseTo = rerankerPool
+		candidates = FuseRRF(dense, sparse, pool, rrfK)
+	} else {
+		candidates, err = r.store.SearchSimilar(ctx, embedding, pool)
+		if err != nil {
+			return nil, fmt.Errorf("searching: %w", err)
 		}
-		candidates = FuseRRF(dense, sparse, fuseTo, 60.0)
-
-	default:
-		return nil, fmt.Errorf("unsupported retrieval_mode: %q", cfg.RetrievalMode)
 	}
 
-	if reranker != nil && len(candidates) > 1 {
-		candidates = applyRerank(ctx, reranker, query, candidates, k)
+	if rerank.Reranker != nil && len(candidates) > 1 {
+		candidates = applyRerank(ctx, rerank, query, candidates, k)
 	}
 	return buildRetrievalResult(candidates), nil
 }
@@ -217,13 +217,20 @@ func (r *Retriever) RetrieveInDocument(ctx context.Context, query, docID string,
 // the original ordering is returned trimmed to topK. We never bubble a
 // reranker error up to the caller — chats must not fail because the
 // reranker is offline.
-func applyRerank(ctx context.Context, re llm.Reranker, query string, candidates []store.SearchResult, topK int) []store.SearchResult {
+func applyRerank(ctx context.Context, rerank RerankerSetup, query string, candidates []store.SearchResult, topK int) []store.SearchResult {
 	docs := make([]string, len(candidates))
 	for i, c := range candidates {
 		docs[i] = c.Chunk.Content
+		if rerank.TitleInText {
+			docs[i] = chunking.EmbeddingText(chunking.SearchBreadcrumb(c.Document.Title, c.Chunk.SectionTitle), c.Chunk.Content)
+		}
 	}
-	results, err := re.Rerank(ctx, query, docs, topK)
-	if err != nil || len(results) == 0 {
+	results, err := rerank.Reranker.Rerank(ctx, query, docs, topK)
+	if err != nil {
+		rerank.Logger.Warn().Err(err).Int("candidates", len(docs)).Msg("rerank failed; keeping the retrieval order")
+		return trimTo(candidates, topK)
+	}
+	if len(results) == 0 {
 		return trimTo(candidates, topK)
 	}
 	out := make([]store.SearchResult, 0, len(results))
@@ -284,21 +291,16 @@ func (r *Retriever) BuildContext(ctx context.Context, results *RetrievalResult) 
 	}
 	cfg := r.getConfig()
 
-	docTitles := make(map[string]string)
+	docs := make(map[string]domain.Document, len(results.Documents))
 	for _, d := range results.Documents {
-		docTitles[d.ID] = d.Title
+		docs[d.ID] = d
 	}
 
 	var b strings.Builder
 	currentTokens := 0
 
 	for i, sc := range results.Chunks {
-		title := docTitles[sc.Chunk.DocID]
-		header := title
-		if sc.Chunk.SectionTitle != "" {
-			header = title + " > " + sc.Chunk.SectionTitle
-		}
-		block := fmt.Sprintf("[%d] %s:\n%s\n\n", i+1, header, sc.Chunk.Content)
+		block := ContextBlock(i+1, docs[sc.Chunk.DocID], sc.Chunk)
 
 		blockTokens, err := counter.Count(ctx, block)
 		if err != nil {
@@ -313,4 +315,19 @@ func (r *Retriever) BuildContext(ctx context.Context, results *RetrievalResult) 
 	}
 
 	return b.String(), nil
+}
+
+// ContextBlock renders one retrieved chunk as the LLM sees it: its 1-based
+// rank, the document title with the chunk's section as a breadcrumb, the
+// document URL (the argument read_document takes) when known, and the chunk
+// text. Both agent tools use it so the model sees one shape.
+func ContextBlock(rank int, doc domain.Document, c domain.Chunk) string {
+	header := doc.Title
+	if c.SectionTitle != "" {
+		header = doc.Title + " > " + c.SectionTitle
+	}
+	if doc.URL != nil && *doc.URL != "" {
+		return fmt.Sprintf("[%d] %s:\nURL: %s\n%s\n\n", rank, header, *doc.URL, c.Content)
+	}
+	return fmt.Sprintf("[%d] %s:\n%s\n\n", rank, header, c.Content)
 }

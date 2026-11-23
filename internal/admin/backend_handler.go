@@ -3,8 +3,10 @@ package admin
 import (
 	"context"
 	"net/http"
+	"slices"
 	"time"
 
+	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
 
 	"etsi-rag/internal/admin/templates"
@@ -14,26 +16,22 @@ import (
 
 // BackendGetRow handles GET /admin/backends/{name} — returns the display row (used by Cancel).
 func (h *Handler) BackendGetRow(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-	b := h.config.GetBackend(name)
-	if b == nil {
-		http.Error(w, "backend not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.BackendRow(*b).Render(r.Context(), w)
+	h.writeBackendRow(w, r, templates.BackendRow)
 }
 
 // BackendEditForm handles GET /admin/backends/{name}/edit — returns an inline edit row.
 func (h *Handler) BackendEditForm(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-	b := h.config.GetBackend(name)
+	h.writeBackendRow(w, r, templates.BackendEditRow)
+}
+
+// writeBackendRow renders row for the enabled backend named in the URL, or 404s.
+func (h *Handler) writeBackendRow(w http.ResponseWriter, r *http.Request, row func(config.BackendConfig) templ.Component) {
+	b := h.config.EnabledBackend(chi.URLParam(r, "name"))
 	if b == nil {
 		http.Error(w, "backend not found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.BackendEditRow(*b).Render(r.Context(), w)
+	writeHTML(w, r, row(*b))
 }
 
 // BackendList handles GET /admin/backends.
@@ -60,7 +58,7 @@ func (h *Handler) BackendCreate(w http.ResponseWriter, r *http.Request) {
 
 	h.config.Backends = append(h.config.Backends, b)
 
-	if err := config.WriteTo(h.config, h.configPath); err != nil {
+	if err := h.saveConfig(); err != nil {
 		// Roll back
 		h.config.Backends = h.config.Backends[:len(h.config.Backends)-1]
 		h.logger.Error().Err(err).Msg("writing config")
@@ -68,7 +66,6 @@ func (h *Handler) BackendCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.fireConfigSave()
 	h.logger.Info().Str("name", b.Name).Msg("backend created")
 	h.renderBackendList(w, r, "Backend created")
 }
@@ -82,13 +79,7 @@ func (h *Handler) BackendUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idx := -1
-	for i := range h.config.Backends {
-		if h.config.Backends[i].Name == name {
-			idx = i
-			break
-		}
-	}
+	idx := slices.IndexFunc(h.config.Backends, func(b config.BackendConfig) bool { return b.Name == name })
 	if idx < 0 {
 		http.Error(w, "backend not found", http.StatusNotFound)
 		return
@@ -104,13 +95,12 @@ func (h *Handler) BackendUpdate(w http.ResponseWriter, r *http.Request) {
 		h.config.Backends[idx].APIKey = key
 	}
 
-	if err := config.WriteTo(h.config, h.configPath); err != nil {
+	if err := h.saveConfig(); err != nil {
 		h.logger.Error().Err(err).Msg("writing config")
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	h.fireConfigSave()
 	h.renderBackendList(w, r, "Backend updated")
 }
 
@@ -118,13 +108,7 @@ func (h *Handler) BackendUpdate(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) BackendDelete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	idx := -1
-	for i := range h.config.Backends {
-		if h.config.Backends[i].Name == name {
-			idx = i
-			break
-		}
-	}
+	idx := slices.IndexFunc(h.config.Backends, func(b config.BackendConfig) bool { return b.Name == name })
 	if idx < 0 {
 		http.Error(w, "backend not found", http.StatusNotFound)
 		return
@@ -132,13 +116,12 @@ func (h *Handler) BackendDelete(w http.ResponseWriter, r *http.Request) {
 
 	h.config.Backends = append(h.config.Backends[:idx], h.config.Backends[idx+1:]...)
 
-	if err := config.WriteTo(h.config, h.configPath); err != nil {
+	if err := h.saveConfig(); err != nil {
 		h.logger.Error().Err(err).Msg("writing config")
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	h.fireConfigSave()
 	h.logger.Info().Str("name", name).Msg("backend deleted")
 	h.renderBackendList(w, r, "Backend deleted")
 }
@@ -147,15 +130,9 @@ func (h *Handler) BackendDelete(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) BackendHealth(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	b := h.config.GetBackend(name)
-	if b == nil {
-		templates.StatusBadge(false).Render(r.Context(), w)
-		return
-	}
-
-	healthy := checkBackendHealth(b.BaseURL, h.config.Admin.BackendProbeTimeout)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.StatusBadge(healthy).Render(r.Context(), w)
+	b := h.config.EnabledBackend(name)
+	healthy := b != nil && checkBackendHealth(b.BaseURL, h.config.Admin.BackendProbeTimeout)
+	writeHTML(w, r, templates.StatusBadge(healthy))
 }
 
 // BackendModels handles GET /admin/models?backend=X&current=Y — returns <option> elements.
@@ -163,26 +140,17 @@ func (h *Handler) BackendModels(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("backend")
 	selected := r.URL.Query().Get("current")
 
-	b := h.config.GetBackend(name)
-	if b == nil {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		templates.ModelOptions(nil, selected).Render(r.Context(), w)
-		return
+	var models []string
+	if b := h.config.EnabledBackend(name); b != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), h.config.Admin.BackendModelsTimeout)
+		defer cancel()
+		var err error
+		if models, err = backend.FetchModelIDs(ctx, b.BaseURL, b.APIKey, nil); err != nil {
+			h.logger.Warn().Err(err).Str("backend", name).Msg("fetching models")
+			models = nil
+		}
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), h.config.Admin.BackendModelsTimeout)
-	defer cancel()
-
-	models, err := backend.FetchModelIDs(ctx, b.BaseURL, b.APIKey, nil)
-	if err != nil {
-		h.logger.Warn().Err(err).Str("backend", name).Msg("fetching models")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		templates.ModelOptions(nil, selected).Render(r.Context(), w)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.ModelOptions(models, selected).Render(r.Context(), w)
+	writeHTML(w, r, templates.ModelOptions(models, selected))
 }
 
 func checkBackendHealth(baseURL string, timeout time.Duration) bool {
@@ -201,9 +169,5 @@ func checkBackendHealth(baseURL string, timeout time.Duration) bool {
 }
 
 func (h *Handler) renderBackendList(w http.ResponseWriter, r *http.Request, toast string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.BackendsContent(h.config.Backends).Render(r.Context(), w)
-	if toast != "" {
-		templates.Toast(toast, "success").Render(r.Context(), w)
-	}
+	writeHTML(w, r, templates.BackendsContent(h.config.Backends), templates.Toast(toast, "success"))
 }

@@ -1,6 +1,10 @@
 package crawler
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+
+	"etsi-rag/internal/domain"
+)
 
 // CrawlItem flows from crawl stage to parse stage.
 type CrawlItem struct {
@@ -8,14 +12,24 @@ type CrawlItem struct {
 	ContentType string // "html" or "pdf"
 	Body        []byte
 	ObjKey      string
-	Source      CrawlSourceRef
+	SourceKey   string
 	HTMLParsed  *HTMLResult // non-nil for HTML (already parsed for BFS links)
-	Screenshot  []byte      // full-page PNG when go-rod captured one (HTML only)
+	Screenshot  []byte      // full-page PNG when the browser captured one (HTML only)
 }
 
-// CrawlSourceRef is a lightweight reference to a crawl source, avoiding domain import in pipeline types.
-type CrawlSourceRef struct {
-	Key string
+// parseHTML parses an HTML item up front, because the crawl stage needs its
+// links before the parse stage runs; the raw body is dropped once parsed.
+func (ci *CrawlItem) parseHTML() error {
+	if ci.ContentType == "pdf" {
+		return nil
+	}
+	parsed, err := ParseHTML(ci.Body, ci.URL)
+	if err != nil {
+		return err
+	}
+	ci.HTMLParsed = parsed
+	ci.Body = nil
+	return nil
 }
 
 // ParseItem flows from parse stage to embed stage.
@@ -25,9 +39,9 @@ type ParseItem struct {
 	Text        string
 	ContentHash string
 	ContentType string
-	Language    string // normalised primary subtag from <html lang>, "" falls back to Source.Language
+	Language    string // normalised primary subtag from <html lang>; "" falls back to Spanish
 	ObjKey      string
-	Source      CrawlSourceRef
+	SourceKey   string
 	// Artifacts is the set of image bytes (PDF page renders or HTML screenshot)
 	// that the embed stage will store in RustFS and link via document_artifacts.
 	// Each ref matches a [[image:ref]] marker embedded in Text.
@@ -37,7 +51,7 @@ type ParseItem struct {
 // ParsedArtifact carries one rendered image from parse stage to embed stage.
 type ParsedArtifact struct {
 	Ref      string // "p1","p2",… or "full"
-	Kind     string // "pdf_page" | "html_screenshot"
+	Kind     domain.ArtifactKind
 	MimeType string // "image/png"
 	Data     []byte
 }
@@ -82,6 +96,11 @@ type ProgressSnapshot struct {
 	CrawlActive bool
 	ParseActive bool
 	EmbedActive bool
+}
+
+// Failed is the number of pages that failed in any stage.
+func (s ProgressSnapshot) Failed() int64 {
+	return s.CrawlFail + s.ParseFail + s.EmbedFail
 }
 
 // Snapshot returns a point-in-time copy of all counters.

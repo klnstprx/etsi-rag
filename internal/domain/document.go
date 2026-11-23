@@ -62,6 +62,11 @@ type Chunk struct {
 	// path to attach matching artifacts; empty when the source produced no
 	// images.
 	ImageRefs []string
+
+	// SearchPrefix is extra text the keyword index sees ahead of the
+	// breadcrumb and content: the document title when
+	// chunking.title_in_search_text is on, else empty. Not shown to the LLM.
+	SearchPrefix string
 }
 
 // SourceReference identifies a source document used in RAG context.

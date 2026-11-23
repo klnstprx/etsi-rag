@@ -13,29 +13,11 @@ import (
 // `stream` flag here because the SDK splits New / NewStreaming at the call
 // site instead of exposing a Stream field on the params struct.
 //
-// The embedded type has its own MarshalJSON/UnmarshalJSON; we have to override
-// both on the wrapper or the Stream field gets dropped on the wire.
+// The embedded type has its own UnmarshalJSON, so the wrapper overrides it or
+// the Stream field is dropped on decode.
 type ChatCompletionRequest struct {
 	openai.ChatCompletionNewParams
 	Stream bool `json:"stream,omitempty"`
-}
-
-// MarshalJSON delegates to the embedded SDK marshaler, then re-inserts the
-// stream field at the top level.
-func (r ChatCompletionRequest) MarshalJSON() ([]byte, error) {
-	inner, err := json.Marshal(r.ChatCompletionNewParams)
-	if err != nil {
-		return nil, err
-	}
-	if !r.Stream {
-		return inner, nil
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(inner, &m); err != nil {
-		return nil, err
-	}
-	m["stream"] = json.RawMessage("true")
-	return json.Marshal(m)
 }
 
 // UnmarshalJSON delegates to the embedded SDK unmarshaler for OpenAI fields,
@@ -53,9 +35,6 @@ func (r *ChatCompletionRequest) UnmarshalJSON(data []byte) error {
 	r.Stream = aux.Stream
 	return nil
 }
-
-// ChatCompletionResponse is the OpenAI-compatible chat completion response.
-type ChatCompletionResponse = openai.ChatCompletion
 
 // IngestRequest is used to add documents to the RAG index.
 type IngestRequest struct {
@@ -90,18 +69,6 @@ type IngestResponse struct {
 
 	// ChunksCreated is the total number of chunks created.
 	ChunksCreated int `json:"chunks_created"`
-
-	// Errors contains any per-document errors.
-	Errors []IngestError `json:"errors,omitempty"`
-}
-
-// IngestError describes an error during document ingestion.
-type IngestError struct {
-	// DocumentID identifies the failed document.
-	DocumentID string `json:"document_id"`
-
-	// Error describes what went wrong.
-	Error string `json:"error"`
 }
 
 // RAGQueryRequest is used to inspect the retrieval layer directly, without
@@ -137,16 +104,4 @@ type RetrievedChunk struct {
 // HealthResponse is returned by the health check endpoint.
 type HealthResponse struct {
 	Status string `json:"status"`
-}
-
-// ErrorResponse is the standard error response format.
-type ErrorResponse struct {
-	Error ErrorDetail `json:"error"`
-}
-
-// ErrorDetail contains error information.
-type ErrorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    string `json:"code,omitempty"`
 }

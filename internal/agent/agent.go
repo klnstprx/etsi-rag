@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,10 @@ import (
 	"etsi-rag/internal/session"
 	"etsi-rag/internal/tokencount"
 )
+
+// minToolResultTokens floors the derived tool-result cap so an over-subscribed
+// budget can't reject every result outright.
+const minToolResultTokens = 256
 
 // ChatResult is the result of an agent conversation turn.
 type ChatResult struct {
@@ -44,16 +49,15 @@ type VisionGetter func() (supportsVision bool, baseURL string)
 // Fields are set once by NewAgent and never mutated — live config reload
 // constructs a fresh Agent and swaps the pointer at the owning Handler.
 type Agent struct {
-	client              *llm.ChatClient
-	tools               []Tool
-	system              string
-	maxIter             int
-	counter             tokencount.Counter
-	budget              Budget
-	toolOutputMaxTokens int
-	sessionStore        *session.Store
-	logger              zerolog.Logger
-	vision              VisionGetter
+	client        *llm.ChatClient
+	tools         []Tool
+	system        string
+	maxIter       int
+	counter       tokencount.Counter
+	toolResultCap int // max tokens per tool result; 0 disables the guard
+	sessionStore  *session.Store
+	logger        zerolog.Logger
+	vision        VisionGetter
 }
 
 // NewAgent creates a new agent with the given configuration.
@@ -61,21 +65,26 @@ type Agent struct {
 // or budget.ContextWindow <= 0, the guard is disabled and a warning is logged.
 // toolOutputMaxTokens is an explicit operator override: when > 0 it is used as
 // the cap directly; otherwise the cap is derived from budget.ToolPool() with a
-// 256-token floor.
+// minToolResultTokens floor.
 func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, counter tokencount.Counter, budget Budget, toolOutputMaxTokens int, sessionStore *session.Store, logger zerolog.Logger) *Agent {
-	if counter == nil || budget.ContextWindow <= 0 {
+	var toolResultCap int
+	switch {
+	case counter == nil || budget.ContextWindow <= 0:
 		logger.Warn().Msg("agent tool output guards disabled (no token counter or context window)")
+	case toolOutputMaxTokens > 0:
+		toolResultCap = toolOutputMaxTokens
+	default:
+		toolResultCap = max(budget.ToolPool(), minToolResultTokens)
 	}
 	return &Agent{
-		client:              client,
-		tools:               tools,
-		system:              system,
-		maxIter:             maxIter,
-		counter:             counter,
-		budget:              budget,
-		toolOutputMaxTokens: toolOutputMaxTokens,
-		sessionStore:        sessionStore,
-		logger:              logger,
+		client:        client,
+		tools:         tools,
+		system:        system,
+		maxIter:       maxIter,
+		counter:       counter,
+		toolResultCap: toolResultCap,
+		sessionStore:  sessionStore,
+		logger:        logger,
 	}
 }
 
@@ -85,74 +94,12 @@ func NewAgent(client *llm.ChatClient, tools []Tool, system string, maxIter int, 
 // admin toggles without restart.
 func (a *Agent) SetVisionGetter(g VisionGetter) { a.vision = g }
 
-// Vision returns the current vision capability state by invoking the
-// configured VisionGetter, or (false, "") if none is set. Exposed so callers
-// (and tests) can verify wiring without driving a tool call through the loop.
-func (a *Agent) Vision() (bool, string) {
-	if a.vision == nil {
-		return false, ""
-	}
-	return a.vision()
-}
-
 // Chat handles a session-managed conversation turn.
 // It loads session history, runs the tool-calling loop, persists all messages,
 // and returns the response with collected sources.
 // events may be nil; if non-nil, ToolEvent values are sent during tool execution.
 func (a *Agent) Chat(ctx context.Context, sessionID string, userMessage string, events chan<- ToolEvent) (*ChatResult, error) {
-	client := a.client
-	if client == nil {
-		return nil, fmt.Errorf("agent not configured")
-	}
-
-	// Load session
-	sess := a.sessionStore.Get(sessionID)
-	if sess == nil {
-		return nil, fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	system := a.system
-	tools := a.tools
-	maxIter := a.maxIter
-
-	// Build messages: system + session history + new user message
-	history := sess.GetMessages()
-	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(history)+2)
-	messages = append(messages, openai.ChatCompletionMessageParamUnion{
-		OfSystem: &openai.ChatCompletionSystemMessageParam{
-			Content: openai.ChatCompletionSystemMessageParamContentUnion{
-				OfString: openai.String(system),
-			},
-		},
-	})
-	messages = append(messages, history...)
-
-	userMsg := openai.ChatCompletionMessageParamUnion{
-		OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfString: openai.String(userMessage),
-			},
-		},
-	}
-	messages = append(messages, userMsg)
-
-	var citations []Citation
-	var attached []ImageRef
-	var toolCalls []ToolCallRecord
-
-	// Run tool loop
-	response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, &toolCalls, events, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// Persist all turn messages to session: user message + intermediate + final
-	sess.AddMessage(userMsg)
-	for _, msg := range turnMessages {
-		sess.AddMessage(msg)
-	}
-
-	return &ChatResult{Response: response, Citations: citations, Images: attached, ToolCalls: toolCalls}, nil
+	return a.turn(ctx, sessionID, userMessage, events, nil)
 }
 
 // ChatStreamOutcome is the terminal value emitted on ChatStream's outcome channel
@@ -176,86 +123,61 @@ func (a *Agent) ChatStream(ctx context.Context, sessionID string, userMessage st
 		defer close(tokens)
 		defer close(outcome)
 
-		client := a.client
-		if client == nil {
-			outcome <- ChatStreamOutcome{Err: fmt.Errorf("agent not configured")}
-			return
-		}
-
-		sess := a.sessionStore.Get(sessionID)
-		if sess == nil {
-			outcome <- ChatStreamOutcome{Err: fmt.Errorf("session not found: %s", sessionID)}
-			return
-		}
-
-		system := a.system
-		tools := a.tools
-		maxIter := a.maxIter
-
-		history := sess.GetMessages()
-		messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(history)+2)
-		messages = append(messages, openai.ChatCompletionMessageParamUnion{
-			OfSystem: &openai.ChatCompletionSystemMessageParam{
-				Content: openai.ChatCompletionSystemMessageParamContentUnion{
-					OfString: openai.String(system),
-				},
-			},
-		})
-		messages = append(messages, history...)
-
-		userMsg := openai.ChatCompletionMessageParamUnion{
-			OfUser: &openai.ChatCompletionUserMessageParam{
-				Content: openai.ChatCompletionUserMessageParamContentUnion{
-					OfString: openai.String(userMessage),
-				},
-			},
-		}
-		messages = append(messages, userMsg)
-
-		var citations []Citation
-		var attached []ImageRef
-		var toolCalls []ToolCallRecord
-
-		response, turnMessages, err := a.runToolLoop(ctx, client, messages, tools, maxIter, &citations, &attached, &toolCalls, events, tokens)
-		if err != nil {
-			outcome <- ChatStreamOutcome{Err: err}
-			return
-		}
-
-		sess.AddMessage(userMsg)
-		for _, msg := range turnMessages {
-			sess.AddMessage(msg)
-		}
-
-		outcome <- ChatStreamOutcome{Result: &ChatResult{Response: response, Citations: citations, Images: attached, ToolCalls: toolCalls}}
+		res, err := a.turn(ctx, sessionID, userMessage, events, tokens)
+		outcome <- ChatStreamOutcome{Result: res, Err: err}
 	}()
 
 	return tokens, outcome
 }
 
-// runToolLoop executes the tool-calling loop and returns the final text response
+// turn runs one session-managed conversation turn: system prompt + history +
+// user message through the tool loop, then persists the user message and every
+// message the turn produced. A nil tokens channel selects the blocking LLM call.
+func (a *Agent) turn(ctx context.Context, sessionID, userMessage string, events chan<- ToolEvent, tokens chan<- string) (*ChatResult, error) {
+	if a.client == nil {
+		return nil, errors.New("agent not configured")
+	}
+	sess := a.sessionStore.Get(sessionID)
+	if sess == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	history := sess.GetMessages()
+	userMsg := openai.UserMessage(userMessage)
+	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(history)+2)
+	messages = append(messages, openai.SystemMessage(a.system))
+	messages = append(messages, history...)
+	messages = append(messages, userMsg)
+
+	res, turnMessages, err := a.runToolLoop(ctx, messages, events, tokens)
+	if err != nil {
+		return nil, err
+	}
+
+	sess.AddMessage(userMsg)
+	for _, msg := range turnMessages {
+		sess.AddMessage(msg)
+	}
+	return res, nil
+}
+
+// runToolLoop executes the tool-calling loop and returns the turn's result
 // plus all intermediate messages (assistant+tool messages, excluding the initial messages).
 // events may be nil; if non-nil, ToolEvent values are sent for each tool execution.
-// tokens may be nil; if non-nil, the streaming LLM path is used and assistant content
-// deltas are forwarded onto it as they arrive. Ownership of `tokens` (closing) stays
-// with the caller.
+// tokens may be nil; if non-nil, assistant content deltas are forwarded onto it.
+// Ownership of `tokens` (closing) stays with the caller.
 func (a *Agent) runToolLoop(
 	ctx context.Context,
-	client *llm.ChatClient,
 	messages []openai.ChatCompletionMessageParamUnion,
-	tools []Tool,
-	maxIter int,
-	citations *[]Citation,
-	images *[]ImageRef,
-	toolCalls *[]ToolCallRecord,
 	events chan<- ToolEvent,
 	tokens chan<- string,
-) (string, []openai.ChatCompletionMessageParamUnion, error) {
-	toolParams := make([]openai.ChatCompletionToolParam, len(tools))
-	for i, t := range tools {
+) (*ChatResult, []openai.ChatCompletionMessageParamUnion, error) {
+	toolParams := make([]openai.ChatCompletionToolParam, len(a.tools))
+	for i, t := range a.tools {
 		toolParams[i] = toFunctionTool(t)
 	}
 
+	var res ChatResult
 	var turnMessages []openai.ChatCompletionMessageParamUnion
 
 	// Tools dedupe within a single call; across calls the same document (and
@@ -264,46 +186,24 @@ func (a *Agent) runToolLoop(
 	seenCitations := make(map[string]struct{})
 	seenImages := make(map[string]struct{})
 
-	for range maxIter {
-		var resp *openai.ChatCompletion
-		var err error
-		if tokens != nil {
-			deltas, resCh := client.ChatStreamWithTools(ctx, messages, toolParams)
-			for delta := range deltas {
-				tokens <- delta
-			}
-			res := <-resCh
-			if res.Err != nil {
-				return "", nil, fmt.Errorf("agent chat: %w", res.Err)
-			}
-			resp = res.Completion
-		} else {
-			resp, err = client.ChatWithTools(ctx, messages, toolParams)
-			if err != nil {
-				return "", nil, fmt.Errorf("agent chat: %w", err)
-			}
+	for range a.maxIter {
+		resp, err := a.complete(ctx, messages, toolParams, tokens)
+		if err != nil {
+			return nil, nil, fmt.Errorf("agent chat: %w", err)
 		}
-
 		if len(resp.Choices) == 0 {
-			return "", nil, fmt.Errorf("no choices in response")
+			return nil, nil, fmt.Errorf("no choices in response")
 		}
 
 		choice := resp.Choices[0]
 
 		// No tool calls → final response
 		if len(choice.Message.ToolCalls) == 0 {
-			finalMsg := openai.ChatCompletionMessageParamUnion{
-				OfAssistant: &openai.ChatCompletionAssistantMessageParam{
-					Content: openai.ChatCompletionAssistantMessageParamContentUnion{
-						OfString: openai.String(choice.Message.Content),
-					},
-				},
-			}
-			turnMessages = append(turnMessages, finalMsg)
-			return choice.Message.Content, turnMessages, nil
+			turnMessages = append(turnMessages, openai.AssistantMessage(choice.Message.Content))
+			res.Response = choice.Message.Content
+			return &res, turnMessages, nil
 		}
 
-		// Append assistant message with tool calls
 		assistantMsg := openai.ChatCompletionMessageParamUnion{
 			OfAssistant: &openai.ChatCompletionAssistantMessageParam{
 				ToolCalls: toolCallsToParams(choice.Message.ToolCalls),
@@ -312,153 +212,178 @@ func (a *Agent) runToolLoop(
 		messages = append(messages, assistantMsg)
 		turnMessages = append(turnMessages, assistantMsg)
 
-		// Execute each tool call
 		for _, tc := range choice.Message.ToolCalls {
-			if events != nil {
-				events <- ToolEvent{
-					Type:   "start",
-					CallID: tc.ID,
-					Name:   tc.Function.Name,
-					Args:   tc.Function.Arguments,
+			call := a.callTool(ctx, tc, events)
+			res.ToolCalls = append(res.ToolCalls, call.record)
+			for _, c := range call.citations {
+				key := c.URL
+				if key == "" {
+					key = c.Title
 				}
-			}
-
-			execStart := time.Now()
-			toolRes, err := a.executeTool(ctx, tc.Function.Name, tc.Function.Arguments)
-			execDuration := time.Since(execStart)
-			toolErr := err != nil
-
-			if toolCalls != nil {
-				*toolCalls = append(*toolCalls, ToolCallRecord{
-					Name:       tc.Function.Name,
-					Args:       tc.Function.Arguments,
-					Error:      toolErr,
-					DurationMS: execDuration.Milliseconds(),
-				})
-			}
-
-			var resultText string
-			var callCitations []Citation
-			if err != nil {
-				a.logger.Warn().Err(err).Str("tool", tc.Function.Name).Msg("tool execution failed")
-				resultText = fmt.Sprintf("Error: %s", err.Error())
-			} else {
-				resultText = toolRes.Text
-				callCitations = toolRes.Citations
-				if citations != nil {
-					for _, c := range callCitations {
-						key := c.URL
-						if key == "" {
-							key = c.Title
-						}
-						if _, dup := seenCitations[key]; dup {
-							continue
-						}
-						seenCitations[key] = struct{}{}
-						*citations = append(*citations, c)
-					}
+				if _, dup := seenCitations[key]; dup {
+					continue
 				}
+				seenCitations[key] = struct{}{}
+				res.Citations = append(res.Citations, c)
 			}
-
-			resultText = a.checkToolResult(ctx, tc.Function.Name, resultText)
-
-			// Image attachment is gated on the configured backend's vision
-			// flag and a non-empty public base URL. Decision is logged
-			// explicitly so a missed admin toggle or empty config doesn't
-			// silently degrade retrieval quality.
-			var attachedImages []ImageRef
-			toolImages := len(toolRes.Images)
-			if !toolErr && a.vision != nil {
-				vision, baseURL := a.vision()
-				switch {
-				case toolImages == 0:
-					// Tool didn't surface any markers — common for HTML-only
-					// hits or when no chunk in the top-K carries a marker.
-					// Log at debug only (not actionable in itself).
-					a.logger.Debug().
-						Str("tool", tc.Function.Name).
-						Bool("vision_enabled", vision && baseURL != "").
-						Msg("no images returned by tool")
-				case vision && baseURL != "":
-					attachedImages = toolRes.Images
-				case vision && baseURL == "":
-					a.logger.Warn().
-						Str("tool", tc.Function.Name).
-						Int("dropped_images", toolImages).
-						Msg("backend supports vision but [agent].public_base_url is empty — image attachment disabled")
-				default:
-					a.logger.Warn().
-						Str("tool", tc.Function.Name).
-						Int("dropped_images", toolImages).
-						Msg("tool returned images but agent.vision.enabled=false — image attachment disabled")
+			for _, img := range call.attached {
+				key := img.DocID + "\x00" + img.Ref
+				if _, dup := seenImages[key]; dup {
+					continue
 				}
-			} else if !toolErr && toolImages > 0 && a.vision == nil {
-				a.logger.Warn().
-					Str("tool", tc.Function.Name).
-					Int("dropped_images", toolImages).
-					Msg("tool returned images but agent has no VisionGetter installed — image attachment disabled")
+				seenImages[key] = struct{}{}
+				res.Images = append(res.Images, img)
 			}
-			if images != nil {
-				for _, img := range attachedImages {
-					key := img.DocID + "\x00" + img.Ref
-					if _, dup := seenImages[key]; dup {
-						continue
-					}
-					seenImages[key] = struct{}{}
-					*images = append(*images, img)
-				}
-			}
-
-			if events != nil {
-				events <- ToolEvent{
-					Type:           "done",
-					CallID:         tc.ID,
-					Name:           tc.Function.Name,
-					Args:           tc.Function.Arguments,
-					Result:         resultText,
-					Duration:       execDuration,
-					Error:          toolErr,
-					Citations:      callCitations,
-					Images:         toolRes.Images,
-					VisionAttached: len(attachedImages) > 0,
-				}
-			}
-
-			a.logger.Debug().
-				Str("tool", tc.Function.Name).
-				Str("args", tc.Function.Arguments).
-				Int("result_len", len(resultText)).
-				Int("citations", len(callCitations)).
-				Int("tool_images", toolImages).
-				Int("attached_images", len(attachedImages)).
-				Dur("duration", execDuration).
-				Msg("tool executed")
-
-			toolMsg := openai.ChatCompletionMessageParamUnion{
-				OfTool: &openai.ChatCompletionToolMessageParam{
-					ToolCallID: tc.ID,
-					Content: openai.ChatCompletionToolMessageParamContentUnion{
-						OfString: openai.String(resultText),
-					},
-				},
-			}
-			messages = append(messages, toolMsg)
-			turnMessages = append(turnMessages, toolMsg)
-
-			// openai-go v1.12.0's tool-message Content union is text-only —
-			// images live in user-message content arrays. Inject a synthetic
-			// user turn carrying the image_url parts so the LLM sees them
-			// alongside the tool's text. Gating is rechecked above.
-			if len(attachedImages) > 0 {
-				_, baseURL := a.vision()
-				userImg := buildImageUserMessage(baseURL, attachedImages)
-				messages = append(messages, userImg)
-				turnMessages = append(turnMessages, userImg)
-			}
+			messages = append(messages, call.messages...)
+			turnMessages = append(turnMessages, call.messages...)
 		}
 	}
 
-	return "", nil, fmt.Errorf("agent exceeded max tool iterations (%d)", maxIter)
+	return nil, nil, fmt.Errorf("agent exceeded max tool iterations (%d)", a.maxIter)
+}
+
+// complete makes one LLM call, streaming content deltas onto tokens when it is
+// non-nil.
+func (a *Agent) complete(
+	ctx context.Context,
+	messages []openai.ChatCompletionMessageParamUnion,
+	toolParams []openai.ChatCompletionToolParam,
+	tokens chan<- string,
+) (*openai.ChatCompletion, error) {
+	if tokens == nil {
+		return a.client.ChatWithTools(ctx, messages, toolParams)
+	}
+	deltas, results := a.client.ChatStreamWithTools(ctx, messages, toolParams)
+	for delta := range deltas {
+		tokens <- delta
+	}
+	res := <-results
+	return res.Completion, res.Err
+}
+
+// toolCall is the outcome of one executed tool call.
+type toolCall struct {
+	record    ToolCallRecord
+	citations []Citation // empty when the tool failed
+	attached  []ImageRef // images forwarded to the LLM
+	// messages is the tool message, followed by a synthetic user message
+	// carrying the attached images when there are any.
+	messages []openai.ChatCompletionMessageParamUnion
+}
+
+// callTool executes one tool call, applies the result-size guard and vision
+// gating, and emits its start/done events.
+func (a *Agent) callTool(ctx context.Context, tc openai.ChatCompletionMessageToolCall, events chan<- ToolEvent) toolCall {
+	name, args := tc.Function.Name, tc.Function.Arguments
+	if events != nil {
+		events <- ToolEvent{Type: "start", CallID: tc.ID, Name: name, Args: args}
+	}
+
+	start := time.Now()
+	toolRes, err := a.executeTool(ctx, name, args)
+	duration := time.Since(start)
+	toolErr := err != nil
+
+	var resultText string
+	var citations []Citation
+	if toolErr {
+		a.logger.Warn().Err(err).Str("tool", name).Msg("tool execution failed")
+		resultText = fmt.Sprintf("Error: %s", err.Error())
+	} else {
+		resultText = toolRes.Text
+		citations = toolRes.Citations
+	}
+	resultText = a.checkToolResult(ctx, name, resultText)
+
+	var attached []ImageRef
+	var baseURL string
+	if !toolErr {
+		attached, baseURL = a.visionImages(name, toolRes.Images)
+	}
+
+	if events != nil {
+		events <- ToolEvent{
+			Type:           "done",
+			CallID:         tc.ID,
+			Name:           name,
+			Args:           args,
+			Result:         resultText,
+			Duration:       duration,
+			Error:          toolErr,
+			Citations:      citations,
+			Images:         toolRes.Images,
+			VisionAttached: len(attached) > 0,
+		}
+	}
+
+	a.logger.Debug().
+		Str("tool", name).
+		Str("args", args).
+		Int("result_len", len(resultText)).
+		Int("citations", len(citations)).
+		Int("tool_images", len(toolRes.Images)).
+		Int("attached_images", len(attached)).
+		Dur("duration", duration).
+		Msg("tool executed")
+
+	msgs := []openai.ChatCompletionMessageParamUnion{openai.ToolMessage(resultText, tc.ID)}
+	// openai-go v1.12.0's tool-message Content union is text-only, so images
+	// ride in a synthetic user turn right after the tool's text.
+	if len(attached) > 0 {
+		msgs = append(msgs, buildImageUserMessage(baseURL, attached))
+	}
+
+	return toolCall{
+		record: ToolCallRecord{
+			Name:       name,
+			Args:       args,
+			Error:      toolErr,
+			DurationMS: duration.Milliseconds(),
+		},
+		citations: citations,
+		attached:  attached,
+		messages:  msgs,
+	}
+}
+
+// visionImages returns the tool images to forward to the LLM and the base URL
+// to prefix them with. Withheld images are logged with the reason so a missed
+// admin toggle or empty config doesn't silently degrade retrieval quality.
+func (a *Agent) visionImages(tool string, images []ImageRef) ([]ImageRef, string) {
+	if a.vision == nil {
+		if len(images) > 0 {
+			a.logger.Warn().
+				Str("tool", tool).
+				Int("dropped_images", len(images)).
+				Msg("tool returned images but agent has no VisionGetter installed — image attachment disabled")
+		}
+		return nil, ""
+	}
+
+	vision, baseURL := a.vision()
+	switch {
+	case len(images) == 0:
+		// Common for HTML-only hits or when no top-K chunk carries a marker;
+		// not actionable in itself.
+		a.logger.Debug().
+			Str("tool", tool).
+			Bool("vision_enabled", vision && baseURL != "").
+			Msg("no images returned by tool")
+		return nil, ""
+	case vision && baseURL != "":
+		return images, baseURL
+	case vision:
+		a.logger.Warn().
+			Str("tool", tool).
+			Int("dropped_images", len(images)).
+			Msg("backend supports vision but [agent].public_base_url is empty — image attachment disabled")
+	default:
+		a.logger.Warn().
+			Str("tool", tool).
+			Int("dropped_images", len(images)).
+			Msg("tool returned images but agent.vision.enabled=false — image attachment disabled")
+	}
+	return nil, ""
 }
 
 func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string) (ToolResult, error) {
@@ -470,38 +395,28 @@ func (a *Agent) executeTool(ctx context.Context, name string, argsJSON string) (
 	return ToolResult{}, fmt.Errorf("unknown tool: %s", name)
 }
 
-// checkToolResult validates that a tool result fits within the context budget.
+// checkToolResult validates that a tool result fits within toolResultCap.
 // If the result is too large, it returns an error message instead so the LLM
 // can self-correct (e.g., refine a query). Returns the result unchanged if
-// within budget or if guards are disabled (no counter / zero context window).
-//
-// The ceiling is either an explicitly configured toolOutputMaxTokens (>0) or
-// the budget pool left for a tool result, budget.ToolPool(), with a 256-token
-// floor so an over-subscribed budget can't reject every result outright.
+// within budget or if the guard is disabled.
 func (a *Agent) checkToolResult(ctx context.Context, toolName string, result string) string {
-	counter := a.counter
-	if counter == nil || a.budget.ContextWindow <= 0 {
+	if a.toolResultCap == 0 {
 		return result
 	}
 
-	maxTokens := a.toolOutputMaxTokens
-	if maxTokens <= 0 {
-		maxTokens = max(a.budget.ToolPool(), 256)
-	}
-
-	tokens, err := counter.Count(ctx, result)
+	tokens, err := a.counter.Count(ctx, result)
 	if err != nil {
 		a.logger.Warn().Err(err).Str("tool", toolName).Msg("failed to count tool result tokens")
 		return result
 	}
 
-	if tokens > maxTokens {
+	if tokens > a.toolResultCap {
 		a.logger.Warn().
 			Str("tool", toolName).
 			Int("tokens", tokens).
-			Int("budget", maxTokens).
+			Int("budget", a.toolResultCap).
 			Msg("tool result exceeded token budget")
-		return fmt.Sprintf("Tool result too large (%d tokens, budget %d). Refine your query or use more specific parameters.", tokens, maxTokens)
+		return fmt.Sprintf("Tool result too large (%d tokens, budget %d). Refine your query or use more specific parameters.", tokens, a.toolResultCap)
 	}
 
 	return result
@@ -527,13 +442,7 @@ func buildImageUserMessage(baseURL string, images []ImageRef) openai.ChatComplet
 			},
 		})
 	}
-	return openai.ChatCompletionMessageParamUnion{
-		OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfArrayOfContentParts: parts,
-			},
-		},
-	}
+	return openai.UserMessage(parts)
 }
 
 // toolCallsToParams converts response tool calls to param tool calls.

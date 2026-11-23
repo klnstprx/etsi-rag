@@ -2,7 +2,6 @@ package store
 
 import (
 	"fmt"
-	"sort"
 	"sync"
 )
 
@@ -15,10 +14,10 @@ type cachedVec struct {
 	Vec     []float32
 }
 
-// cacheScored is a (chunkID, score) pair returned from a cache search. Top-K
-// is computed in-cache; the metadata fetch (chunk content + document fields)
-// stays a SQL query off the hot path.
-type cacheScored struct {
+// scoredChunk is a chunk ID with its retrieval score, higher is better. Every
+// search ranks these first and fetches chunk and document metadata only for
+// the winners.
+type scoredChunk struct {
 	ChunkID int64
 	Score   float32
 }
@@ -57,22 +56,21 @@ func (c *embeddingCache) warm(vecs []cachedVec, dim int) {
 // mark unloaded) and lets SearchSimilar fall back to SQL until a later Warm
 // rebuilds the cache. Returning an error here would fail every reprocessed
 // page, which is exactly what the operator runs reprocess to fix.
-func (c *embeddingCache) appendChunks(entries []cachedVec) error {
+func (c *embeddingCache) appendChunks(entries []cachedVec) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.loaded {
-		return nil
+		return
 	}
 	for _, e := range entries {
 		if len(e.Vec) != c.dim {
 			c.vecs = nil
 			c.dim = 0
 			c.loaded = false
-			return nil
+			return
 		}
 	}
 	c.vecs = append(c.vecs, entries...)
-	return nil
 }
 
 // removeByDocIDs drops all cached entries whose DocID is in docIDs. Used by
@@ -106,14 +104,10 @@ func (c *embeddingCache) removeByDocIDs(docIDs []string) {
 // searchTopK scores query against every cached vector and returns the top-K
 // entries by cosine similarity descending.
 //
-// When allowed is non-nil, only vectors whose DocID appears in the set
-// participate in scoring — used to scope retrieval to a subset of sources
-// (see SearchSimilar with source_keys).
-//
 // Returns useCache=false when the cache is unloaded — the caller should run
 // the legacy SQL search path. Returns an empty slice with useCache=true when
 // the cache is loaded but empty.
-func (c *embeddingCache) searchTopK(query []float32, topK int, allowed map[string]struct{}) (results []cacheScored, useCache bool, err error) {
+func (c *embeddingCache) searchTopK(query []float32, topK int) (results []scoredChunk, useCache bool, err error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if !c.loaded {
@@ -123,21 +117,12 @@ func (c *embeddingCache) searchTopK(query []float32, topK int, allowed map[strin
 		return nil, true, fmt.Errorf("query dim %d != cache dim %d", len(query), c.dim)
 	}
 
-	scored := make([]cacheScored, 0, len(c.vecs))
+	scored := make([]scoredChunk, 0, len(c.vecs))
 	for _, v := range c.vecs {
-		if allowed != nil {
-			if _, ok := allowed[v.DocID]; !ok {
-				continue
-			}
-		}
-		scored = append(scored, cacheScored{ChunkID: v.ChunkID, Score: cosineSimilarity(query, v.Vec)})
+		scored = append(scored, scoredChunk{ChunkID: v.ChunkID, Score: cosineSimilarity(query, v.Vec)})
 	}
 	if len(scored) == 0 {
 		return nil, true, nil
 	}
-	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
-	if topK > len(scored) {
-		topK = len(scored)
-	}
-	return scored[:topK], true, nil
+	return rankTopK(scored, topK), true, nil
 }

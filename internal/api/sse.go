@@ -4,13 +4,37 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"etsi-rag/internal/agent"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5/middleware"
+
+	"etsi-rag/internal/agent"
 )
+
+// relayStream runs one agent turn through agent.RelayChat into the sink built
+// by newSink, after setting the SSE and X-Session-ID headers. Relay errors are
+// logged at debug only: they almost always mean the client disconnected, and
+// the status line is already flushed.
+func relayStream(w http.ResponseWriter, r *http.Request, ag *agent.Agent, sessionID, message string, newSink func(http.ResponseWriter, http.Flusher) agent.StreamSink) {
+	flusher, err := prepareSSE(w)
+	if err != nil {
+		ErrInternal(err).WriteJSON(w, r)
+		return
+	}
+	w.Header().Set(sessionHeader, sessionID)
+
+	if err := agent.RelayChat(r.Context(), ag, sessionID, message, newSink(w, flusher)); err != nil {
+		logger.Debug().
+			Err(err).
+			Str("path", r.URL.Path).
+			Str("request_id", middleware.GetReqID(r.Context())).
+			Msg("chat stream relay ended early (likely client disconnect)")
+	}
+}
 
 // openaiSSESink implements agent.StreamSink for the public OpenAI-compatible
 // streaming chat endpoint. It emits ONLY the standard `chat.completion.chunk`
@@ -76,12 +100,12 @@ func (s *openaiSSESink) chunk(delta streamDelta, finish *string) streamChunkOut 
 
 func (s *openaiSSESink) OnToken(tok string) error {
 	if !s.roleSent {
-		if err := writeSSEData(s.w, s.flusher, s.chunk(streamDelta{Role: "assistant"}, nil)); err != nil {
+		if err := writeSSE(s.w, s.flusher, "", s.chunk(streamDelta{Role: "assistant"}, nil)); err != nil {
 			return err
 		}
 		s.roleSent = true
 	}
-	return writeSSEData(s.w, s.flusher, s.chunk(streamDelta{Content: tok}, nil))
+	return writeSSE(s.w, s.flusher, "", s.chunk(streamDelta{Content: tok}, nil))
 }
 
 // OnToolEvent is a no-op for the OpenAI stream — see the type doc for why tool
@@ -92,17 +116,14 @@ func (s *openaiSSESink) OnEnd(_ *agent.ChatResult, agentErr error) error {
 	if agentErr != nil {
 		// OpenAI-idiomatic mid-stream error: an error object on the default
 		// channel (the SDK raises on this), then [DONE].
-		_ = writeSSEData(s.w, s.flusher, map[string]any{
+		_ = writeSSE(s.w, s.flusher, "", map[string]any{
 			"error": map[string]string{"message": agentErr.Error(), "type": "internal_error"},
 		})
-		_, err := io.WriteString(s.w, "data: [DONE]\n\n")
-		s.flusher.Flush()
-		return err
-	}
-
-	stop := "stop"
-	if err := writeSSEData(s.w, s.flusher, s.chunk(streamDelta{}, &stop)); err != nil {
-		return err
+	} else {
+		stop := "stop"
+		if err := writeSSE(s.w, s.flusher, "", s.chunk(streamDelta{}, &stop)); err != nil {
+			return err
+		}
 	}
 
 	_, err := io.WriteString(s.w, "data: [DONE]\n\n")
@@ -110,41 +131,23 @@ func (s *openaiSSESink) OnEnd(_ *agent.ChatResult, agentErr error) error {
 	return err
 }
 
-// writeSSEData serializes payload as JSON and writes it on the default SSE
-// channel as a single `data:` line. Used for OpenAI-spec chunks where clients
-// expect unnamed `message` events.
-func writeSSEData(w http.ResponseWriter, flusher http.Flusher, payload any) error {
-	buf, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal SSE payload: %w", err)
-	}
-	if _, err := io.WriteString(w, "data: "); err != nil {
-		return err
-	}
-	if _, err := w.Write(buf); err != nil {
-		return err
-	}
-	if _, err := io.WriteString(w, "\n\n"); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
-}
-
-// writeSSENamedEvent emits a named SSE event. JSON payloads can't contain
-// raw newlines so a single `data:` line is enough; if that ever changes we'd
-// need to split on '\n' the way admin's writeSSE does for HTML.
-func writeSSENamedEvent(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
+// writeSSE writes payload as one JSON `data:` line and flushes. An empty
+// event writes on the default channel, which OpenAI-spec chunks require.
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal SSE event %q: %w", event, err)
 	}
 	if strings.ContainsRune(string(buf), '\n') {
-		// Defensive — JSON marshalers don't emit raw newlines, but if a future
-		// payload field does we'd silently break the SSE framing.
+		// A raw newline would split the event; json.Marshal never emits one.
 		return fmt.Errorf("SSE payload for %q contains raw newline", event)
 	}
-	if _, err := fmt.Fprintf(w, "event: %s\ndata: ", event); err != nil {
+	if event != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(w, "data: "); err != nil {
 		return err
 	}
 	if _, err := w.Write(buf); err != nil {

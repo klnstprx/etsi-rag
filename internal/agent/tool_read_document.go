@@ -32,25 +32,25 @@ import (
 // defence against oversized whole-document replies; the LLM's natural retry
 // is to add a query parameter to scope the result.
 type ReadDocumentTool struct {
-	Retriever *rag.Retriever
-	Store     *store.SQLiteStore
+	retriever *rag.Retriever
+	store     *store.SQLiteStore
 
-	// DefaultTopK is the top_k used in query mode when the LLM doesn't
+	// defaultTopK is the top_k used in query mode when the LLM doesn't
 	// supply one. Zero (or unset) falls back to 5, mirroring the typical
 	// retrieval.top_k.
-	DefaultTopK int
+	defaultTopK int
 }
 
 // NewReadDocumentTool constructs a read_document tool. Both the retriever
 // (for query-mode embedding + scoped search) and the store (for whole-doc
 // fetch and URL → doc resolution) are required.
 func NewReadDocumentTool(r *rag.Retriever, s *store.SQLiteStore) *ReadDocumentTool {
-	return &ReadDocumentTool{Retriever: r, Store: s}
+	return &ReadDocumentTool{retriever: r, store: s}
 }
 
 // SetDefaultTopK overrides the default top_k used when the LLM doesn't pass
 // one in query mode. Wired from the retrieval config at startup.
-func (t *ReadDocumentTool) SetDefaultTopK(k int) { t.DefaultTopK = k }
+func (t *ReadDocumentTool) SetDefaultTopK(k int) { t.defaultTopK = k }
 
 type readDocumentArgs struct {
 	URL   string `json:"url"`
@@ -61,7 +61,7 @@ type readDocumentArgs struct {
 func (*ReadDocumentTool) Name() string { return "read_document" }
 
 func (*ReadDocumentTool) Description() string {
-	return "Read the full content of an indexed document by URL. Use this when a previous semantic_search snippet did not contain enough context to answer. Pass a `url` from a citation. If the document is too long for the context budget, also pass a `query` to scope the result to the most relevant sections within that document."
+	return "Read the full content of an indexed document by URL. Use this when a previous semantic_search snippet did not contain enough context to answer. Pass the `URL:` shown under a semantic_search result. If the document is too long for the context budget, also pass a `query` to scope the result to the most relevant sections within that document."
 }
 
 func (*ReadDocumentTool) Parameters() openai.FunctionParameters {
@@ -70,7 +70,7 @@ func (*ReadDocumentTool) Parameters() openai.FunctionParameters {
 		"properties": map[string]any{
 			"url": map[string]any{
 				"type":        "string",
-				"description": "Document URL exactly as it appeared in a previous citation.",
+				"description": "Document URL exactly as shown on the `URL:` line of a semantic_search result.",
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -93,8 +93,11 @@ func (t *ReadDocumentTool) Execute(ctx context.Context, argsJSON string) (ToolRe
 	if args.URL == "" {
 		return ToolResult{Text: "Missing required parameter `url`."}, nil
 	}
+	if err := validTopK(args.TopK); err != nil {
+		return ToolResult{}, err
+	}
 
-	doc, err := t.Store.GetDocumentByURL(ctx, args.URL)
+	doc, err := t.store.DocumentByURL(ctx, args.URL)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ToolResult{
@@ -126,18 +129,17 @@ func (t *ReadDocumentTool) wholeDocument(doc *domain.Document) ToolResult {
 }
 
 // scopedQuery runs a dense search within the document and formats the top-K
-// chunks the same way Retriever.BuildContext does, so the LLM sees a
-// consistent shape across both tools.
+// chunks with rag.ContextBlock, the shape semantic_search also returns.
 func (t *ReadDocumentTool) scopedQuery(ctx context.Context, doc *domain.Document, query string, topK *int) (ToolResult, error) {
-	k := t.DefaultTopK
+	k := t.defaultTopK
 	if k <= 0 {
 		k = 5
 	}
-	if topK != nil && *topK > 0 {
+	if topK != nil {
 		k = *topK
 	}
 
-	results, err := t.Retriever.RetrieveInDocument(ctx, query, doc.ID, k)
+	results, err := t.retriever.RetrieveInDocument(ctx, query, doc.ID, k)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("scoped search: %w", err)
 	}
@@ -150,11 +152,7 @@ func (t *ReadDocumentTool) scopedQuery(ctx context.Context, doc *domain.Document
 
 	var b strings.Builder
 	for i, sc := range results.Chunks {
-		header := doc.Title
-		if sc.Chunk.SectionTitle != "" {
-			header = doc.Title + " > " + sc.Chunk.SectionTitle
-		}
-		fmt.Fprintf(&b, "[%d] %s:\n%s\n\n", i+1, header, sc.Chunk.Content)
+		b.WriteString(rag.ContextBlock(i+1, *doc, sc.Chunk))
 	}
 	return ToolResult{
 		Text:      b.String(),

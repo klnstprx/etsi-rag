@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
 
 	"etsi-rag/internal/admin/templates"
@@ -63,12 +64,12 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Server.ReadTimeout = formInt(r, "read_timeout", h.config.Server.ReadTimeout)
 		h.config.Server.WriteTimeout = formInt(r, "write_timeout", h.config.Server.WriteTimeout)
 		h.config.Server.RequestTimeout = formInt(r, "request_timeout", h.config.Server.RequestTimeout)
-		h.config.Server.IdleTimeout = formDurationSeconds(r, "idle_timeout_s", h.config.Server.IdleTimeout)
-		h.config.Server.ShutdownTimeout = formDurationSeconds(r, "shutdown_timeout_s", h.config.Server.ShutdownTimeout)
+		h.config.Server.IdleTimeout = formDuration(r, "idle_timeout_s", time.Second, h.config.Server.IdleTimeout)
+		h.config.Server.ShutdownTimeout = formDuration(r, "shutdown_timeout_s", time.Second, h.config.Server.ShutdownTimeout)
 	case "admin":
-		h.config.Admin.BackendProbeTimeout = formDurationSeconds(r, "backend_probe_timeout_s", h.config.Admin.BackendProbeTimeout)
-		h.config.Admin.BackendModelsTimeout = formDurationSeconds(r, "backend_models_timeout_s", h.config.Admin.BackendModelsTimeout)
-		h.config.Admin.ChatStreamTimeout = formDurationSeconds(r, "chat_stream_timeout_s", h.config.Admin.ChatStreamTimeout)
+		h.config.Admin.BackendProbeTimeout = formDuration(r, "backend_probe_timeout_s", time.Second, h.config.Admin.BackendProbeTimeout)
+		h.config.Admin.BackendModelsTimeout = formDuration(r, "backend_models_timeout_s", time.Second, h.config.Admin.BackendModelsTimeout)
+		h.config.Admin.ChatStreamTimeout = formDuration(r, "chat_stream_timeout_s", time.Second, h.config.Admin.ChatStreamTimeout)
 	case "retrieval":
 		h.config.Retrieval.TopK = formInt(r, "top_k", h.config.Retrieval.TopK)
 		h.config.Retrieval.MaxContextTokens = formInt(r, "max_context_tokens", h.config.Retrieval.MaxContextTokens)
@@ -82,7 +83,8 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Reranker.TopN = formInt(r, "top_n", h.config.Reranker.TopN)
 		h.config.Reranker.MaxTokens = formInt(r, "max_tokens", h.config.Reranker.MaxTokens)
 		h.config.Reranker.ReservedTokens = formInt(r, "reserved_tokens", h.config.Reranker.ReservedTokens)
-		h.config.Reranker.Timeout = formDurationSeconds(r, "timeout_s", h.config.Reranker.Timeout)
+		h.config.Reranker.Timeout = formDuration(r, "timeout_s", time.Second, h.config.Reranker.Timeout)
+		h.config.Reranker.TitleInText = r.FormValue("title_in_text") == "true"
 	case "chunking":
 		h.config.Chunking.MaxChunkSize = formInt(r, "max_chunk_size", h.config.Chunking.MaxChunkSize)
 		h.config.Chunking.ChunkOverlap = formInt(r, "chunk_overlap", h.config.Chunking.ChunkOverlap)
@@ -90,6 +92,7 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		if v := r.FormValue("separators"); v != "" {
 			h.config.Chunking.Separators = strings.Split(v, ",")
 		}
+		h.config.Chunking.TitleInSearchText = r.FormValue("title_in_search_text") == "true"
 	case "session":
 		h.config.Session.MaxMessages = formInt(r, "max_messages", h.config.Session.MaxMessages)
 		h.config.Session.TTLSeconds = formInt(r, "ttl_seconds", h.config.Session.TTLSeconds)
@@ -141,29 +144,18 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 		h.config.Crawler.ParseWorkers = formInt(r, "parse_workers", h.config.Crawler.ParseWorkers)
 		h.config.Crawler.MinContentLen = formInt(r, "min_content_len", h.config.Crawler.MinContentLen)
 		h.config.Crawler.MaxEmbedFails = formInt(r, "max_embed_fails", h.config.Crawler.MaxEmbedFails)
-		h.config.Crawler.RequestDelay = time.Duration(formInt(r, "request_delay_ms", int(h.config.Crawler.RequestDelay/time.Millisecond))) * time.Millisecond
-		h.config.Crawler.RequestTimeout = time.Duration(formInt(r, "request_timeout_s", int(h.config.Crawler.RequestTimeout/time.Second))) * time.Second
-		if v := r.FormValue("js_patterns"); v != "" {
-			h.config.Crawler.JSPatterns = splitTrimCSV(v)
-		} else {
-			h.config.Crawler.JSPatterns = nil
-		}
-		if v := r.FormValue("pdf_heading_patterns"); v != "" {
-			h.config.Crawler.PDF.HeadingPatterns = splitTrimCSV(v)
-		} else {
-			h.config.Crawler.PDF.HeadingPatterns = nil
-		}
+		h.config.Crawler.RequestDelay = formDuration(r, "request_delay_ms", time.Millisecond, h.config.Crawler.RequestDelay)
+		h.config.Crawler.RequestTimeout = formDuration(r, "request_timeout_s", time.Second, h.config.Crawler.RequestTimeout)
+		h.config.Crawler.ThrottledPaths = formCSV(r, "throttled_paths")
+		h.config.Crawler.ThrottledPathDelay = formDuration(r, "throttled_path_delay_s", time.Second, h.config.Crawler.ThrottledPathDelay)
+		h.config.Crawler.RateLimitRetries = formInt(r, "rate_limit_retries", h.config.Crawler.RateLimitRetries)
+		h.config.Crawler.RateLimitBackoff = formDuration(r, "rate_limit_backoff_s", time.Second, h.config.Crawler.RateLimitBackoff)
+		h.config.Crawler.RateLimitMaxWait = formDuration(r, "rate_limit_max_wait_s", time.Second, h.config.Crawler.RateLimitMaxWait)
+		h.config.Crawler.JSPatterns = formCSV(r, "js_patterns")
+		h.config.Crawler.PDF.HeadingPatterns = formCSV(r, "pdf_heading_patterns")
 		h.config.Crawler.PDF.RenderDPI = formInt(r, "pdf_render_dpi", h.config.Crawler.PDF.RenderDPI)
-		if v := r.FormValue("rejection_patterns"); v != "" {
-			h.config.Crawler.RejectionPatterns = splitTrimCSV(v)
-		} else {
-			h.config.Crawler.RejectionPatterns = nil
-		}
-		if v := r.FormValue("strip_query_params"); v != "" {
-			h.config.Crawler.StripQueryParams = splitTrimCSV(v)
-		} else {
-			h.config.Crawler.StripQueryParams = nil
-		}
+		h.config.Crawler.RejectionPatterns = formCSV(r, "rejection_patterns")
+		h.config.Crawler.StripQueryParams = formCSV(r, "strip_query_params")
 	case "object_store":
 		h.config.ObjectStore.Endpoint = r.FormValue("endpoint")
 		h.config.ObjectStore.Bucket = r.FormValue("bucket")
@@ -179,37 +171,35 @@ func (h *Handler) ConfigSave(w http.ResponseWriter, r *http.Request) {
 	// the rejected values so the user can see what they typed, then revert the
 	// in-memory config so the live pipeline keeps the previous valid state.
 	if err := h.config.Validate(); err != nil {
-		rejected := findSection(configToSections(h.config, h.capacities), section)
+		rejected := *h.config
 		*h.config = oldCfg
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if rejected != nil {
-			templates.ConfigSectionForm(*rejected).Render(r.Context(), w)
-		}
-		templates.Toast("Invalid config: "+err.Error(), "error").Render(r.Context(), w)
+		h.writeSection(w, r, &rejected, section, templates.Toast("Invalid config: "+err.Error(), "error"))
 		return
 	}
 
-	if err := config.WriteTo(h.config, h.configPath); err != nil {
+	if err := h.saveConfig(); err != nil {
 		h.logger.Error().Err(err).Msg("writing config")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if saved := findSection(configToSections(h.config, h.capacities), section); saved != nil {
-			templates.ConfigSectionForm(*saved).Render(r.Context(), w)
-		}
-		templates.Toast("Error saving config: "+err.Error(), "error").Render(r.Context(), w)
+		h.writeSection(w, r, h.config, section, templates.Toast("Error saving config: "+err.Error(), "error"))
 		return
 	}
 
-	h.fireConfigSave()
 	h.logger.Info().Str("section", section).Msg("config saved")
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if saved := findSection(configToSections(h.config, h.capacities), section); saved != nil {
-		templates.ConfigSectionForm(*saved).Render(r.Context(), w)
-	}
-	templates.Toast(fmt.Sprintf("Section '%s' saved", section), "success").Render(r.Context(), w)
+	toasts := []templ.Component{templates.Toast(fmt.Sprintf("Section '%s' saved", section), "success")}
 	if embeddingInvalidated {
-		templates.Toast("Embedding model or dimension changed — reprocess crawled pages to refresh stored embeddings", "warning").Render(r.Context(), w)
+		toasts = append(toasts, templates.Toast("Embedding model or dimension changed — reprocess crawled pages to refresh stored embeddings", "warning"))
 	}
+	h.writeSection(w, r, h.config, section, toasts...)
+}
+
+// writeSection renders the named section's form from cfg (when it exists)
+// followed by toasts, the reply to every config save attempt.
+func (h *Handler) writeSection(w http.ResponseWriter, r *http.Request, cfg *config.Config, name string, toasts ...templ.Component) {
+	var parts []templ.Component
+	if s := findSection(configToSections(cfg, h.capacities), name); s != nil {
+		parts = append(parts, templates.ConfigSectionForm(*s))
+	}
+	writeHTML(w, r, append(parts, toasts...)...)
 }
 
 // configToSections groups config fields into UI cards. Each section carries a
@@ -233,8 +223,8 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 				{Key: "read_timeout", Label: "Read Timeout (s)", Value: strconv.Itoa(cfg.Server.ReadTimeout), Type: "number"},
 				{Key: "write_timeout", Label: "Write Timeout (s)", Value: strconv.Itoa(cfg.Server.WriteTimeout), Type: "number", Hint: "Outer http.Server write deadline; should be larger than request_timeout"},
 				{Key: "request_timeout", Label: "Request Timeout (s)", Value: strconv.Itoa(cfg.Server.RequestTimeout), Type: "number", Hint: "Per-request handler ceiling; bounds the agent tool-calling loop on /v1/chat/completions"},
-				{Key: "idle_timeout_s", Label: "Idle Timeout (s)", Value: strconv.FormatInt(int64(cfg.Server.IdleTimeout/time.Second), 10), Type: "number", Hint: "HTTP keep-alive idle timeout"},
-				{Key: "shutdown_timeout_s", Label: "Shutdown Timeout (s)", Value: strconv.FormatInt(int64(cfg.Server.ShutdownTimeout/time.Second), 10), Type: "number", Hint: "Grace period for in-flight requests on shutdown"},
+				{Key: "idle_timeout_s", Label: "Idle Timeout (s)", Value: formatDuration(cfg.Server.IdleTimeout, time.Second), Type: "number", Hint: "HTTP keep-alive idle timeout"},
+				{Key: "shutdown_timeout_s", Label: "Shutdown Timeout (s)", Value: formatDuration(cfg.Server.ShutdownTimeout, time.Second), Type: "number", Hint: "Grace period for in-flight requests on shutdown"},
 			},
 		},
 		{
@@ -242,9 +232,9 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 			Title: "Admin",
 			Group: "Infrastructure",
 			Fields: []templates.ConfigField{
-				{Key: "backend_probe_timeout_s", Label: "Backend Probe Timeout (s)", Value: strconv.FormatInt(int64(cfg.Admin.BackendProbeTimeout/time.Second), 10), Type: "number", Hint: "Per-request timeout for backend health checks"},
-				{Key: "backend_models_timeout_s", Label: "Backend Models Timeout (s)", Value: strconv.FormatInt(int64(cfg.Admin.BackendModelsTimeout/time.Second), 10), Type: "number", Hint: "Per-request timeout for /models listing"},
-				{Key: "chat_stream_timeout_s", Label: "Chat Stream Timeout (s)", Value: strconv.FormatInt(int64(cfg.Admin.ChatStreamTimeout/time.Second), 10), Type: "number", Hint: "Max lifetime of a chat-stream goroutine (orphaned-goroutine safety net)"},
+				{Key: "backend_probe_timeout_s", Label: "Backend Probe Timeout (s)", Value: formatDuration(cfg.Admin.BackendProbeTimeout, time.Second), Type: "number", Hint: "Per-request timeout for backend health checks"},
+				{Key: "backend_models_timeout_s", Label: "Backend Models Timeout (s)", Value: formatDuration(cfg.Admin.BackendModelsTimeout, time.Second), Type: "number", Hint: "Per-request timeout for /models listing"},
+				{Key: "chat_stream_timeout_s", Label: "Chat Stream Timeout (s)", Value: formatDuration(cfg.Admin.ChatStreamTimeout, time.Second), Type: "number", Hint: "Max lifetime of a chat-stream goroutine (orphaned-goroutine safety net)"},
 			},
 		},
 		{
@@ -278,6 +268,7 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 				{Key: "chunk_overlap", Label: "Chunk Overlap (tokens)", Value: strconv.Itoa(cfg.Chunking.ChunkOverlap), Type: "number"},
 				{Key: "min_chunk_size", Label: "Min Chunk Size (tokens)", Value: strconv.Itoa(cfg.Chunking.MinChunkSize), Type: "number"},
 				{Key: "separators", Label: "Separators (comma-separated)", Value: strings.Join(cfg.Chunking.Separators, ","), Type: "text"},
+				{Key: "title_in_search_text", Label: "Title in search text", Value: strconv.FormatBool(cfg.Chunking.TitleInSearchText), Type: "checkbox", Hint: "Embed and keyword-index each chunk with its document title ahead of the heading breadcrumb. Reprocess after changing it."},
 			},
 		},
 		{
@@ -286,7 +277,7 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 			Group: "Pipeline",
 			Fields: []templates.ConfigField{
 				{Key: "backend", Label: "Backend", Value: cfg.Embedding.Backend, Type: "select", Options: backendNames},
-				{Key: "model", Label: "Model", Value: cfg.Embedding.Model, Type: "model", Options: backendNames},
+				{Key: "model", Label: "Model", Value: cfg.Embedding.Model, Type: "model"},
 				{Key: "dimension", Label: "Dimension", Value: strconv.Itoa(cfg.Embedding.Dimension), Type: "number"},
 				{Key: "max_tokens", Label: "Max Tokens (0 = auto-detect)", Value: strconv.Itoa(cfg.Embedding.MaxTokens), Type: "number", Hint: effectiveNote("0 follows the llama.cpp /props probe; a non-zero value overrides it. A 512-token floor applies when neither is available.", caps, Capacities.EmbeddingMaxTokens)},
 				{Key: "batch_size", Label: "Batch Size", Value: strconv.Itoa(cfg.Embedding.BatchSize), Type: "number"},
@@ -322,11 +313,12 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 					Hint:  "When enabled, re-scores retrieval candidates with a cross-encoder. Backend MUST be llama.cpp (the /rerank endpoint is a llama.cpp/Jina extension).",
 				},
 				{Key: "backend", Label: "Backend", Value: cfg.Reranker.Backend, Type: "select", Options: backendNames},
-				{Key: "model", Label: "Model", Value: cfg.Reranker.Model, Type: "model", Options: backendNames},
+				{Key: "model", Label: "Model", Value: cfg.Reranker.Model, Type: "model"},
 				{Key: "top_n", Label: "Candidate Pool Size (top_n)", Value: strconv.Itoa(cfg.Reranker.TopN), Type: "number", Hint: "Must be >= retrieval.top_k. Typical: 30."},
 				{Key: "max_tokens", Label: "Max Tokens (0 = auto-detect)", Value: strconv.Itoa(cfg.Reranker.MaxTokens), Type: "number", Hint: effectiveNote("Per-doc truncation budget. 0 follows the llama.cpp /props probe; a non-zero value overrides it.", caps, Capacities.RerankerMaxTokens)},
 				{Key: "reserved_tokens", Label: "Reserved Tokens", Value: strconv.Itoa(cfg.Reranker.ReservedTokens), Type: "number", Hint: "BOS/EOS/separator budget held back from per-doc truncation."},
-				{Key: "timeout_s", Label: "Timeout (s)", Value: strconv.FormatInt(int64(cfg.Reranker.Timeout/time.Second), 10), Type: "number", Hint: "Per-request deadline. Default 30s absorbs cold-load on the router."},
+				{Key: "timeout_s", Label: "Timeout (s)", Value: formatDuration(cfg.Reranker.Timeout, time.Second), Type: "number", Hint: "Per-request deadline. Default 30s absorbs cold-load on the router."},
+				{Key: "title_in_text", Label: "Title in rerank text", Value: strconv.FormatBool(cfg.Reranker.TitleInText), Type: "checkbox", Hint: "Send each candidate with its document title and heading breadcrumb ahead of the body, as the search index sees it."},
 			},
 		},
 		{
@@ -335,7 +327,7 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 			Group: "Pipeline",
 			Fields: []templates.ConfigField{
 				{Key: "backend", Label: "Backend", Value: cfg.Agent.Backend, Type: "select", Options: backendNames},
-				{Key: "model", Label: "Model", Value: cfg.Agent.Model, Type: "model", Options: backendNames},
+				{Key: "model", Label: "Model", Value: cfg.Agent.Model, Type: "model"},
 				{Key: "max_tokens", Label: "Max Tokens", Value: strconv.Itoa(cfg.Agent.MaxTokens), Type: "number"},
 				{Key: "temperature", Label: "Temperature", Value: fmt.Sprintf("%.2f", cfg.Agent.Temperature), Type: "text"},
 				{Key: "context_window", Label: "Context Window (0 = auto-detect)", Value: strconv.Itoa(cfg.Agent.ContextWindow), Type: "number", Hint: effectiveNote("0 follows the llama.cpp /props probe automatically (re-read at startup and on every save); a non-zero value overrides it.", caps, Capacities.AgentContextWindow)},
@@ -373,8 +365,13 @@ func configToSections(cfg *config.Config, caps Capacities) []templates.ConfigSec
 			Title: "Crawler",
 			Group: "Ingest",
 			Fields: []templates.ConfigField{
-				{Key: "request_delay_ms", Label: "Request Delay (ms)", Value: strconv.FormatInt(cfg.Crawler.RequestDelay.Milliseconds(), 10), Type: "number"},
-				{Key: "request_timeout_s", Label: "Request Timeout (s)", Value: strconv.FormatInt(int64(cfg.Crawler.RequestTimeout/time.Second), 10), Type: "number"},
+				{Key: "request_delay_ms", Label: "Request Delay (ms)", Value: formatDuration(cfg.Crawler.RequestDelay, time.Millisecond), Type: "number"},
+				{Key: "request_timeout_s", Label: "Request Timeout (s)", Value: formatDuration(cfg.Crawler.RequestTimeout, time.Second), Type: "number"},
+				{Key: "throttled_paths", Label: "Throttled Paths (comma-separated)", Value: strings.Join(cfg.Crawler.ThrottledPaths, ", "), Type: "text", Hint: "Path substrings paced in their own lane per host, so a 429 on them does not hold the host's pages"},
+				{Key: "throttled_path_delay_s", Label: "Throttled Path Delay (s)", Value: formatDuration(cfg.Crawler.ThrottledPathDelay, time.Second), Type: "number", Hint: "Minimum gap between requests to throttled paths of one host"},
+				{Key: "rate_limit_retries", Label: "Rate Limit Retries", Value: strconv.Itoa(cfg.Crawler.RateLimitRetries), Type: "number", Hint: "Retries of a page answered 429 or 503 before it is recorded as failed"},
+				{Key: "rate_limit_backoff_s", Label: "Rate Limit Backoff (s)", Value: formatDuration(cfg.Crawler.RateLimitBackoff, time.Second), Type: "number", Hint: "First wait when the server sends no Retry-After; doubles on each retry"},
+				{Key: "rate_limit_max_wait_s", Label: "Rate Limit Max Wait (s)", Value: formatDuration(cfg.Crawler.RateLimitMaxWait, time.Second), Type: "number", Hint: "Cap on any single wait, Retry-After included"},
 				{Key: "max_depth", Label: "Max Depth", Value: strconv.Itoa(cfg.Crawler.MaxDepth), Type: "number"},
 				{Key: "max_pages", Label: "Max Pages", Value: strconv.Itoa(cfg.Crawler.MaxPages), Type: "number"},
 				{Key: "concurrency", Label: "Concurrency", Value: strconv.Itoa(cfg.Crawler.Concurrency), Type: "number"},
@@ -416,12 +413,10 @@ func findSection(sections []templates.ConfigSection, name string) *templates.Con
 	return nil
 }
 
+// formInt, formFloat and formDuration keep fallback when the field is empty
+// or unparseable, so a partial form never zeroes a setting.
 func formInt(r *http.Request, key string, fallback int) int {
-	v := r.FormValue(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.Atoi(r.FormValue(key))
 	if err != nil {
 		return fallback
 	}
@@ -429,29 +424,26 @@ func formInt(r *http.Request, key string, fallback int) int {
 }
 
 func formFloat(r *http.Request, key string, fallback float64) float64 {
-	v := r.FormValue(key)
-	if v == "" {
-		return fallback
-	}
-	f, err := strconv.ParseFloat(v, 64)
+	f, err := strconv.ParseFloat(r.FormValue(key), 64)
 	if err != nil {
 		return fallback
 	}
 	return f
 }
 
-// formDurationSeconds reads an integer-seconds form field and returns a
-// time.Duration. Empty or invalid input falls back to the existing value.
-func formDurationSeconds(r *http.Request, key string, fallback time.Duration) time.Duration {
-	v := r.FormValue(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
+// formDuration reads an integer field counted in unit (e.g. "timeout_s" in
+// time.Second).
+func formDuration(r *http.Request, key string, unit, fallback time.Duration) time.Duration {
+	n, err := strconv.Atoi(r.FormValue(key))
 	if err != nil {
 		return fallback
 	}
-	return time.Duration(n) * time.Second
+	return time.Duration(n) * unit
+}
+
+// formatDuration is formDuration's inverse for rendering the field value.
+func formatDuration(d, unit time.Duration) string {
+	return strconv.FormatInt(int64(d/unit), 10)
 }
 
 func effectivePrompt(cfg *config.Config) string {
@@ -461,8 +453,14 @@ func effectivePrompt(cfg *config.Config) string {
 	return prompts.Agent
 }
 
-func splitTrimCSV(s string) []string {
-	parts := strings.Split(s, ",")
+// formCSV splits a comma-separated field into trimmed entries; an empty
+// field clears the list.
+func formCSV(r *http.Request, key string) []string {
+	v := r.FormValue(key)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
 	for i := range parts {
 		parts[i] = strings.TrimSpace(parts[i])
 	}

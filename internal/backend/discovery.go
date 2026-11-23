@@ -49,41 +49,34 @@ func FetchLlamaCppProps(ctx context.Context, baseURL, model string, client *http
 		client = http.DefaultClient
 	}
 
-	type result struct {
-		props *propsResponse
-		model *modelsResponse
-		err   error
+	// /v1/models only adds the embedding dimension, so it runs alongside
+	// /props and its failure is not an error.
+	var models modelsResponse
+	modelsErr := make(chan error, 1)
+	go func() {
+		modelsErr <- getJSON(ctx, client, baseURL+"/v1/models", "", &models)
+	}()
+
+	propsURL := baseURL + "/props"
+	if model != "" {
+		propsURL += "?model=" + model
 	}
-
-	propsCh := make(chan result, 1)
-	modelsCh := make(chan result, 1)
-
-	go func() {
-		p, err := fetchProps(ctx, client, baseURL, model)
-		propsCh <- result{props: p, err: err}
-	}()
-	go func() {
-		m, err := fetchModelsRaw(ctx, client, baseURL+"/v1")
-		modelsCh <- result{model: m, err: err}
-	}()
-
-	propsResult := <-propsCh
-	if propsResult.err != nil {
-		return nil, fmt.Errorf("fetching /props: %w", propsResult.err)
+	var p propsResponse
+	if err := getJSON(ctx, client, propsURL, "", &p); err != nil {
+		return nil, fmt.Errorf("fetching /props: %w", err)
 	}
 
 	props := &LlamaCppProps{
-		ContextSize:    propsResult.props.DefaultGenerationSettings.NCtx,
-		TotalSlots:     propsResult.props.TotalSlots,
-		ModelPath:      propsResult.props.ModelPath,
-		ModelAlias:     propsResult.props.ModelAlias,
-		SupportsVision: propsResult.props.Modalities.Vision,
-		SupportsAudio:  propsResult.props.Modalities.Audio,
+		ContextSize:    p.DefaultGenerationSettings.NCtx,
+		TotalSlots:     p.TotalSlots,
+		ModelPath:      p.ModelPath,
+		ModelAlias:     p.ModelAlias,
+		SupportsVision: p.Modalities.Vision,
+		SupportsAudio:  p.Modalities.Audio,
 	}
 
-	modelsResult := <-modelsCh
-	if modelsResult.err == nil && len(modelsResult.model.Data) > 0 && modelsResult.model.Data[0].Meta != nil {
-		props.EmbeddingDim = modelsResult.model.Data[0].Meta.NEmbd
+	if err := <-modelsErr; err == nil && len(models.Data) > 0 && models.Data[0].Meta != nil {
+		props.EmbeddingDim = models.Data[0].Meta.NEmbd
 	}
 
 	// Fallback: if n_embd is still unknown (e.g. router mode), try a test embedding.
@@ -104,27 +97,9 @@ func FetchModelIDs(ctx context.Context, baseURL, apiKey string, client *http.Cli
 	if client == nil {
 		client = http.DefaultClient
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
-	if err != nil {
-		return nil, fmt.Errorf("building models request: %w", err)
-	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching models from %s: %w", baseURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-
 	var result modelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding models response: %w", err)
+	if err := getJSON(ctx, client, baseURL+"/models", apiKey, &result); err != nil {
+		return nil, fmt.Errorf("fetching models from %s: %w", baseURL, err)
 	}
 
 	ids := make([]string, len(result.Data))
@@ -163,28 +138,28 @@ type modelsResponse struct {
 	} `json:"data"`
 }
 
-func fetchProps(ctx context.Context, client *http.Client, baseURL, model string) (*propsResponse, error) {
-	u := baseURL + "/props"
-	if model != "" {
-		u += "?model=" + model
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+// getJSON GETs url and decodes a 200 response body into dst. A non-empty
+// apiKey is sent as a bearer token.
+func getJSON(ctx context.Context, client *http.Client, url, apiKey string, dst any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("building props request: %w", err)
+		return fmt.Errorf("building request: %w", err)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching /props: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
-	var result propsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding /props response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
 	}
-	return &result, nil
+	return nil
 }
 
 // probeEmbeddingDim sends a short test embedding request and returns the vector dimension.
@@ -218,24 +193,4 @@ func probeEmbeddingDim(ctx context.Context, client *http.Client, baseURL, model 
 		return 0, fmt.Errorf("embeddings probe: empty data")
 	}
 	return len(result.Data[0].Embedding), nil
-}
-
-func fetchModelsRaw(ctx context.Context, client *http.Client, baseURL string) (*modelsResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
-	if err != nil {
-		return nil, fmt.Errorf("building models request: %w", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching /models: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-	var result modelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding /models response: %w", err)
-	}
-	return &result, nil
 }

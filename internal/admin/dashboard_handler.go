@@ -33,7 +33,6 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		DocCount:      docCount,
 		ChunkCount:    chunkCount,
 		ArtifactCount: artifactCount,
-		BackendCount:  len(h.config.Backends),
 		Backends:      h.config.Backends,
 		HasObjStore:   h.objStore != nil,
 		Issues:        h.snapshotIssues(),
@@ -46,8 +45,6 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 
 // HealthObjectStore handles GET /admin/health/objectstore — returns health badge for RustFS.
 func (h *Handler) HealthObjectStore(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
 	healthy := false
 	if h.objStore != nil {
 		healthy = h.objStore.Healthy(r.Context())
@@ -59,5 +56,5 @@ func (h *Handler) HealthObjectStore(w http.ResponseWriter, r *http.Request) {
 		Healthy: healthy,
 	}
 
-	templates.HealthGrid([]templates.ServiceStatus{status}).Render(r.Context(), w)
+	writeHTML(w, r, templates.HealthGrid([]templates.ServiceStatus{status}))
 }

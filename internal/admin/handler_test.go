@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +14,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"etsi-rag/internal/agent"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/prompts"
@@ -43,6 +43,9 @@ func setupTestAdminHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 	// defaults that match Load()'s applyDefaults output.
 	cfg.Retrieval.MaxContextTokens = 4096
 	cfg.Retrieval.RetrievalMode = "dense"
+	cfg.Crawler.RateLimitRetries = 4
+	cfg.Crawler.RateLimitBackoff = 30 * time.Second
+	cfg.Crawler.RateLimitMaxWait = 5 * time.Minute
 
 	sessionStore := session.NewStore(config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600})
 	t.Cleanup(sessionStore.Close)
@@ -55,7 +58,6 @@ func setupTestAdminHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 		Config:       cfg,
 		ConfigPath:   configPath,
 		SessionStore: sessionStore,
-		AgentHandle:  agent.NewHandle(nil),
 		Logger:       zerolog.New(os.Stderr).Level(zerolog.Disabled),
 	})
 
@@ -408,7 +410,7 @@ func TestConfigSave_RejectsInvalidConfig(t *testing.T) {
 	originalChunkSize := h.config.Chunking.MaxChunkSize
 
 	fired := false
-	h.SetOnConfigSave(func() { fired = true })
+	h.onConfigSave = func() { fired = true }
 
 	form := url.Values{
 		"max_chunk_size": {"99999"}, // larger than retrieval.max_context_tokens
@@ -437,6 +439,57 @@ func TestConfigSave_RejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestConfigSave_CrawlerRateLimit(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	form := url.Values{
+		"rate_limit_retries":    {"6"},
+		"rate_limit_backoff_s":  {"10"},
+		"rate_limit_max_wait_s": {"120"},
+	}
+	req := withChiParam(postForm("/admin/config/crawler", form), "section", "crawler")
+	h.ConfigSave(httptest.NewRecorder(), req)
+
+	if got := h.config.Crawler.RateLimitRetries; got != 6 {
+		t.Errorf("RateLimitRetries = %d, want 6", got)
+	}
+	if got := h.config.Crawler.RateLimitBackoff; got != 10*time.Second {
+		t.Errorf("RateLimitBackoff = %s, want 10s", got)
+	}
+	if got := h.config.Crawler.RateLimitMaxWait; got != 2*time.Minute {
+		t.Errorf("RateLimitMaxWait = %s, want 2m", got)
+	}
+
+	// The form renders the saved values back.
+	page := httptest.NewRecorder()
+	h.ConfigPage(page, withChiParam(httptest.NewRequest(http.MethodGet, "/admin/config/crawler", nil), "section", "crawler"))
+	for _, want := range []string{`name="rate_limit_retries" value="6"`, `name="rate_limit_backoff_s" value="10"`, `name="rate_limit_max_wait_s" value="120"`} {
+		if !strings.Contains(page.Body.String(), want) {
+			t.Errorf("crawler config form missing %s", want)
+		}
+	}
+}
+
+func TestConfigSave_CrawlerRateLimit_RejectsMaxWaitBelowBackoff(t *testing.T) {
+	h, _ := setupTestAdminHandler(t)
+
+	form := url.Values{
+		"rate_limit_retries":    {"4"},
+		"rate_limit_backoff_s":  {"60"},
+		"rate_limit_max_wait_s": {"30"},
+	}
+	req := withChiParam(postForm("/admin/config/crawler", form), "section", "crawler")
+	w := httptest.NewRecorder()
+	h.ConfigSave(w, req)
+
+	if got := h.config.Crawler.RateLimitBackoff; got != 30*time.Second {
+		t.Errorf("RateLimitBackoff = %s, want 30s (revert on validation failure)", got)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "Invalid config") || !strings.Contains(body, "rate_limit_max_wait") {
+		t.Errorf("expected an error toast naming rate_limit_max_wait; got:\n%s", body)
+	}
+}
+
 func TestConfigSave_UnknownSection(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
@@ -455,7 +508,7 @@ func TestConfigSave_FiresCallback(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
 	fired := false
-	h.SetOnConfigSave(func() { fired = true })
+	h.onConfigSave = func() { fired = true }
 
 	form := url.Values{"host": {"localhost"}, "port": {"8080"}}
 	req := postForm("/admin/config/server", form)
@@ -914,7 +967,7 @@ func TestDocumentDelete(t *testing.T) {
 	}
 
 	// Verify it's gone.
-	doc, _ := s.GetDocument(ctx, "doc-del")
+	doc, _ := s.Document(ctx, "doc-del")
 	if doc != nil {
 		t.Error("document should be deleted")
 	}
@@ -961,8 +1014,6 @@ func TestChatPage(t *testing.T) {
 func TestChatReset(t *testing.T) {
 	h, _ := setupTestAdminHandler(t)
 
-	before := h.sessionStore.Count()
-
 	req := postForm("/admin/chat/reset", url.Values{})
 	w := httptest.NewRecorder()
 
@@ -971,8 +1022,13 @@ func TestChatReset(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
 	}
-	if h.sessionStore.Count() != before+1 {
-		t.Errorf("session count = %d, want %d", h.sessionStore.Count(), before+1)
+	// The re-rendered shell must carry a freshly minted, live session.
+	m := regexp.MustCompile(`data-session-id="([^"]+)"`).FindStringSubmatch(w.Body.String())
+	if m == nil {
+		t.Fatal("reset response has no data-session-id")
+	}
+	if h.sessionStore.Get(m[1]) == nil {
+		t.Errorf("session %q from reset response is not in the store", m[1])
 	}
 }
 

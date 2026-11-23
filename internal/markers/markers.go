@@ -2,10 +2,9 @@
 // markdown text to image artifacts rendered from the same source document.
 //
 // The parser emits markers like [[image:p1]] at page boundaries (PDFs) or at
-// the top of an HTML page (full-page screenshot). Markers survive chunking
-// untouched. The retrieval path scans them to know which artifacts to attach
-// to a vision-capable LLM, and strips them from the text shown to the model.
-// The embedder also strips them so they don't pollute the embedding space.
+// the top of an HTML page (full-page screenshot). The chunker consumes them
+// with ExtractBoundaries, so stored chunks carry refs instead of markers;
+// full-document readers drop them with Strip.
 //
 // The bracket form [[image:ref]] is chosen over <|...|> to avoid colliding
 // with tokenizer special tokens (e.g. <|im_start|>, <|endoftext|>).
@@ -25,21 +24,6 @@ var imageRe = regexp.MustCompile(`\[\[image:([a-zA-Z0-9-]+)\]\]`)
 // "[[image:p1]]").
 func Format(ref string) string {
 	return fmt.Sprintf("[[image:%s]]", ref)
-}
-
-// Extract returns each ref captured from the input string in source order.
-// Duplicates are preserved; callers that want a set should de-dup themselves.
-// Returns nil when there are no matches.
-func Extract(s string) []string {
-	matches := imageRe.FindAllStringSubmatch(s, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	refs := make([]string, len(matches))
-	for i, m := range matches {
-		refs[i] = m[1]
-	}
-	return refs
 }
 
 // Strip removes every marker from the input. Surrounding whitespace is left

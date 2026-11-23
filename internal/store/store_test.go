@@ -48,7 +48,7 @@ func TestDocumentCRUD(t *testing.T) {
 	})
 
 	t.Run("read", func(t *testing.T) {
-		retrieved, err := store.GetDocument(ctx, "doc-1")
+		retrieved, err := store.Document(ctx, "doc-1")
 		if err != nil {
 			t.Fatalf("getting document: %v", err)
 		}
@@ -98,7 +98,7 @@ func TestDocumentCRUD(t *testing.T) {
 			t.Fatalf("deleting document: %v", err)
 		}
 
-		retrieved, err := store.GetDocument(ctx, "doc-1")
+		retrieved, err := store.Document(ctx, "doc-1")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got: %v", err)
 		}
@@ -108,11 +108,11 @@ func TestDocumentCRUD(t *testing.T) {
 	})
 }
 
-func TestGetDocumentNotFound(t *testing.T) {
+func TestDocumentNotFound(t *testing.T) {
 	store := setupTestStore(t)
 
 	ctx := context.Background()
-	doc, err := store.GetDocument(ctx, "nonexistent")
+	doc, err := store.Document(ctx, "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got: %v", err)
 	}
@@ -121,10 +121,10 @@ func TestGetDocumentNotFound(t *testing.T) {
 	}
 }
 
-// GetDocumentByURL is the entry point for the read_document agent tool: the
+// DocumentByURL is the entry point for the read_document agent tool: the
 // LLM passes back a URL it saw in a previous citation, and we need to resolve
 // it to a doc record. Lookup is exact-match on documents.url.
-func TestGetDocumentByURL(t *testing.T) {
+func TestDocumentByURL(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
@@ -141,9 +141,9 @@ func TestGetDocumentByURL(t *testing.T) {
 	}
 
 	t.Run("hit", func(t *testing.T) {
-		got, err := s.GetDocumentByURL(ctx, url)
+		got, err := s.DocumentByURL(ctx, url)
 		if err != nil {
-			t.Fatalf("GetDocumentByURL: %v", err)
+			t.Fatalf("DocumentByURL: %v", err)
 		}
 		if got == nil {
 			t.Fatal("expected document, got nil")
@@ -160,7 +160,7 @@ func TestGetDocumentByURL(t *testing.T) {
 	})
 
 	t.Run("miss returns ErrNotFound", func(t *testing.T) {
-		got, err := s.GetDocumentByURL(ctx, "https://example.com/does/not/exist")
+		got, err := s.DocumentByURL(ctx, "https://example.com/does/not/exist")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got: %v", err)
 		}
@@ -182,7 +182,7 @@ func TestGetDocumentByURL(t *testing.T) {
 		if err := s.CreateDocument(ctx, nullDoc); err != nil {
 			t.Fatalf("creating URL-less document: %v", err)
 		}
-		got, err := s.GetDocumentByURL(ctx, "")
+		got, err := s.DocumentByURL(ctx, "")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("empty URL must miss, got err=%v doc=%v", err, got)
 		}
@@ -222,7 +222,7 @@ func TestChunksWithEmbeddings(t *testing.T) {
 	}
 
 	// Retrieve chunks
-	retrieved, err := store.GetChunksByDocument(ctx, "doc-1")
+	retrieved, err := store.ChunksByDocument(ctx, "doc-1")
 	if err != nil {
 		t.Fatalf("getting chunks: %v", err)
 	}
@@ -360,6 +360,23 @@ func TestSearchSimilar_TopKLimit(t *testing.T) {
 		}
 		if len(results) != 0 {
 			t.Fatalf("got %d results, want 0", len(results))
+		}
+	})
+
+	t.Run("negative topK returns empty on cached and SQL paths", func(t *testing.T) {
+		for _, warm := range []bool{false, true} {
+			if warm {
+				if _, err := s.Warm(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			results, err := s.SearchSimilar(ctx, query, -2)
+			if err != nil {
+				t.Fatalf("warm=%v: %v", warm, err)
+			}
+			if len(results) != 0 {
+				t.Fatalf("warm=%v: got %d results, want 0", warm, len(results))
+			}
 		}
 	})
 }
@@ -604,7 +621,7 @@ func TestDeleteDocumentCascadesChunks(t *testing.T) {
 	}
 
 	// Verify chunks are deleted
-	retrieved, err := store.GetChunksByDocument(ctx, "doc-1")
+	retrieved, err := store.ChunksByDocument(ctx, "doc-1")
 	if err != nil {
 		t.Fatalf("getting chunks: %v", err)
 	}
@@ -648,7 +665,7 @@ func TestDocumentExists(t *testing.T) {
 	})
 }
 
-func TestGetDocumentURL(t *testing.T) {
+func TestDocumentURL(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -672,32 +689,32 @@ func TestGetDocumentURL(t *testing.T) {
 	}
 
 	t.Run("returns the stored URL", func(t *testing.T) {
-		got, err := store.GetDocumentURL(ctx, "doc-with-url")
+		got, err := store.DocumentURL(ctx, "doc-with-url")
 		if err != nil {
-			t.Fatalf("GetDocumentURL: %v", err)
+			t.Fatalf("DocumentURL: %v", err)
 		}
 		if got != url {
 			t.Errorf("got %q, want %q", got, url)
 		}
 	})
 	t.Run("returns empty string for null url, no error", func(t *testing.T) {
-		got, err := store.GetDocumentURL(ctx, "doc-no-url")
+		got, err := store.DocumentURL(ctx, "doc-no-url")
 		if err != nil {
-			t.Fatalf("GetDocumentURL: %v", err)
+			t.Fatalf("DocumentURL: %v", err)
 		}
 		if got != "" {
 			t.Errorf("got %q, want empty", got)
 		}
 	})
 	t.Run("missing id returns ErrNotFound", func(t *testing.T) {
-		_, err := store.GetDocumentURL(ctx, "ghost")
+		_, err := store.DocumentURL(ctx, "ghost")
 		if err == nil || !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound, got %v", err)
 		}
 	})
 }
 
-func TestUpdateDocumentURL(t *testing.T) {
+func TestUpdateDocumentPage(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -710,21 +727,21 @@ func TestUpdateDocumentURL(t *testing.T) {
 		t.Fatalf("creating doc: %v", err)
 	}
 
-	t.Run("updates the url", func(t *testing.T) {
+	t.Run("updates the url and title", func(t *testing.T) {
 		canonical := "https://www.uma.es/grado-en-ingenieria-informatica/"
-		if err := store.UpdateDocumentURL(ctx, "doc-1", canonical); err != nil {
-			t.Fatalf("UpdateDocumentURL: %v", err)
+		if err := store.UpdateDocumentPage(ctx, "doc-1", canonical, "Grado"); err != nil {
+			t.Fatalf("UpdateDocumentPage: %v", err)
 		}
-		got, err := store.GetDocumentURL(ctx, "doc-1")
+		got, err := store.Document(ctx, "doc-1")
 		if err != nil {
-			t.Fatalf("GetDocumentURL: %v", err)
+			t.Fatalf("Document: %v", err)
 		}
-		if got != canonical {
-			t.Errorf("url = %q, want %q", got, canonical)
+		if got.URL == nil || *got.URL != canonical || got.Title != "Grado" {
+			t.Errorf("url, title = %v, %q; want %q, %q", got.URL, got.Title, canonical, "Grado")
 		}
 	})
 	t.Run("returns ErrNotFound when doc missing", func(t *testing.T) {
-		err := store.UpdateDocumentURL(ctx, "ghost", "https://x")
+		err := store.UpdateDocumentPage(ctx, "ghost", "https://x", "X")
 		if err == nil || !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound, got %v", err)
 		}
@@ -737,11 +754,13 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 
 	const srcKey = "test"
 
-	// Three docs: referenced, orphan, shared-by-two.
+	// Three crawled docs: referenced, orphan, shared-by-two; plus one ingested
+	// through the API, which never has a crawl_page.
 	docs := []*domain.Document{
-		{ID: "doc-ref", Title: "referenced", Content: "x", Language: domain.LanguageES},
-		{ID: "doc-orphan", Title: "orphan", Content: "x", Language: domain.LanguageES},
-		{ID: "doc-shared", Title: "shared", Content: "x", Language: domain.LanguageES},
+		{ID: "crawl-ref", Title: "referenced", Content: "x", Language: domain.LanguageES},
+		{ID: "crawl-orphan", Title: "orphan", Content: "x", Language: domain.LanguageES},
+		{ID: "crawl-shared", Title: "shared", Content: "x", Language: domain.LanguageES},
+		{ID: "api-doc", Title: "api", Content: "x", Language: domain.LanguageES},
 	}
 	for _, d := range docs {
 		if err := store.CreateDocument(ctx, d); err != nil {
@@ -752,12 +771,12 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 	// Chunks on the orphan so we can verify cascade deletion.
 	chunks := []domain.Chunk{{Content: "chunk", ChunkIndex: 0}}
 	embeddings := [][]float32{{1, 0, 0, 0}}
-	if err := store.CreateChunks(ctx, "doc-orphan", chunks, embeddings); err != nil {
+	if err := store.CreateChunks(ctx, "crawl-orphan", chunks, embeddings); err != nil {
 		t.Fatalf("creating chunks: %v", err)
 	}
 
-	// Two crawl_pages: one pointing at doc-ref, two (different URLs) pointing at doc-shared.
-	refID, sharedID := "doc-ref", "doc-shared"
+	// Two crawl_pages: one pointing at crawl-ref, two (different URLs) pointing at crawl-shared.
+	refID, sharedID := "crawl-ref", "crawl-shared"
 	now := time.Now()
 	pages := []*domain.CrawlPage{
 		{SourceKey: srcKey, URL: "https://example.com/a", DocID: &refID, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
@@ -778,185 +797,27 @@ func TestPurgeOrphanDocuments(t *testing.T) {
 		t.Errorf("expected 1 orphan purged, got %d", count)
 	}
 
-	if ok, _ := store.DocumentExists(ctx, "doc-orphan"); ok {
-		t.Error("doc-orphan should have been purged")
+	if ok, _ := store.DocumentExists(ctx, "crawl-orphan"); ok {
+		t.Error("crawl-orphan should have been purged")
 	}
-	if ok, _ := store.DocumentExists(ctx, "doc-ref"); !ok {
-		t.Error("doc-ref should remain")
+	if ok, _ := store.DocumentExists(ctx, "crawl-ref"); !ok {
+		t.Error("crawl-ref should remain")
 	}
-	if ok, _ := store.DocumentExists(ctx, "doc-shared"); !ok {
-		t.Error("doc-shared should remain (referenced by two crawl_pages)")
+	if ok, _ := store.DocumentExists(ctx, "crawl-shared"); !ok {
+		t.Error("crawl-shared should remain (referenced by two crawl_pages)")
+	}
+	if ok, _ := store.DocumentExists(ctx, "api-doc"); !ok {
+		t.Error("api-doc should remain (API-ingested, not owned by the crawler)")
 	}
 
 	// Chunks + embeddings for the orphan should be gone.
-	remaining, err := store.GetChunksByDocument(ctx, "doc-orphan")
+	remaining, err := store.ChunksByDocument(ctx, "crawl-orphan")
 	if err != nil {
-		t.Fatalf("GetChunksByDocument: %v", err)
+		t.Fatalf("ChunksByDocument: %v", err)
 	}
 	if len(remaining) != 0 {
 		t.Errorf("expected orphan chunks to cascade, got %d", len(remaining))
 	}
-}
-
-// setupSourceKeyFilterFixture seeds two source keys ("alpha", "beta"), one
-// document per source plus a third document referenced by both, and one chunk
-// per document with deterministic embeddings along distinct axes. Returns the
-// store ready for SearchSimilar / SearchKeyword scoping assertions.
-func setupSourceKeyFilterFixture(t *testing.T) *SQLiteStore {
-	t.Helper()
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	docs := []*domain.Document{
-		{ID: "doc-alpha", Title: "Alpha", Content: "alpha unique-alpha-token", Language: domain.LanguageES},
-		{ID: "doc-beta", Title: "Beta", Content: "beta unique-beta-token", Language: domain.LanguageES},
-		{ID: "doc-shared", Title: "Shared", Content: "shared unique-shared-token", Language: domain.LanguageES},
-	}
-	for _, d := range docs {
-		if err := s.CreateDocument(ctx, d); err != nil {
-			t.Fatalf("creating %s: %v", d.ID, err)
-		}
-	}
-
-	now := time.Now()
-	alphaID, betaID, sharedID := "doc-alpha", "doc-beta", "doc-shared"
-	pages := []*domain.CrawlPage{
-		{SourceKey: "alpha", URL: "https://x/alpha", DocID: &alphaID, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-		{SourceKey: "beta", URL: "https://x/beta", DocID: &betaID, ContentHash: "h2", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-		{SourceKey: "alpha", URL: "https://x/shared-from-alpha", DocID: &sharedID, ContentHash: "h3", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-		{SourceKey: "beta", URL: "https://x/shared-from-beta", DocID: &sharedID, ContentHash: "h3", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
-	}
-	for _, p := range pages {
-		if err := s.UpsertCrawlPage(ctx, p); err != nil {
-			t.Fatalf("upserting page %s: %v", p.URL, err)
-		}
-	}
-
-	chunks := map[string]struct {
-		c domain.Chunk
-		v []float32
-	}{
-		"doc-alpha":  {domain.Chunk{Content: "alpha unique-alpha-token", ChunkIndex: 0}, []float32{1, 0, 0, 0}},
-		"doc-beta":   {domain.Chunk{Content: "beta unique-beta-token", ChunkIndex: 0}, []float32{0, 1, 0, 0}},
-		"doc-shared": {domain.Chunk{Content: "shared unique-shared-token", ChunkIndex: 0}, []float32{0, 0, 1, 0}},
-	}
-	for docID, ch := range chunks {
-		if err := s.CreateChunks(ctx, docID, []domain.Chunk{ch.c}, [][]float32{ch.v}); err != nil {
-			t.Fatalf("creating chunk for %s: %v", docID, err)
-		}
-	}
-	return s
-}
-
-func TestSearchSimilar_SourceKeysFilter(t *testing.T) {
-	s := setupSourceKeyFilterFixture(t)
-	ctx := context.Background()
-	query := []float32{0.9, 0.5, 0.5, 0} // similar to all three, descending order alpha/beta/shared
-
-	t.Run("no filter returns all chunks", func(t *testing.T) {
-		results, err := s.SearchSimilar(ctx, query, 10)
-		if err != nil {
-			t.Fatalf("SearchSimilar: %v", err)
-		}
-		if len(results) != 3 {
-			t.Errorf("got %d results, want 3", len(results))
-		}
-	})
-
-	t.Run("filter by alpha only", func(t *testing.T) {
-		results, err := s.SearchSimilar(ctx, query, 10, "alpha")
-		if err != nil {
-			t.Fatalf("SearchSimilar: %v", err)
-		}
-		if len(results) != 2 {
-			t.Fatalf("got %d results, want 2 (alpha + shared via alpha)", len(results))
-		}
-		seen := map[string]bool{}
-		for _, r := range results {
-			seen[r.Document.ID] = true
-		}
-		if !seen["doc-alpha"] || !seen["doc-shared"] {
-			t.Errorf("results missing expected docs: %v", seen)
-		}
-		if seen["doc-beta"] {
-			t.Errorf("filter leaked beta: %v", seen)
-		}
-	})
-
-	t.Run("shared doc returned by either source key", func(t *testing.T) {
-		resAlpha, _ := s.SearchSimilar(ctx, query, 10, "alpha")
-		resBeta, _ := s.SearchSimilar(ctx, query, 10, "beta")
-		alphaHasShared := false
-		betaHasShared := false
-		for _, r := range resAlpha {
-			if r.Document.ID == "doc-shared" {
-				alphaHasShared = true
-			}
-		}
-		for _, r := range resBeta {
-			if r.Document.ID == "doc-shared" {
-				betaHasShared = true
-			}
-		}
-		if !alphaHasShared || !betaHasShared {
-			t.Errorf("doc-shared should appear via both keys: alpha=%v beta=%v", alphaHasShared, betaHasShared)
-		}
-	})
-
-	t.Run("unknown source key returns empty without error", func(t *testing.T) {
-		results, err := s.SearchSimilar(ctx, query, 10, "ghost")
-		if err != nil {
-			t.Fatalf("SearchSimilar: %v", err)
-		}
-		if len(results) != 0 {
-			t.Errorf("expected empty, got %d", len(results))
-		}
-	})
-}
-
-func TestSearchKeyword_SourceKeysFilter(t *testing.T) {
-	s := setupSourceKeyFilterFixture(t)
-	ctx := context.Background()
-
-	t.Run("no filter matches all unique tokens", func(t *testing.T) {
-		results, err := s.SearchKeyword(ctx, "unique-alpha-token unique-beta-token unique-shared-token", 10)
-		if err != nil {
-			t.Fatalf("SearchKeyword: %v", err)
-		}
-		if len(results) != 3 {
-			t.Errorf("got %d results, want 3", len(results))
-		}
-	})
-
-	t.Run("filter by alpha hides beta-only chunks", func(t *testing.T) {
-		results, err := s.SearchKeyword(ctx, "unique-alpha-token unique-beta-token unique-shared-token", 10, "alpha")
-		if err != nil {
-			t.Fatalf("SearchKeyword: %v", err)
-		}
-		seen := map[string]bool{}
-		for _, r := range results {
-			seen[r.Document.ID] = true
-		}
-		if !seen["doc-alpha"] {
-			t.Error("expected doc-alpha")
-		}
-		if !seen["doc-shared"] {
-			t.Error("expected doc-shared via alpha")
-		}
-		if seen["doc-beta"] {
-			t.Error("filter leaked beta")
-		}
-	})
-
-	t.Run("unknown key returns empty without error", func(t *testing.T) {
-		results, err := s.SearchKeyword(ctx, "unique-alpha-token", 10, "ghost")
-		if err != nil {
-			t.Fatalf("SearchKeyword: %v", err)
-		}
-		if len(results) != 0 {
-			t.Errorf("expected empty, got %d", len(results))
-		}
-	})
 }
 
 func TestMarkPagesStaleBySourceKey(t *testing.T) {

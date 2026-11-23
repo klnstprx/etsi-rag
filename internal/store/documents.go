@@ -25,7 +25,7 @@ func (s *SQLiteStore) CreateDocument(ctx context.Context, doc *domain.Document) 
 }
 
 // DocumentExists reports whether a document with the given ID exists.
-// Cheaper than GetDocument because it does not fetch the content column.
+// Cheaper than Document because it does not fetch the content column.
 func (s *SQLiteStore) DocumentExists(ctx context.Context, id string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM documents WHERE id = ? LIMIT 1`, id).Scan(&n)
@@ -38,11 +38,11 @@ func (s *SQLiteStore) DocumentExists(ctx context.Context, id string) (bool, erro
 	return true, nil
 }
 
-// GetDocumentURL returns the stored URL for a document by ID. Used by the
+// DocumentURL returns the stored URL for a document by ID. Used by the
 // crawler's dedup path to pick the more canonical URL when several URLs
 // resolve to the same content_hash. Returns empty string if the doc has no
 // URL recorded.
-func (s *SQLiteStore) GetDocumentURL(ctx context.Context, id string) (string, error) {
+func (s *SQLiteStore) DocumentURL(ctx context.Context, id string) (string, error) {
 	var url sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT url FROM documents WHERE id = ? LIMIT 1`, id).Scan(&url)
 	if err == sql.ErrNoRows {
@@ -57,14 +57,15 @@ func (s *SQLiteStore) GetDocumentURL(ctx context.Context, id string) (string, er
 	return url.String, nil
 }
 
-// UpdateDocumentURL changes the URL recorded for an existing document.
-// Used by the crawler when a content-hash dedup discovers a more canonical
-// URL than the one originally stored (e.g. the seed URL beating a
-// `/cms/menu/...` sub-page that won the timing race).
-func (s *SQLiteStore) UpdateDocumentURL(ctx context.Context, id, url string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE documents SET url = ? WHERE id = ?`, url, id)
+// UpdateDocumentPage points an existing document at another page that serves
+// its content, replacing both URL and title so the two stay consistent. Used
+// by the crawler when a content-hash dedup discovers a more canonical URL than
+// the one originally stored (e.g. the seed URL beating a `/cms/menu/...`
+// sub-page that won the timing race).
+func (s *SQLiteStore) UpdateDocumentPage(ctx context.Context, id, url, title string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE documents SET url = ?, title = ? WHERE id = ?`, url, title, id)
 	if err != nil {
-		return fmt.Errorf("updating document url: %w", err)
+		return fmt.Errorf("updating document page: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -76,26 +77,17 @@ func (s *SQLiteStore) UpdateDocumentURL(ctx context.Context, id, url string) err
 	return nil
 }
 
-// GetDocumentByURL retrieves a document by its stored URL. Used by the
+// DocumentByURL retrieves a document by its stored URL. Used by the
 // read_document agent tool to resolve a URL the LLM saw in a previous
 // citation back to a doc record. Exact match — the LLM passes URLs it
 // copied verbatim from prior tool output, so no canonicalisation is
 // needed; add it later if mismatches show up in logs. Empty URL never
 // matches (NULL-URL docs are not addressable through this lookup).
-func (s *SQLiteStore) GetDocumentByURL(ctx context.Context, url string) (*domain.Document, error) {
+func (s *SQLiteStore) DocumentByURL(ctx context.Context, url string) (*domain.Document, error) {
 	if url == "" {
 		return nil, fmt.Errorf("document with empty url: %w", ErrNotFound)
 	}
-	query := `
-		SELECT id, title, content, url, language
-		FROM documents
-		WHERE url = ?
-		LIMIT 1
-	`
-	var doc domain.Document
-	err := s.db.QueryRowContext(ctx, query, url).Scan(
-		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language,
-	)
+	doc, err := scanDocument(s.db.QueryRowContext(ctx, documentSelect+` WHERE url = ? LIMIT 1`, url))
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("document with url %q: %w", url, ErrNotFound)
 	}
@@ -105,17 +97,9 @@ func (s *SQLiteStore) GetDocumentByURL(ctx context.Context, url string) (*domain
 	return &doc, nil
 }
 
-// GetDocument retrieves a document by ID.
-func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Document, error) {
-	query := `
-		SELECT id, title, content, url, language
-		FROM documents
-		WHERE id = ?
-	`
-	var doc domain.Document
-	err := s.db.QueryRowContext(ctx, query, id).Scan(
-		&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language,
-	)
+// Document retrieves a document by ID.
+func (s *SQLiteStore) Document(ctx context.Context, id string) (*domain.Document, error) {
+	doc, err := scanDocument(s.db.QueryRowContext(ctx, documentSelect+` WHERE id = ?`, id))
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("document %s: %w", id, ErrNotFound)
 	}
@@ -125,28 +109,23 @@ func (s *SQLiteStore) GetDocument(ctx context.Context, id string) (*domain.Docum
 	return &doc, nil
 }
 
+const documentSelect = `SELECT id, title, content, url, language FROM documents`
+
+func scanDocument(row scanner) (domain.Document, error) {
+	var d domain.Document
+	err := row.Scan(&d.ID, &d.Title, &d.Content, &d.URL, &d.Language)
+	return d, err
+}
+
 // ListDocuments retrieves all documents, optionally filtered by language.
 func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) ([]domain.Document, error) {
-	var rows *sql.Rows
-	var err error
-
+	query := documentSelect
+	var args []any
 	if lang != nil {
-		query := `
-			SELECT id, title, content, url, language
-			FROM documents
-			WHERE language = ?
-			ORDER BY created_at DESC
-		`
-		rows, err = s.db.QueryContext(ctx, query, *lang)
-	} else {
-		query := `
-			SELECT id, title, content, url, language
-			FROM documents
-			ORDER BY created_at DESC
-		`
-		rows, err = s.db.QueryContext(ctx, query)
+		query += ` WHERE language = ?`
+		args = append(args, *lang)
 	}
-
+	rows, err := s.db.QueryContext(ctx, query+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying documents: %w", err)
 	}
@@ -154,10 +133,8 @@ func (s *SQLiteStore) ListDocuments(ctx context.Context, lang *domain.Language) 
 
 	var docs []domain.Document
 	for rows.Next() {
-		var doc domain.Document
-		if err := rows.Scan(
-			&doc.ID, &doc.Title, &doc.Content, &doc.URL, &doc.Language,
-		); err != nil {
+		doc, err := scanDocument(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scanning document: %w", err)
 		}
 		docs = append(docs, doc)
@@ -199,22 +176,12 @@ type DocumentListFilter struct {
 
 // CountDocuments returns the total number of documents.
 func (s *SQLiteStore) CountDocuments(ctx context.Context) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents`).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("counting documents: %w", err)
-	}
-	return count, nil
+	return s.count(ctx, "documents")
 }
 
 // CountChunks returns the total number of chunks.
 func (s *SQLiteStore) CountChunks(ctx context.Context) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("counting chunks: %w", err)
-	}
-	return count, nil
+	return s.count(ctx, "chunks")
 }
 
 // ListDocumentsSummary returns paginated document summaries (no content),
@@ -259,13 +226,8 @@ func (s *SQLiteStore) ListDocumentsSummary(ctx context.Context, limit, offset in
 	var docs []DocumentSummary
 	for rows.Next() {
 		var d DocumentSummary
-		var sourceKey sql.NullString
-		if err := rows.Scan(&d.ID, &d.Title, &d.URL, &d.Language, &d.ContentLen, &d.ChunkCount, &sourceKey); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.URL, &d.Language, &d.ContentLen, &d.ChunkCount, &d.SourceKey); err != nil {
 			return nil, 0, fmt.Errorf("scanning document summary: %w", err)
-		}
-		if sourceKey.Valid {
-			s := sourceKey.String
-			d.SourceKey = &s
 		}
 		docs = append(docs, d)
 	}
@@ -290,13 +252,11 @@ func buildDocumentFilterWhere(filter DocumentListFilter) (string, []any) {
 	}
 
 	if len(filter.SourceKeys) > 0 {
-		placeholders := make([]string, len(filter.SourceKeys))
-		for i, k := range filter.SourceKeys {
-			placeholders[i] = "?"
+		for _, k := range filter.SourceKeys {
 			args = append(args, k)
 		}
 		clauses = append(clauses,
-			"EXISTS (SELECT 1 FROM crawl_pages cp WHERE cp.doc_id = d.id AND cp.source_key IN ("+strings.Join(placeholders, ",")+"))")
+			"EXISTS (SELECT 1 FROM crawl_pages cp WHERE cp.doc_id = d.id AND cp.source_key IN ("+placeholders(len(filter.SourceKeys))+"))")
 	}
 
 	if len(clauses) == 0 {

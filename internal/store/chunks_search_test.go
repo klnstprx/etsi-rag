@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"etsi-rag/internal/domain"
@@ -129,6 +130,46 @@ func TestSearchKeyword_SpecialCharsInQuerySurvive(t *testing.T) {
 		// We don't assert what was returned (the sanitiser may strip everything),
 		// only that the call succeeded without surfacing an FTS5 syntax error.
 		_ = results
+	}
+}
+
+// FTS5 operators (AND, OR, NOT, NEAR) in the query are plain search terms,
+// and quoting them must keep the tokenizer's case and diacritic folding.
+func TestSearchKeyword_OperatorWordsInQuery(t *testing.T) {
+	store := setupTestStore(t)
+	seedChunks(t, store, "doc-1", []string{
+		"Plazo de matrícula del TFG y fecha de defensa.",
+		"Información general no relacionada.",
+		"The deadline is NOT extendable near the end of term.",
+	})
+
+	for _, tc := range []struct {
+		query     string
+		wantChunk int
+	}{
+		{"matrícula OR plazo", 0},
+		{"MATRICULA or Plazo", 0},
+		{"TFG AND defensa", 0},
+		{"tfg and defensa", 0},
+		{"NOT", 2},
+		{"not", 2},
+		{"NEAR", 2},
+		{"near(extendable)", 2},
+		{"OR AND NOT NEAR", 2},
+	} {
+		results, err := store.SearchKeyword(context.Background(), tc.query, 5)
+		if err != nil {
+			t.Errorf("query %q: unexpected error: %v", tc.query, err)
+			continue
+		}
+		if len(results) == 0 {
+			t.Errorf("query %q: expected chunk %d, got no results", tc.query, tc.wantChunk)
+			continue
+		}
+		if results[0].Chunk.ChunkIndex != tc.wantChunk {
+			t.Errorf("query %q: top result should be chunk %d, got chunk %d: %q",
+				tc.query, tc.wantChunk, results[0].Chunk.ChunkIndex, results[0].Chunk.Content)
+		}
 	}
 }
 
@@ -372,5 +413,62 @@ func TestSearchKeyword_OrdersByRelevance(t *testing.T) {
 			t.Errorf("results not in score-descending order at i=%d: %f > %f",
 				i, results[i].Score, results[i-1].Score)
 		}
+	}
+}
+
+// TestMigrate_AddsSearchPrefixToOldSchema checks that a database created
+// before chunks.search_prefix existed is upgraded in place: chunks indexed by
+// the old triggers can still be deleted cleanly, and new chunks are found by
+// their search prefix.
+func TestMigrate_AddsSearchPrefixToOldSchema(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+	old := `
+		CREATE TABLE documents (id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, url TEXT,
+			language TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+		CREATE TABLE chunks (id INTEGER PRIMARY KEY AUTOINCREMENT,
+			doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, content TEXT NOT NULL,
+			chunk_index INTEGER NOT NULL, section_title TEXT NOT NULL DEFAULT '',
+			image_refs TEXT NOT NULL DEFAULT '', UNIQUE(doc_id, chunk_index));
+		CREATE VIRTUAL TABLE chunks_fts USING fts5(content, content='chunks', content_rowid='id',
+			tokenize='unicode61 remove_diacritics 2');
+		CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, coalesce(new.section_title, '') || ' ' || new.content);
+		END;
+		CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, coalesce(old.section_title, '') || ' ' || old.content);
+		END;
+		INSERT INTO documents (id, title, content, language) VALUES ('old', 'Old', 'x', 'es');
+		INSERT INTO chunks (doc_id, content, chunk_index, section_title) VALUES ('old', 'reglamento antiguo', 0, 'Normativa');`
+	if _, err := db.Exec(old); err != nil {
+		t.Fatalf("creating old schema: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewSQLiteStore(db, func() int { return 2 })
+	ctx := context.Background()
+
+	if err := s.DeleteDocument(ctx, "old"); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')`); err != nil {
+		t.Fatalf("FTS index inconsistent after deleting an old-trigger row: %v", err)
+	}
+
+	doc := &domain.Document{ID: "new", Title: "Grado en Ingeniería Informática", Content: "x", Language: domain.LanguageES}
+	if err := s.CreateDocument(ctx, doc); err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	chunk := domain.Chunk{Content: "Plazas nuevo ingreso 150", SearchPrefix: doc.Title}
+	if err := s.CreateChunks(ctx, "new", []domain.Chunk{chunk}, [][]float32{{1, 0}}); err != nil {
+		t.Fatalf("CreateChunks: %v", err)
+	}
+	got, err := s.SearchKeyword(ctx, "informatica", 5)
+	if err != nil || len(got) != 1 || got[0].Chunk.DocID != "new" {
+		t.Fatalf("SearchKeyword by prefix word = %v, %v; want the new chunk", got, err)
 	}
 }

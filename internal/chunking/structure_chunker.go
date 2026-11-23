@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"etsi-rag/internal/config"
@@ -54,9 +55,6 @@ type StructureAwareChunker struct {
 
 // NewStructureAwareChunker creates a structure-aware chunker.
 func NewStructureAwareChunker(cfg config.ChunkingConfig, counter tokencount.Counter, maxEmbeddingTokens int) *StructureAwareChunker {
-	if len(cfg.Separators) == 0 {
-		cfg.Separators = DefaultChunkingConfig().Separators
-	}
 	return &StructureAwareChunker{
 		config:             cfg,
 		counter:            counter,
@@ -64,12 +62,12 @@ func NewStructureAwareChunker(cfg config.ChunkingConfig, counter tokencount.Coun
 	}
 }
 
+// effectiveMaxTokens caps the configured chunk size at the embedder's window.
 func (c *StructureAwareChunker) effectiveMaxTokens() int {
-	max := c.config.MaxChunkSize
-	if c.maxEmbeddingTokens > 0 && c.maxEmbeddingTokens < max {
-		max = c.maxEmbeddingTokens
+	if c.maxEmbeddingTokens > 0 {
+		return min(c.config.MaxChunkSize, c.maxEmbeddingTokens)
 	}
-	return max
+	return c.config.MaxChunkSize
 }
 
 // Chunk splits content into structure-aware chunks.
@@ -101,7 +99,12 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 		}
 	}
 	if !hasHeadings {
-		return c.fallbackTokenSplit(ctx, cleaned, dedupRefs(boundaries))
+		var refs []string
+		for _, b := range boundaries {
+			refs = appendUnique(refs, b.Ref)
+		}
+		chunks, err := c.fallbackTokenSplit(ctx, cleaned, refs)
+		return numbered(chunks), err
 	}
 
 	maxTokens := c.effectiveMaxTokens()
@@ -110,14 +113,13 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 	// Build breadcrumbs for each section
 	breadcrumbs := buildBreadcrumbs(sections)
 
-	// Process sections into chunks
 	var chunks []Chunk
-	idx := 0
-
 	for i := 0; i < len(sections); i++ {
 		s := sections[i]
-		if s.body == "" && s.level > 0 {
-			// Heading-only section with no body — skip (title will appear in child sections' breadcrumbs)
+		if s.body == "" && i+1 < len(sections) && sections[i+1].level > s.level {
+			// Heading-only section followed by a child — skip, the title
+			// appears in the child's breadcrumb. Any other bodiless heading
+			// is kept so its text still reaches a chunk.
 			continue
 		}
 
@@ -126,9 +128,6 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 
 		// Reconstruct the section markdown (heading + body) — stored as-is.
 		sectionContent := s.render()
-		if sectionContent == "" {
-			continue
-		}
 
 		// Token count of what the embedder will see: breadcrumb prefix + body.
 		// Storage is the body only; the pipeline prepends the breadcrumb at
@@ -152,7 +151,7 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 			if mergedTokens <= maxTokens {
 				sectionContent = merged
 				tokens = mergedTokens
-				refs = unionRefs(refs, sections[i+1].imageRefs)
+				refs = appendUnique(cloneRefs(refs), sections[i+1].imageRefs...)
 				breadcrumb = mergedBreadcrumb
 				i++ // skip next section
 			}
@@ -161,22 +160,27 @@ func (c *StructureAwareChunker) Chunk(ctx context.Context, content string) ([]Ch
 		if tokens <= maxTokens {
 			chunks = append(chunks, Chunk{
 				Content:      sectionContent,
-				Index:        idx,
 				SectionTitle: breadcrumb,
 				ImageRefs:    cloneRefs(refs),
 			})
-			idx++
-		} else {
-			// Split oversized section with token-based splitting
-			subChunks, err := c.splitOversizedSection(ctx, sectionContent, breadcrumb, refs, maxTokens, &idx)
-			if err != nil {
-				return nil, fmt.Errorf("splitting oversized section: %w", err)
-			}
-			chunks = append(chunks, subChunks...)
+			continue
 		}
+		subChunks, err := c.splitOversizedSection(ctx, sectionContent, breadcrumb, refs, maxTokens)
+		if err != nil {
+			return nil, fmt.Errorf("splitting oversized section: %w", err)
+		}
+		chunks = append(chunks, subChunks...)
 	}
 
-	return chunks, nil
+	return numbered(chunks), nil
+}
+
+// numbered sets each chunk's Index to its position in the document.
+func numbered(chunks []Chunk) []Chunk {
+	for i := range chunks {
+		chunks[i].Index = i
+	}
+	return chunks
 }
 
 // parentBreadcrumb returns the breadcrumb one level up by dropping the last
@@ -198,7 +202,6 @@ func attachImageRefs(sections []section, boundaries []markers.Boundary) {
 	}
 	for i := range sections {
 		s := &sections[i]
-		seen := make(map[string]struct{})
 		for j, b := range boundaries {
 			rangeEnd := -1
 			if j+1 < len(boundaries) {
@@ -211,59 +214,19 @@ func attachImageRefs(sections []section, boundaries []markers.Boundary) {
 			if b.Start >= s.end {
 				continue
 			}
-			if _, dup := seen[b.Ref]; dup {
-				continue
-			}
-			seen[b.Ref] = struct{}{}
-			s.imageRefs = append(s.imageRefs, b.Ref)
+			s.imageRefs = appendUnique(s.imageRefs, b.Ref)
 		}
 	}
 }
 
-// dedupRefs returns the unique ref strings from boundaries, preserving order
-// of first occurrence.
-func dedupRefs(boundaries []markers.Boundary) []string {
-	if len(boundaries) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(boundaries))
-	out := make([]string, 0, len(boundaries))
-	for _, b := range boundaries {
-		if _, dup := seen[b.Ref]; dup {
-			continue
+// appendUnique appends each ref not already in dst, preserving first-seen order.
+func appendUnique(dst []string, refs ...string) []string {
+	for _, r := range refs {
+		if !slices.Contains(dst, r) {
+			dst = append(dst, r)
 		}
-		seen[b.Ref] = struct{}{}
-		out = append(out, b.Ref)
 	}
-	return out
-}
-
-// unionRefs returns the dedup-union of two ref slices, preserving order
-// (a's order first, then any new entries from b).
-func unionRefs(a, b []string) []string {
-	if len(a) == 0 {
-		return cloneRefs(b)
-	}
-	if len(b) == 0 {
-		return cloneRefs(a)
-	}
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, r := range a {
-		if _, dup := seen[r]; dup {
-			continue
-		}
-		seen[r] = struct{}{}
-		out = append(out, r)
-	}
-	for _, r := range b {
-		if _, dup := seen[r]; dup {
-			continue
-		}
-		seen[r] = struct{}{}
-		out = append(out, r)
-	}
-	return out
+	return dst
 }
 
 // cloneRefs returns a copy of the slice (or nil for empty input) so each chunk
@@ -365,7 +328,7 @@ func buildBreadcrumbs(sections []section) []string {
 // splitOversizedSection splits a section that exceeds maxTokens using
 // separator-based splitting. The breadcrumb's token cost is reserved from
 // the budget so the embed-time payload still fits the embedder's window.
-func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, content, breadcrumb string, refs []string, maxTokens int, idx *int) ([]Chunk, error) {
+func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, content, breadcrumb string, refs []string, maxTokens int) ([]Chunk, error) {
 	// Reserve budget for the embed-time breadcrumb prefix. If the breadcrumb
 	// alone would leave no usable body budget, drop it for this section —
 	// a chunk without a breadcrumb is still useful; a zero-body chunk is not.
@@ -387,29 +350,20 @@ func (c *StructureAwareChunker) splitOversizedSection(ctx context.Context, conte
 		effectiveMax = maxTokens
 	}
 
-	pieces, err := splitAndMerge(ctx, c.counter, content, c.config.Separators, effectiveMax, c.config.ChunkOverlap)
+	pieces, err := splitAndMerge(ctx, c.counter, content, c.config.Separators, 0, effectiveMax, c.config.ChunkOverlap)
 	if err != nil {
 		return nil, err
 	}
 
 	chunks := make([]Chunk, 0, len(pieces))
 	for _, p := range pieces {
-		chunks = append(chunks, c.makeStructuredChunk(p, breadcrumb, refs, idx))
+		chunks = append(chunks, Chunk{
+			Content:      strings.TrimSpace(p),
+			SectionTitle: breadcrumb,
+			ImageRefs:    cloneRefs(refs),
+		})
 	}
 	return chunks, nil
-}
-
-// makeStructuredChunk creates a chunk with section title and refs.
-// Content is plain body — the breadcrumb is not inlined.
-func (c *StructureAwareChunker) makeStructuredChunk(text, breadcrumb string, refs []string, idx *int) Chunk {
-	chunk := Chunk{
-		Content:      strings.TrimSpace(text),
-		Index:        *idx,
-		SectionTitle: breadcrumb,
-		ImageRefs:    cloneRefs(refs),
-	}
-	*idx++
-	return chunk
 }
 
 // fallbackTokenSplit splits unstructured text (no headings) using
@@ -425,82 +379,97 @@ func (c *StructureAwareChunker) fallbackTokenSplit(ctx context.Context, content 
 		return nil, fmt.Errorf("counting fallback tokens: %w", err)
 	}
 	if total <= maxTokens {
-		return stampImageRefs(
-			[]Chunk{{Content: strings.TrimSpace(content), Index: 0}},
-			refs,
-		), nil
+		return []Chunk{{Content: strings.TrimSpace(content), ImageRefs: cloneRefs(refs)}}, nil
 	}
 
-	pieces, err := splitAndMerge(ctx, c.counter, content, c.config.Separators, maxTokens, c.config.ChunkOverlap)
+	pieces, err := splitAndMerge(ctx, c.counter, content, c.config.Separators, 0, maxTokens, c.config.ChunkOverlap)
 	if err != nil {
 		return nil, err
 	}
 
 	chunks := make([]Chunk, 0, len(pieces))
-	for i, p := range pieces {
-		chunks = append(chunks, Chunk{Content: p, Index: i})
+	for _, p := range pieces {
+		chunks = append(chunks, Chunk{Content: p, ImageRefs: cloneRefs(refs)})
 	}
-	return stampImageRefs(chunks, refs), nil
+	return chunks, nil
 }
 
-// splitBySeparators recursively splits text using the separator hierarchy.
-// Stops at the first separator that produces more than one part; falls
-// through to the next separator otherwise. The empty-string separator is
-// treated as a no-op stop (caller is expected to follow with hard token
-// splitting).
-func splitBySeparators(text string, separators []string, sepIdx int) []string {
-	if sepIdx >= len(separators) {
-		return []string{text}
-	}
-
-	sep := separators[sepIdx]
-	if sep == "" {
-		return []string{text}
-	}
-
-	parts := strings.Split(text, sep)
-	if len(parts) <= 1 {
-		return splitBySeparators(text, separators, sepIdx+1)
-	}
-
-	var result []string
-	for i, part := range parts {
-		piece := part
-		if i < len(parts)-1 {
-			piece += sep
+// splitBySeparators splits text on the first separator from separators[from:]
+// that produces more than one part, keeping the separator at the end of each
+// part, and returns the index of the separator used (len(separators) when
+// none splits). The empty-string separator stops the search (caller is
+// expected to follow with hard token splitting).
+func splitBySeparators(text string, separators []string, from int) (parts []string, used int) {
+	for i := from; i < len(separators); i++ {
+		sep := separators[i]
+		if sep == "" {
+			break
 		}
-		if strings.TrimSpace(piece) == "" {
+		raw := strings.Split(text, sep)
+		if len(raw) <= 1 {
 			continue
 		}
-		result = append(result, piece)
+		for j, part := range raw {
+			if j < len(raw)-1 {
+				part += sep
+			}
+			if strings.TrimSpace(part) != "" {
+				parts = append(parts, part)
+			}
+		}
+		return parts, i
 	}
-	return result
+	return []string{text}, len(separators)
 }
 
 // splitAndMerge breaks text into token-bounded pieces using the separator
-// hierarchy. Segments are merged greedily to fill each piece; segments that
-// individually exceed maxTokens are hard-split by token range with overlap.
-// Returned pieces are trimmed plain text — callers attach breadcrumb / refs.
-func splitAndMerge(ctx context.Context, counter tokencount.Counter, text string, separators []string, maxTokens, overlap int) ([]string, error) {
+// hierarchy from separators[from]. Segments are merged greedily to fill each
+// piece. A segment that individually exceeds maxTokens is split again with
+// the finer separators (so a large table breaks between rows and a long
+// paragraph between sentences), and hard-split by token range only once no
+// separator is left. When the pieces are cut below the first separator
+// (inside a paragraph), each piece after the first opens with the trailing
+// segments (whole rows, sentences or words) of the previous one, up to
+// overlap tokens. Returned pieces are trimmed plain text — callers attach
+// breadcrumb / refs.
+func splitAndMerge(ctx context.Context, counter tokencount.Counter, text string, separators []string, from, maxTokens, overlap int) ([]string, error) {
 	if maxTokens <= 0 {
 		return nil, nil
 	}
-	segments := splitBySeparators(text, separators, 0)
+	segments, used := splitBySeparators(text, separators, from)
+	carry := 0
+	if used > 0 {
+		carry = overlap
+	}
 
+	type segment struct {
+		text   string
+		tokens int
+	}
 	var pieces []string
-	var current strings.Builder
-	var currentTokens int
+	var window []segment        // segments of the piece being built
+	windowTokens, fresh := 0, 0 // fresh: segments added since the last piece
 
+	// flush emits the window as a piece and keeps its trailing segments, up
+	// to carry tokens and never the whole piece, to open the next one.
 	flush := func() {
-		if current.Len() == 0 {
+		if fresh == 0 {
 			return
 		}
-		trimmed := strings.TrimSpace(current.String())
-		if trimmed != "" {
-			pieces = append(pieces, trimmed)
+		var b strings.Builder
+		for _, s := range window {
+			b.WriteString(s.text)
 		}
-		current.Reset()
-		currentTokens = 0
+		if piece := strings.TrimSpace(b.String()); piece != "" {
+			pieces = append(pieces, piece)
+		}
+		keep := len(window)
+		windowTokens = 0
+		for keep > 1 && windowTokens+window[keep-1].tokens <= carry {
+			keep--
+			windowTokens += window[keep].tokens
+		}
+		window, fresh = window[keep:], 0
 	}
 
 	for _, seg := range segments {
@@ -510,9 +479,15 @@ func splitAndMerge(ctx context.Context, counter tokencount.Counter, text string,
 		}
 
 		if segTokens > maxTokens {
-			// Flush current then hard-split the oversized segment.
+			// Flush current then split the oversized segment on its own.
 			flush()
-			subs, err := hardSplitByTokens(ctx, counter, seg, maxTokens, overlap)
+			window, windowTokens = nil, 0
+			var subs []string
+			if used+1 < len(separators) {
+				subs, err = splitAndMerge(ctx, counter, seg, separators, used+1, maxTokens, overlap)
+			} else {
+				subs, err = hardSplitByTokens(ctx, counter, seg, maxTokens, overlap)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -520,12 +495,18 @@ func splitAndMerge(ctx context.Context, counter tokencount.Counter, text string,
 			continue
 		}
 
-		if currentTokens+segTokens > maxTokens && current.Len() > 0 {
+		if windowTokens+segTokens > maxTokens && fresh > 0 {
 			flush()
 		}
+		// Drop carried segments that leave no room for this one.
+		for windowTokens+segTokens > maxTokens && len(window) > 0 {
+			windowTokens -= window[0].tokens
+			window = window[1:]
+		}
 
-		current.WriteString(seg)
-		currentTokens += segTokens
+		window = append(window, segment{seg, segTokens})
+		windowTokens += segTokens
+		fresh++
 	}
 	flush()
 

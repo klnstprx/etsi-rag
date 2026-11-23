@@ -8,7 +8,7 @@ import (
 	"etsi-rag/internal/domain"
 )
 
-func TestGetSourceKeyByDocID(t *testing.T) {
+func TestSourceKeyByDocID(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
@@ -19,9 +19,9 @@ func TestGetSourceKeyByDocID(t *testing.T) {
 	}
 
 	t.Run("doc with no crawl_page returns empty", func(t *testing.T) {
-		key, err := s.GetSourceKeyByDocID(ctx, "doc-1")
+		key, err := s.SourceKeyByDocID(ctx, "doc-1")
 		if err != nil {
-			t.Fatalf("GetSourceKeyByDocID: %v", err)
+			t.Fatalf("SourceKeyByDocID: %v", err)
 		}
 		if key != "" {
 			t.Errorf("key = %q, want empty", key)
@@ -29,9 +29,9 @@ func TestGetSourceKeyByDocID(t *testing.T) {
 	})
 
 	t.Run("unknown doc id returns empty", func(t *testing.T) {
-		key, err := s.GetSourceKeyByDocID(ctx, "doc-does-not-exist")
+		key, err := s.SourceKeyByDocID(ctx, "doc-does-not-exist")
 		if err != nil {
-			t.Fatalf("GetSourceKeyByDocID: %v", err)
+			t.Fatalf("SourceKeyByDocID: %v", err)
 		}
 		if key != "" {
 			t.Errorf("key = %q, want empty", key)
@@ -51,9 +51,9 @@ func TestGetSourceKeyByDocID(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
-		key, err := s.GetSourceKeyByDocID(ctx, "doc-1")
+		key, err := s.SourceKeyByDocID(ctx, "doc-1")
 		if err != nil {
-			t.Fatalf("GetSourceKeyByDocID: %v", err)
+			t.Fatalf("SourceKeyByDocID: %v", err)
 		}
 		if key != "alpha" {
 			t.Errorf("key = %q, want %q", key, "alpha")
@@ -61,11 +61,11 @@ func TestGetSourceKeyByDocID(t *testing.T) {
 	})
 }
 
-// TestGetSourceKeyByDocID_PicksOldest verifies the ORDER BY id LIMIT 1
+// TestSourceKeyByDocID_PicksOldest verifies the ORDER BY id LIMIT 1
 // guarantee: when a doc is reached from multiple sources, the call returns
 // the source that was inserted first (lowest crawl_pages.id), and the result
 // is stable across repeated calls.
-func TestGetSourceKeyByDocID_PicksOldest(t *testing.T) {
+func TestSourceKeyByDocID_PicksOldest(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
@@ -93,12 +93,51 @@ func TestGetSourceKeyByDocID_PicksOldest(t *testing.T) {
 	}
 
 	for i := range 3 {
-		key, err := s.GetSourceKeyByDocID(ctx, docID)
+		key, err := s.SourceKeyByDocID(ctx, docID)
 		if err != nil {
-			t.Fatalf("GetSourceKeyByDocID (call %d): %v", i, err)
+			t.Fatalf("SourceKeyByDocID (call %d): %v", i, err)
 		}
 		if key != "second-source" {
 			t.Errorf("call %d: key = %q, want %q (ORDER BY id LIMIT 1 should pick the oldest row)", i, key, "second-source")
 		}
+	}
+}
+
+// TestPurgeStaleDocuments_KeepsDocumentsOfLivePages checks that a document a
+// live page shares with a stale one through content dedup survives the purge,
+// while a document only stale pages reference goes.
+func TestPurgeStaleDocuments_KeepsDocumentsOfLivePages(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	shared, staleOnly := "crawl-shared", "crawl-stale"
+	for _, id := range []string{shared, staleOnly} {
+		if err := s.CreateDocument(ctx, &domain.Document{ID: id, Title: id, Content: "c", Language: domain.LanguageES}); err != nil {
+			t.Fatalf("create doc: %v", err)
+		}
+	}
+	now := time.Now()
+	for _, p := range []*domain.CrawlPage{
+		{SourceKey: "a", URL: "https://example.com/live", DocID: &shared, ContentHash: "h1", Status: domain.CrawlPageFetched, LastCrawledAt: &now},
+		{SourceKey: "a", URL: "https://example.com/gone-twin", DocID: &shared, ContentHash: "h1", Status: domain.CrawlPageStale, LastCrawledAt: &now},
+		{SourceKey: "a", URL: "https://example.com/gone", DocID: &staleOnly, ContentHash: "h2", Status: domain.CrawlPageStale, LastCrawledAt: &now},
+	} {
+		if err := s.UpsertCrawlPage(ctx, p); err != nil {
+			t.Fatalf("upsert %s: %v", p.URL, err)
+		}
+	}
+
+	n, err := s.PurgeStaleDocuments(ctx)
+	if err != nil {
+		t.Fatalf("PurgeStaleDocuments: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("purged %d documents, want 1", n)
+	}
+	if ok, _ := s.DocumentExists(ctx, shared); !ok {
+		t.Error("document of a live page was purged")
+	}
+	if ok, _ := s.DocumentExists(ctx, staleOnly); ok {
+		t.Error("document referenced only by stale pages survived")
 	}
 }

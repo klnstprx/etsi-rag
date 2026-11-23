@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
 
 	"etsi-rag/internal/tokencount"
 )
@@ -42,22 +41,10 @@ type RerankClient struct {
 	timeout        time.Duration
 }
 
-// NewRerankClient creates a new reranker client. APIKey defaults to a
-// placeholder when empty (llama.cpp ignores it but the SDK requires the
-// header to be set).
+// NewRerankClient creates a new reranker client.
 func NewRerankClient(cfg RerankClientConfig) *RerankClient {
-	apiKey := cfg.APIKey
-	if apiKey == "" {
-		apiKey = "not-needed"
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(cfg.BaseURL),
-		option.WithAPIKey(apiKey),
-	)
-
 	return &RerankClient{
-		client:         &client,
+		client:         newOpenAI(cfg.BaseURL, cfg.APIKey),
 		model:          cfg.Model,
 		counter:        cfg.Counter,
 		maxTokens:      cfg.MaxTokens,
@@ -75,15 +62,13 @@ type rerankRequest struct {
 	TopN      int      `json:"top_n,omitempty"`
 }
 
-// rerankResponse mirrors the live shape returned by llama-server (verified
-// 2026-05-04 against the router build with qwen-reranker):
+// rerankResponse decodes the part of llama-server's /rerank reply we use
+// (verified 2026-05-04 against the router build with qwen-reranker):
 //
 //	{"model":"qwen-reranker","object":"list",
 //	 "usage":{...},
 //	 "results":[{"index":2,"relevance_score":8.6e-22}, ...]}
 type rerankResponse struct {
-	Model   string `json:"model"`
-	Object  string `json:"object"`
 	Results []struct {
 		Index          int     `json:"index"`
 		RelevanceScore float64 `json:"relevance_score"`

@@ -120,17 +120,13 @@ func TestCreate(t *testing.T) {
 		t.Fatal("Create returned empty ID")
 	}
 
-	if s.Count() != 1 {
-		t.Errorf("Count() = %d, want 1", s.Count())
-	}
-
 	// Second create should give different ID.
 	id2 := s.Create()
 	if id2 == id {
 		t.Error("Create returned duplicate ID")
 	}
-	if s.Count() != 2 {
-		t.Errorf("Count() = %d, want 2", s.Count())
+	if s.Get(id) == nil || s.Get(id2) == nil {
+		t.Error("both created sessions should be retrievable")
 	}
 }
 
@@ -160,34 +156,26 @@ func TestGetOrCreate(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		id      *string
+		id      string
 		wantNew bool
 	}{
-		{"nil id", nil, true},
-		{"empty string id", strPtr(""), true},
-		{"valid existing id", &existingID, false},
-		{"non-existent id", strPtr("does-not-exist"), true},
+		{"empty id", "", true},
+		{"valid existing id", existingID, false},
+		{"non-existent id", "does-not-exist", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotID, sess := s.GetOrCreate(tt.id)
+			gotID := s.GetOrCreate(tt.id)
 
-			if gotID == "" {
-				t.Error("GetOrCreate returned empty ID")
+			if s.Get(gotID) == nil {
+				t.Fatalf("GetOrCreate returned %q, which is not a live session", gotID)
 			}
-			if sess == nil {
-				t.Fatal("GetOrCreate returned nil session")
+			if tt.wantNew && gotID == tt.id {
+				t.Error("expected new session but got the same ID back")
 			}
-
-			if tt.wantNew {
-				if tt.id != nil && *tt.id != "" && gotID == *tt.id {
-					t.Error("expected new session but got the same ID back")
-				}
-			} else {
-				if gotID != *tt.id {
-					t.Errorf("got ID %q, want %q", gotID, *tt.id)
-				}
+			if !tt.wantNew && gotID != tt.id {
+				t.Errorf("got ID %q, want %q", gotID, tt.id)
 			}
 		})
 	}
@@ -212,32 +200,16 @@ func TestCleanupExpired(t *testing.T) {
 	if s.Get(id) != nil {
 		t.Error("expired session was not removed")
 	}
-	if s.Count() != 0 {
-		t.Errorf("Count() = %d, want 0 after cleanup", s.Count())
-	}
 }
 
 func TestCleanupExpired_KeepsActive(t *testing.T) {
 	s := newTestStore(t, 10, 3600)
 
-	s.Create()
+	id := s.Create()
 	s.CleanupExpired()
 
-	if s.Count() != 1 {
-		t.Errorf("Count() = %d, want 1 (active session should be kept)", s.Count())
-	}
-}
-
-func TestCount(t *testing.T) {
-	s := newTestStore(t, 10, 3600)
-
-	n := 5
-	for i := 0; i < n; i++ {
-		s.Create()
-	}
-
-	if s.Count() != n {
-		t.Errorf("Count() = %d, want %d", s.Count(), n)
+	if s.Get(id) == nil {
+		t.Error("active session should be kept")
 	}
 }
 
@@ -259,14 +231,15 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	close(ids)
 
-	if s.Count() != goroutines {
-		t.Errorf("Count() = %d, want %d after concurrent creates", s.Count(), goroutines)
-	}
-
-	// Concurrent reads + count.
+	// Concurrent reads.
 	collected := make([]string, 0, goroutines)
+	unique := make(map[string]bool, goroutines)
 	for id := range ids {
 		collected = append(collected, id)
+		unique[id] = true
+	}
+	if len(unique) != goroutines {
+		t.Errorf("got %d distinct IDs, want %d after concurrent creates", len(unique), goroutines)
 	}
 
 	for _, id := range collected {
@@ -276,7 +249,6 @@ func TestConcurrentAccess(t *testing.T) {
 			if s.Get(id) == nil {
 				t.Errorf("Get(%q) returned nil during concurrent access", id)
 			}
-			s.Count()
 		}(id)
 	}
 	wg.Wait()
@@ -302,8 +274,4 @@ func TestConcurrentAddMessage_SameSession(t *testing.T) {
 	if got != goroutines {
 		t.Errorf("got %d messages, want %d", got, goroutines)
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
 }

@@ -23,50 +23,6 @@ func TestFormat(t *testing.T) {
 	}
 }
 
-func TestExtract(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want []string
-	}{
-		{"none", "no markers here", nil},
-		{"single", "intro [[image:p1]] outro", []string{"p1"}},
-		{
-			"multiple ordered",
-			"page1 [[image:p1]] body [[image:p2]] body [[image:p3]]",
-			[]string{"p1", "p2", "p3"},
-		},
-		{
-			"with html marker mixed with pdf pages",
-			"[[image:full]] hello [[image:p1]]",
-			[]string{"full", "p1"},
-		},
-		{
-			"non-marker similar text not matched",
-			"[[notimage:p1]] [[image-p1]] [image:p1]",
-			nil,
-		},
-		{
-			"duplicates preserved (caller dedupes)",
-			"[[image:p1]] x [[image:p1]]",
-			[]string{"p1", "p1"},
-		},
-		{
-			"hyphenated ref accepted",
-			"[[image:abc-123]]",
-			[]string{"abc-123"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Extract(tt.in)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Extract(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestExtractBoundaries(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -105,6 +61,24 @@ func TestExtractBoundaries(t *testing.T) {
 			"[[notimage:p1]] real [[image:p2]]",
 			"[[notimage:p1]] real ",
 			[]Boundary{{Ref: "p2", Start: 21}},
+		},
+		{
+			"near-miss syntax not matched",
+			"[[image-p1]] [image:p1]",
+			"[[image-p1]] [image:p1]",
+			nil,
+		},
+		{
+			"hyphenated ref accepted",
+			"[[image:abc-123]]",
+			"",
+			[]Boundary{{Ref: "abc-123", Start: 0}},
+		},
+		{
+			"html and pdf refs in source order",
+			"[[image:full]] hello [[image:p1]]",
+			" hello ",
+			[]Boundary{{Ref: "full", Start: 0}, {Ref: "p1", Start: 7}},
 		},
 	}
 	for _, tt := range tests {

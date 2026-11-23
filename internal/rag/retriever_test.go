@@ -189,6 +189,35 @@ func TestBuildContext(t *testing.T) {
 	}
 }
 
+// The agent's read_document tool takes a document URL, so the search context
+// the model sees must name each block's source URL.
+func TestBuildContext_ShowsDocumentURL(t *testing.T) {
+	r, _, _ := setupTestRetriever(t)
+	url := "https://www.uma.es/grado-en-ingenieria-del-software/"
+
+	result := &RetrievalResult{
+		Chunks: []ScoredChunk{
+			{Chunk: domain.Chunk{DocID: "doc-1", Content: "chunk text", SectionTitle: "Plan de estudios"}, Score: 0.9},
+			{Chunk: domain.Chunk{DocID: "doc-2", Content: "other text"}, Score: 0.8},
+		},
+		Documents: []domain.Document{
+			{ID: "doc-1", Title: "Grado UMA", URL: &url},
+			{ID: "doc-2", Title: "No URL"},
+		},
+	}
+
+	ragCtx, err := r.BuildContext(context.Background(), result)
+	if err != nil {
+		t.Fatalf("BuildContext error: %v", err)
+	}
+	if !strings.Contains(ragCtx, "[1] Grado UMA > Plan de estudios:\nURL: "+url+"\nchunk text") {
+		t.Errorf("first block should name its URL under the header; got:\n%s", ragCtx)
+	}
+	if !strings.Contains(ragCtx, "[2] No URL:\nother text") {
+		t.Errorf("a block without a URL keeps the plain header; got:\n%s", ragCtx)
+	}
+}
+
 func TestSourcesFromRetrieval(t *testing.T) {
 	result := &RetrievalResult{
 		Chunks: []ScoredChunk{

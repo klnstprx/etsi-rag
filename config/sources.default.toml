@@ -103,7 +103,8 @@ enabled = true
 
 # UMA-wide hubs that complement the ETSI-specific seeds. The crawler's BFS is
 # scoped per source (each seed walks its own subtree plus the always-allowed
-# /etsi-informatica/, /centers/subject/, and /media/files/ prefixes), so these
+# /etsi-informatica/, /centers/subject/, /media/files/ and /media/tinyimages/file/
+# prefixes), so these
 # don't overlap with the degree seeds above.
 
 [[sources]]

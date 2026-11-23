@@ -7,8 +7,8 @@
 //   - Register/Recheck: a callback per issue ID that re-runs the same probe;
 //     the admin "Re-check" button calls it. Issues whose underlying init step
 //     is a one-shot at boot (object store init, embedding cache warm) are
-//     marked RequiresRestart=true; Recheck without explicit ids skips them
-//     so the operator gets honest feedback that a restart is needed.
+//     marked RequiresRestart=true; Recheck skips them so the operator gets
+//     honest feedback that a restart is needed.
 package diag
 
 import (
@@ -92,22 +92,6 @@ func (r *Registry) Clear(id string) {
 	r.mu.Unlock()
 }
 
-// Has reports whether the issue with the given ID is currently set.
-func (r *Registry) Has(id string) bool {
-	r.mu.RLock()
-	_, ok := r.issues[id]
-	r.mu.RUnlock()
-	return ok
-}
-
-// Get returns the issue with the given ID and whether it was found.
-func (r *Registry) Get(id string) (Issue, bool) {
-	r.mu.RLock()
-	i, ok := r.issues[id]
-	r.mu.RUnlock()
-	return i, ok
-}
-
 // Register attaches a recheck function for an issue ID. The template is the
 // Issue shape used when the recheck reports an error (the recheck itself only
 // returns an error, not a full Issue). The template's ID and Component should
@@ -118,57 +102,36 @@ func (r *Registry) Register(id string, template Issue, fn Recheck) {
 	r.mu.Unlock()
 }
 
-// Recheck re-runs registered rechecks. With no ids, runs every recheck whose
-// underlying issue is NOT RequiresRestart=true (and rechecks whose issue is
-// currently absent, so a passing probe stays "no issue"). With explicit ids,
-// runs exactly those, including RequiresRestart ones — gives the caller full
-// control when they need it.
-//
-// Returns one error per recheck that returned an error, in arbitrary order.
-// The registry has been updated (Set or Clear) by the time Recheck returns.
-func (r *Registry) Recheck(ctx context.Context, ids ...string) []error {
+// Recheck re-runs every registered recheck except those whose issue is
+// currently RequiresRestart, then Sets or Clears each issue from the result.
+// Rechecks run even when their issue is absent, so a passing probe stays clear.
+func (r *Registry) Recheck(ctx context.Context) {
 	r.mu.RLock()
 	type job struct {
-		id       string
-		fn       Recheck
-		template Issue
+		id string
+		rc rechecker
 	}
 	var jobs []job
-	if len(ids) == 0 {
-		for id, rc := range r.rechecks {
-			if existing, ok := r.issues[id]; ok && existing.RequiresRestart {
-				continue
-			}
-			jobs = append(jobs, job{id: id, fn: rc.fn, template: rc.template})
+	for id, rc := range r.rechecks {
+		if existing, ok := r.issues[id]; ok && existing.RequiresRestart {
+			continue
 		}
-	} else {
-		for _, id := range ids {
-			rc, ok := r.rechecks[id]
-			if !ok {
-				continue
-			}
-			jobs = append(jobs, job{id: id, fn: rc.fn, template: rc.template})
-		}
+		jobs = append(jobs, job{id: id, rc: rc})
 	}
 	r.mu.RUnlock()
 
-	var errs []error
 	for _, j := range jobs {
-		err := j.fn(ctx)
+		err := j.rc.fn(ctx)
 		if err == nil {
 			r.Clear(j.id)
 			continue
 		}
-		// Report the error AND update the registry with a refreshed copy of
-		// the template (Detail = err.Error, At = now).
-		issue := j.template
+		issue := j.rc.template
 		issue.ID = j.id
 		issue.Detail = err.Error()
 		issue.At = time.Now()
 		r.Set(issue)
-		errs = append(errs, err)
 	}
-	return errs
 }
 
 // Snapshot returns the current issues sorted by severity descending, then by

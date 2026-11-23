@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"etsi-rag/internal/domain"
 
@@ -46,11 +48,14 @@ func ParseHTML(body []byte, baseURL string) (*HTMLResult, error) {
 	ogTitle := extractOGTitle(doc)
 	lang := extractHTMLLang(doc)
 
-	// Try readability (needs its own parse — library API)
-	title, readText := extractReadable(body, base)
+	// Readability must not see hidden CMS blocks (the iDUMA session modal,
+	// editor placeholders): they would win the length comparison below.
+	stripBoilerplate(doc)
 
-	// Try content-area extraction (finds #main_content or similar, skips boilerplate)
-	contentTitle, contentText := extractContentArea(doc)
+	readTitle, readText := extractReadable(doc, base)
+
+	// Try content-area extraction (finds #main_content or similar)
+	contentText := extractContentArea(doc)
 
 	// Normalize once for comparison
 	normContent := normalizeStructured(contentText)
@@ -60,28 +65,53 @@ func ParseHTML(body []byte, baseURL string) (*HTMLResult, error) {
 	text := normRead
 	if len(normContent) > len(normRead) {
 		text = normContent
-		if title == "" {
-			title = contentTitle
-		}
 	}
 
 	// Final fallback to naive if both returned nothing
 	if text == "" {
-		title, text = extractNaive(doc)
-		text = normalizeStructured(text)
-	}
-
-	// OG title is usually cleaner (no "X - Universidad de Málaga" suffix)
-	if ogTitle != "" {
-		title = ogTitle
+		text = normalizeStructured(extractNaive(doc))
 	}
 
 	return &HTMLResult{
-		Title:    title,
+		Title:    pageTitle(ogTitle, readTitle, findTitle(doc), base),
 		Text:     text,
 		Language: lang,
 		Links:    links,
 	}, nil
+}
+
+// pageTitle picks og:title (usually cleaner, no "X - Universidad de Málaga"
+// suffix), else readability's title, else the document's <title>, skipping
+// placeholders such as the "subject1" UMA's CMS stamps on course pages.
+func pageTitle(ogTitle, readTitle, docTitle string, base *url.URL) string {
+	title := docTitle
+	for _, t := range []string{ogTitle, readTitle} {
+		if !isPlaceholderTitle(t) {
+			title = t
+			break
+		}
+	}
+	title = collapseSpace(title)
+
+	// On a site's root page UMA's CMS sets <title> to "{site} - {og:title} - ...".
+	// When og:title is a portal name shorter than the site name ("Grado UMA"
+	// vs "Grado en INGENIERÍA INFORMÁTICA"), the site name is the title; a
+	// longer og:title ("Escuela de Doctorado Universidad de Málaga" vs
+	// "Doctorado") is already the specific one.
+	if strings.Contains(strings.Trim(base.Path, "/"), "/") {
+		return title
+	}
+	segments := strings.Split(collapseSpace(docTitle), " - ")
+	site := segments[0]
+	if utf8.RuneCountInString(site) <= utf8.RuneCountInString(title) {
+		return title
+	}
+	for _, s := range segments[1:] {
+		if s == title {
+			return site
+		}
+	}
+	return title
 }
 
 // extractHTMLLang reads the `lang` attribute from the first <html> element
@@ -112,31 +142,31 @@ func extractHTMLLang(doc *html.Node) string {
 	return primary
 }
 
-// extractOGTitle returns the og:title meta tag content, or empty string if absent.
+// placeholderTitle matches titles that authoring tools or the CMS stamp by
+// default ("subject1", "Document1", "Microsoft Word - x.doc", ...); the page's
+// own <title> or the URL-derived fallback is better than these.
+var placeholderTitle = regexp.MustCompile(`(?i)^((subject|document|doc|untitled|title|slide|book|presentation|presentación|sin título|powerpoint presentation)[ _-]?\d*|microsoft word -.*|presentación de powerpoint.*)$`)
+
+func isPlaceholderTitle(title string) bool {
+	title = strings.TrimSpace(title)
+	return title == "" || placeholderTitle.MatchString(title)
+}
+
+// extractOGTitle returns the first non-empty og:title meta content, or "".
 func extractOGTitle(doc *html.Node) string {
-	var title string
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if title != "" {
-			return
-		}
-		if n.Type == html.ElementNode && n.Data == "meta" {
-			if strings.EqualFold(attrVal(n, "property"), "og:title") {
-				title = attrVal(n, "content")
-				return
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
+	meta := findNode(doc, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && n.Data == "meta" &&
+			strings.EqualFold(attrVal(n, "property"), "og:title") && attrVal(n, "content") != ""
+	})
+	if meta == nil {
+		return ""
 	}
-	walk(doc)
-	return title
+	return attrVal(meta, "content")
 }
 
 // extractReadable uses go-readability to extract main article content.
-func extractReadable(body []byte, base *url.URL) (title, text string) {
-	article, err := readability.FromReader(bytes.NewReader(body), base)
+func extractReadable(doc *html.Node, base *url.URL) (title, text string) {
+	article, err := readability.FromDocument(doc, base)
 	if err != nil {
 		return "", ""
 	}
@@ -154,78 +184,56 @@ func extractReadable(body []byte, base *url.URL) (title, text string) {
 }
 
 // extractContentArea finds a main content container in the DOM and extracts
-// text from it, skipping nav/header/footer/modal elements. This works better
-// than readability for structured pages (tables, lists) that aren't articles.
-func extractContentArea(doc *html.Node) (title, text string) {
-	// Find title
-	title = findTitle(doc)
-
-	// Look for a main content container by ID or tag
+// its text. This works better than readability for structured pages (tables,
+// lists) that aren't articles.
+func extractContentArea(doc *html.Node) string {
 	contentNode := findContentNode(doc)
 	if contentNode == nil {
-		return title, ""
+		return ""
 	}
 
-	// Extract text from the content node, skipping boilerplate children
 	var sb strings.Builder
 	extractText(contentNode, &sb)
-	return title, sb.String()
+	return sb.String()
 }
 
-// findTitle extracts the <title> text.
+// findTitle returns the document's own <title>: the first one in the HTML
+// namespace, so inline SVG icon titles ("buscar") later in <body> never win.
 func findTitle(doc *html.Node) string {
-	var title string
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "title" {
-			if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
-				title = strings.TrimSpace(n.FirstChild.Data)
-				return
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
+	n := findNode(doc, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && n.Data == "title" && n.Namespace == ""
+	})
+	if n == nil || n.FirstChild == nil || n.FirstChild.Type != html.TextNode {
+		return ""
 	}
-	walk(doc)
-	return title
+	return strings.TrimSpace(n.FirstChild.Data)
 }
 
-// findContentNode searches for a main content container by ID or semantic tag.
+// contentIDs are element IDs that mark a page's main content container.
+var contentIDs = []string{"main_content", "content", "main-content", "page-content"}
+
+// findContentNode returns the first element, in document order, that is a
+// <main> or <article> or carries one of contentIDs.
 func findContentNode(doc *html.Node) *html.Node {
-	// Priority list of content container IDs
-	contentIDs := []string{"main_content", "content", "main-content", "page-content"}
-
-	var found *html.Node
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if found != nil {
-			return
+	return findNode(doc, func(n *html.Node) bool {
+		if n.Type != html.ElementNode {
+			return false
 		}
-		if n.Type == html.ElementNode {
-			id := attrVal(n, "id")
-			for _, cid := range contentIDs {
-				if strings.EqualFold(id, cid) {
-					found = n
-					return
-				}
-			}
-			// Also check <main> and <article> tags
-			if n.Data == "main" || n.Data == "article" {
-				found = n
-				return
+		if n.Data == "main" || n.Data == "article" {
+			return true
+		}
+		id := attrVal(n, "id")
+		for _, cid := range contentIDs {
+			if strings.EqualFold(id, cid) {
+				return true
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(doc)
-	return found
+		return false
+	})
 }
 
-// isHeading returns the heading level (1-6) if the node is h1-h6, or 0 otherwise.
-func isHeading(tag string) int {
+// headingLevel returns the heading level (1-6) for h1-h6, or 0 otherwise.
+func headingLevel(tag string) int {
 	switch tag {
 	case "h1":
 		return 1
@@ -243,20 +251,91 @@ func isHeading(tag string) int {
 	return 0
 }
 
-// nodeText extracts plain text from a node without any markdown formatting.
+// blockElements are the elements a browser lays out on their own line, so
+// their boundaries separate words even when the HTML has no whitespace there.
+var blockElements = map[string]bool{
+	"address": true, "article": true, "aside": true, "blockquote": true,
+	"dd": true, "div": true, "dl": true, "dt": true, "figcaption": true,
+	"figure": true, "h1": true, "h2": true, "h3": true, "h4": true, "h5": true,
+	"h6": true, "hr": true, "li": true, "main": true, "ol": true, "p": true,
+	"pre": true, "section": true, "table": true, "td": true, "th": true,
+	"tr": true, "ul": true,
+}
+
+// nodeText returns the whitespace-collapsed text under an element, without
+// markdown formatting.
 func nodeText(n *html.Node) string {
+	return collapseSpace(innerText(n))
+}
+
+// collapseSpace trims s and collapses every whitespace run in it to one space.
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// innerText concatenates the text under n as is, with a space for every <br>
+// and block boundary.
+func innerText(n *html.Node) string {
 	var sb strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.TextNode {
-			sb.WriteString(n.Data)
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		switch {
+		case c.Type == html.TextNode:
+			sb.WriteString(c.Data)
+		case c.Type != html.ElementNode: // comments carry no text
+		case c.Data == "br":
+			sb.WriteByte(' ')
+		case blockElements[c.Data]:
+			sb.WriteString(" " + innerText(c) + " ")
+		default:
+			sb.WriteString(innerText(c))
 		}
 	}
-	walk(n)
-	return strings.Join(strings.Fields(sb.String()), " ")
+	return sb.String()
+}
+
+// writeText appends s with every whitespace run collapsed to one space, and
+// drops a space that would double another or start a line. Spacing between
+// adjacent inline nodes is kept as the HTML has it.
+func writeText(sb *strings.Builder, s string) {
+	for _, r := range s {
+		if !unicode.IsSpace(r) {
+			sb.WriteRune(r)
+			continue
+		}
+		if out := sb.String(); out != "" && !strings.HasSuffix(out, " ") && !strings.HasSuffix(out, "\n") {
+			sb.WriteByte(' ')
+		}
+	}
+}
+
+// writeMarkup writes the words of raw between markdown markers; whitespace at
+// raw's edges stays outside them so it still separates neighbouring words.
+func writeMarkup(sb *strings.Builder, raw, open, close string) {
+	text := collapseSpace(raw)
+	if text == "" {
+		writeText(sb, raw)
+		return
+	}
+	if strings.TrimLeftFunc(raw, unicode.IsSpace) != raw {
+		writeText(sb, " ")
+	}
+	sb.WriteString(open + text + close)
+	if strings.TrimRightFunc(raw, unicode.IsSpace) != raw {
+		writeText(sb, " ")
+	}
+}
+
+// stripBoilerplate removes every boilerplate element, with its subtree, from n.
+func stripBoilerplate(n *html.Node) {
+	for c := n.FirstChild; c != nil; {
+		next := c.NextSibling
+		if isBoilerplate(c) {
+			n.RemoveChild(c)
+		} else {
+			stripBoilerplate(c)
+		}
+		c = next
+	}
 }
 
 // isBoilerplate returns true if the element should be skipped.
@@ -278,7 +357,8 @@ func isBoilerplate(n *html.Node) bool {
 		return true
 	}
 	if strings.Contains(cls, "beforecontent") || strings.Contains(cls, "aftercontent") ||
-		strings.Contains(cls, "blockcontainerplace") || strings.Contains(cls, "blockplace") {
+		strings.Contains(cls, "blockcontainerplace") || strings.Contains(cls, "blockplace") ||
+		strings.Contains(cls, "blockhiddentitle") {
 		return true
 	}
 	if strings.HasPrefix(id, "beforecontent") || strings.HasPrefix(id, "aftercontent") {
@@ -295,13 +375,9 @@ func parentTag(n *html.Node) string {
 	return ""
 }
 
-// extractText recursively extracts visible text from a node as markdown, skipping boilerplate.
+// extractText recursively extracts visible text from a node as markdown.
 func extractText(n *html.Node, sb *strings.Builder) {
 	if n.Type == html.ElementNode {
-		if isBoilerplate(n) {
-			return
-		}
-
 		switch {
 		case n.Data == "table":
 			md := renderTableMarkdown(n)
@@ -311,8 +387,8 @@ func extractText(n *html.Node, sb *strings.Builder) {
 				sb.WriteString("\n\n")
 			}
 			return
-		case isHeading(n.Data) > 0:
-			level := isHeading(n.Data)
+		case headingLevel(n.Data) > 0:
+			level := headingLevel(n.Data)
 			text := nodeText(n)
 			if text != "" {
 				sb.WriteString("\n\n")
@@ -323,6 +399,7 @@ func extractText(n *html.Node, sb *strings.Builder) {
 			}
 			return
 		case n.Data == "p":
+			writeText(sb, " ")
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				extractText(c, sb)
 			}
@@ -343,33 +420,17 @@ func extractText(n *html.Node, sb *strings.Builder) {
 			sb.WriteByte('\n')
 			return
 		case n.Data == "strong" || n.Data == "b":
-			text := nodeText(n)
-			if text != "" {
-				sb.WriteString("**")
-				sb.WriteString(text)
-				sb.WriteString("**")
-			}
+			writeMarkup(sb, innerText(n), "**", "**")
 			return
 		case n.Data == "em" || n.Data == "i":
-			text := nodeText(n)
-			if text != "" {
-				sb.WriteByte('*')
-				sb.WriteString(text)
-				sb.WriteByte('*')
-			}
+			writeMarkup(sb, innerText(n), "*", "*")
 			return
 		case n.Data == "a":
 			href := attrVal(n, "href")
-			text := nodeText(n)
-			if text != "" && href != "" && !strings.HasPrefix(href, "#") &&
-				!strings.HasPrefix(href, "javascript:") {
-				sb.WriteString("[")
-				sb.WriteString(text)
-				sb.WriteString("](")
-				sb.WriteString(href)
-				sb.WriteString(")")
-			} else if text != "" {
-				sb.WriteString(text)
+			if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") {
+				writeText(sb, innerText(n))
+			} else {
+				writeMarkup(sb, innerText(n), "[", "]("+href+")")
 			}
 			return
 		case n.Data == "ul" || n.Data == "ol":
@@ -382,15 +443,18 @@ func extractText(n *html.Node, sb *strings.Builder) {
 	}
 
 	if n.Type == html.TextNode {
-		t := strings.TrimSpace(n.Data)
-		if t != "" {
-			sb.WriteString(t)
-			sb.WriteByte(' ')
-		}
+		writeText(sb, n.Data)
 	}
 
+	block := n.Type == html.ElementNode && blockElements[n.Data]
+	if block {
+		writeText(sb, " ")
+	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		extractText(c, sb)
+	}
+	if block {
+		writeText(sb, " ")
 	}
 }
 
@@ -407,13 +471,10 @@ func attrVal(n *html.Node, key string) string {
 // extractNaive walks the full DOM and concatenates visible text as markdown.
 // Used as final fallback when both readability and content-area extraction fail.
 //
-// Title is captured separately via findTitle; body extraction runs against
-// <body> only so <title>/<meta>/<script>/<style> in <head> never leak into
-// the body text. Falls back to the whole document if <body> is missing
+// Extraction runs against <body> only so <title>/<meta> in <head> never leak
+// into the body text. Falls back to the whole document if <body> is missing
 // (rare — html.Parse synthesizes it for any input).
-func extractNaive(doc *html.Node) (title, text string) {
-	title = findTitle(doc)
-
+func extractNaive(doc *html.Node) string {
 	root := findFirstElement(doc, "body")
 	if root == nil {
 		root = doc
@@ -421,20 +482,21 @@ func extractNaive(doc *html.Node) (title, text string) {
 
 	var sb strings.Builder
 	extractText(root, &sb)
-	return title, sb.String()
+	return sb.String()
 }
 
-// findFirstElement returns the first descendant ElementNode with the given tag name.
-func findFirstElement(n *html.Node, tag string) *html.Node {
-	if n == nil {
-		return nil
-	}
-	if n.Type == html.ElementNode && n.Data == tag {
-		return n
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if found := findFirstElement(c, tag); found != nil {
-			return found
+// findFirstElement returns the first descendant element with the given tag name.
+func findFirstElement(doc *html.Node, tag string) *html.Node {
+	return findNode(doc, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && n.Data == tag
+	})
+}
+
+// findNode returns the first descendant of doc, in document order, that matches.
+func findNode(doc *html.Node, match func(*html.Node) bool) *html.Node {
+	for n := range doc.Descendants() {
+		if match(n) {
+			return n
 		}
 	}
 	return nil
@@ -451,7 +513,7 @@ func renderTableMarkdown(tableNode *html.Node) string {
 			var cells []string
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				if c.Type == html.ElementNode && (c.Data == "td" || c.Data == "th") {
-					cells = append(cells, cellText(c))
+					cells = append(cells, nodeText(c))
 				}
 			}
 			if len(cells) > 0 {
@@ -510,22 +572,6 @@ func renderTableMarkdown(tableNode *html.Node) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// cellText extracts plain text from a <td> or <th> node, normalizing whitespace.
-func cellText(n *html.Node) string {
-	var sb strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.TextNode {
-			sb.WriteString(n.Data)
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(n)
-	return strings.Join(strings.Fields(sb.String()), " ")
-}
-
 // extractLinks walks the full DOM and extracts all <a href> links.
 // Includes links from nav, sidebar, footer — needed for BFS crawling.
 func extractLinks(doc *html.Node, base *url.URL) []string {
@@ -554,10 +600,11 @@ func extractLinks(doc *html.Node, base *url.URL) []string {
 	return links
 }
 
-// normalizeURL removes query-string parameters whose names appear in
-// stripParams (case-insensitive) and canonicalises the remaining query by
-// sorting keys. Dedup-friendly: two URLs that differ only in tracking
-// parameters or key order normalise to the same string.
+// normalizeURL lowercases the host, puts uma.es hosts on https, removes
+// query-string parameters whose names appear in stripParams (case-insensitive)
+// and canonicalises the remaining query by sorting keys. Dedup-friendly: two
+// URLs that differ only in host case, http vs https on UMA (which redirects
+// http to https), tracking parameters or key order normalise to the same string.
 //
 // Returns the raw input unchanged on parse failure so caller flow isn't
 // disrupted by malformed URLs that slip through resolveLink.
@@ -566,8 +613,12 @@ func normalizeURL(rawURL string, stripParams []string) string {
 	if err != nil {
 		return rawURL
 	}
+	u.Host = strings.ToLower(u.Host)
+	if host := u.Hostname(); host == "uma.es" || strings.HasSuffix(host, ".uma.es") {
+		u.Scheme = "https"
+	}
 	if u.RawQuery == "" {
-		return rawURL
+		return u.String()
 	}
 
 	strip := make(map[string]bool, len(stripParams))
@@ -583,15 +634,6 @@ func normalizeURL(rawURL string, stripParams []string) string {
 	}
 	u.RawQuery = q.Encode() // Encode() sorts keys alphabetically
 	return u.String()
-}
-
-// mustParseURL parses a URL or panics. For use in tests.
-func mustParseURL(rawURL string) *url.URL {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		panic(err)
-	}
-	return u
 }
 
 // resolveLink resolves a relative URL against a base URL.
@@ -621,13 +663,6 @@ func resolveLink(base *url.URL, href string) string {
 	}
 
 	return resolved.String()
-}
-
-// normalizeWhitespace collapses runs of whitespace into single spaces
-// and trims the result.
-func normalizeWhitespace(s string) string {
-	fields := strings.Fields(s)
-	return strings.Join(fields, " ")
 }
 
 // normalizeStructured collapses 3+ consecutive newlines to 2, trims trailing

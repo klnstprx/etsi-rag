@@ -46,8 +46,8 @@ func (s *Session) GetMessages() []openai.ChatCompletionMessageParamUnion {
 	return cp
 }
 
-// Touch updates the last-accessed timestamp.
-func (s *Session) Touch() {
+// touch updates the last-accessed timestamp.
+func (s *Session) touch() {
 	s.mu.Lock()
 	s.LastAccessed = time.Now()
 	s.mu.Unlock()
@@ -125,21 +125,14 @@ func (s *Store) Get(id string) *Session {
 	return session
 }
 
-// GetOrCreate returns existing session or creates new one.
-func (s *Store) GetOrCreate(id *string) (string, *Session) {
-	if id == nil || *id == "" {
-		newID := s.Create()
-		return newID, s.Get(newID)
+// GetOrCreate returns id when it names a live session, refreshing its
+// last-access time; otherwise it creates a session and returns the new ID.
+func (s *Store) GetOrCreate(id string) string {
+	if session := s.Get(id); session != nil {
+		session.touch()
+		return id
 	}
-
-	session := s.Get(*id)
-	if session == nil {
-		newID := s.Create()
-		return newID, s.Get(newID)
-	}
-
-	session.Touch()
-	return *id, session
+	return s.Create()
 }
 
 // CleanupExpired removes sessions that have exceeded their TTL.
@@ -154,11 +147,4 @@ func (s *Store) CleanupExpired() {
 			delete(s.sessions, id)
 		}
 	}
-}
-
-// Count returns the number of active sessions.
-func (s *Store) Count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.sessions)
 }

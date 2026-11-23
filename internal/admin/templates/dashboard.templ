@@ -9,7 +9,6 @@ type DashboardData struct {
 	DocCount      int
 	ChunkCount    int
 	ArtifactCount int
-	BackendCount  int
 	Backends      []config.BackendConfig
 	HasObjStore   bool
 	Issues        []diag.Issue
@@ -33,7 +32,7 @@ templ DashboardContent(data DashboardData) {
 		@StatCardInt("Documents", data.DocCount)
 		@StatCardInt("Chunks", data.ChunkCount)
 		@StatCardInt("Image Artifacts", data.ArtifactCount)
-		@StatCardInt("Backends", data.BackendCount)
+		@StatCardInt("Backends", len(data.Backends))
 	</dl>
 	<div class="mb-6">
 		@IssuesCard(data.Issues)

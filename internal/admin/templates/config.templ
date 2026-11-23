@@ -13,13 +13,12 @@ type ConfigSection struct {
 }
 
 type ConfigField struct {
-	Key         string
-	Label       string
-	Value       string
-	Type        string // "text" | "number" | "textarea" | "checkbox" | "enum" | "select" | "model"
-	Placeholder string
-	Hint        string   // optional help text rendered below the field
-	Options     []string // populated for Type "enum" / "select" / "model"
+	Key     string
+	Label   string
+	Value   string
+	Type    string   // "text" | "number" | "textarea" | "checkbox" | "enum" | "select" | "model"
+	Hint    string   // optional help text rendered below the field
+	Options []string // populated for Type "enum" / "select"
 }
 
 // sectionSlug turns a section name into a valid HTML id segment. The dotted
@@ -234,9 +233,9 @@ templ configInputCell(section string, field ConfigField) {
 		case "select":
 			@configBackendSelectCell(section, field)
 		case "model":
-			@FormModelSelect(field.Key, field.Label, field.Value, section, field.Options)
+			@FormModelSelect(field.Key, field.Label, field.Value, section)
 		case "textarea":
-			@FormTextarea(field.Key, field.Label, field.Value, field.Placeholder, field.Hint, 4)
+			@FormTextarea(field.Key, field.Label, field.Value, "", field.Hint, 4)
 		case "checkbox":
 			@configCheckboxCell(field)
 		case "enum":
@@ -253,12 +252,9 @@ templ configTextCell(field ConfigField) {
 			type={ fieldInputType(field.Type) }
 			name={ field.Key }
 			value={ field.Value }
-			placeholder={ field.Placeholder }
 			class="mt-1 block w-full rounded-md border border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm p-2"
 		/>
-		if field.Hint != "" {
-			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
-		}
+		@fieldHint(field.Hint)
 	</div>
 }
 
@@ -274,9 +270,7 @@ templ configCheckboxCell(field ConfigField) {
 			/>
 			<span>{ field.Label }</span>
 		</label>
-		if field.Hint != "" {
-			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
-		}
+		@fieldHint(field.Hint)
 	</div>
 }
 
@@ -291,9 +285,7 @@ templ configEnumCell(field ConfigField) {
 				<option value={ opt } selected?={ opt == field.Value }>{ opt }</option>
 			}
 		</select>
-		if field.Hint != "" {
-			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
-		}
+		@fieldHint(field.Hint)
 	</div>
 }
 
@@ -310,14 +302,6 @@ templ configBackendSelectCell(section string, field ConfigField) {
 				<option value={ opt } selected?={ opt == field.Value }>{ opt }</option>
 			}
 		</select>
-		if field.Hint != "" {
-			<p class="mt-1 text-xs text-gray-500">{ field.Hint }</p>
-		}
+		@fieldHint(field.Hint)
 	</div>
-}
-
-// ConfigBackendSelect retained for legacy callers — the page itself now uses
-// configBackendSelectCell which carries Hint support.
-templ ConfigBackendSelect(section string, field ConfigField) {
-	@configBackendSelectCell(section, field)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -54,27 +55,24 @@ func parseTags(formValue string) []string {
 }
 
 func (h *Handler) crawlerData(ctx context.Context) templates.CrawlerData {
-	running := h.crawler != nil && h.crawler.IsRunning()
-
 	docCount, _ := h.store.CountDocuments(ctx)
-	var sources []domain.CrawlSource
-	if h.sources != nil {
-		sources = h.sources.Snapshot()
-	}
 	runs, _ := h.store.ListCrawlRuns(ctx, 10)
-
-	var progress *templates.ProgressSnapshot
-	if running && h.crawler != nil {
-		progress = progressSnapshotFrom(h.crawler.Progress())
-	}
-
+	running, progress := h.crawlProgress()
 	return templates.CrawlerData{
 		Running:  running,
 		DocCount: docCount,
-		Sources:  sources,
+		Sources:  h.snapshotSources(),
 		Runs:     runs,
 		Progress: progress,
 	}
+}
+
+// crawlProgress reports whether a crawl is running and, if so, its progress.
+func (h *Handler) crawlProgress() (bool, *templates.ProgressSnapshot) {
+	if h.crawler == nil || !h.crawler.IsRunning() {
+		return false, nil
+	}
+	return true, progressSnapshotFrom(h.crawler.Progress())
 }
 
 // CrawlerPage handles GET /admin/crawler.
@@ -118,18 +116,7 @@ func (h *Handler) CrawlerRun(w http.ResponseWriter, r *http.Request) {
 	if h.crawlerGuard(w, r, "start crawl") {
 		return
 	}
-
-	go func() {
-		runID, err := h.crawler.RunAll(h.baseCtx)
-		if err != nil {
-			h.logger.Error().Err(err).Int64("run_id", runID).Msg("crawl failed")
-		} else {
-			h.logger.Info().Int64("run_id", runID).Msg("crawl completed")
-		}
-	}()
-
-	h.logger.Info().Msg("crawler started")
-	h.renderCrawler(w, r, "Crawl started", "success")
+	h.startRun(w, r, "crawl", "Crawl started", h.crawler.RunAll)
 }
 
 // CrawlerReprocess handles POST /admin/crawler/reprocess.
@@ -137,18 +124,23 @@ func (h *Handler) CrawlerReprocess(w http.ResponseWriter, r *http.Request) {
 	if h.crawlerGuard(w, r, "reprocess") {
 		return
 	}
+	h.startRun(w, r, "reprocess", "Reprocess started", h.crawler.Reprocess)
+}
 
+// startRun launches run on the server-lifetime context, since it outlives
+// the request, and replies with the refreshed crawler panel.
+func (h *Handler) startRun(w http.ResponseWriter, r *http.Request, name, toast string, run func(context.Context) (int64, error)) {
 	go func() {
-		runID, err := h.crawler.Reprocess(h.baseCtx)
+		runID, err := run(h.baseCtx)
 		if err != nil {
-			h.logger.Error().Err(err).Int64("run_id", runID).Msg("reprocess failed")
+			h.logger.Error().Err(err).Int64("run_id", runID).Msg(name + " failed")
 		} else {
-			h.logger.Info().Int64("run_id", runID).Msg("reprocess completed")
+			h.logger.Info().Int64("run_id", runID).Msg(name + " completed")
 		}
 	}()
 
-	h.logger.Info().Msg("reprocess started")
-	h.renderCrawler(w, r, "Reprocess started", "success")
+	h.logger.Info().Msg(name + " started")
+	h.renderCrawler(w, r, toast, "success")
 }
 
 // CrawlerStop handles DELETE /admin/crawler/run.
@@ -161,22 +153,13 @@ func (h *Handler) CrawlerStop(w http.ResponseWriter, r *http.Request) {
 
 // CrawlerStatus handles GET /admin/crawler/status (polled by HTMX).
 func (h *Handler) CrawlerStatus(w http.ResponseWriter, r *http.Request) {
-	running := h.crawler != nil && h.crawler.IsRunning()
-
-	var progress *templates.ProgressSnapshot
-	if running && h.crawler != nil {
-		progress = progressSnapshotFrom(h.crawler.Progress())
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.CrawlerStatusFragment(running, progress).Render(r.Context(), w)
+	writeHTML(w, r, templates.CrawlerStatusFragment(h.crawlProgress()))
 }
 
 // SourceCreate handles POST /admin/crawler/sources. Appends a new entry to
 // sources.toml; the next crawl run picks up the change without a restart.
 func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
-	if h.sources == nil {
-		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
+	if !h.sourcesReady(w) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -184,15 +167,7 @@ func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	src := domain.CrawlSource{
-		Key:         r.FormValue("key"),
-		Name:        r.FormValue("name"),
-		SeedURL:     r.FormValue("seed_url"),
-		Description: strings.TrimSpace(r.FormValue("description")),
-		Tags:        parseTags(r.FormValue("tags")),
-		Enabled:     r.FormValue("enabled") == "true",
-	}
-
+	src := sourceFromForm(r, r.FormValue("key"))
 	current := h.sources.Snapshot()
 	for _, existing := range current {
 		if existing.Key == src.Key {
@@ -211,39 +186,22 @@ func (h *Handler) SourceCreate(w http.ResponseWriter, r *http.Request) {
 
 // SourceUpdate handles PUT /admin/crawler/sources/{key}.
 func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	if err := validateSourceKey(key); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	key, ok := h.sourceKey(w, r)
+	if !ok {
 		return
 	}
-	if h.sources == nil {
-		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
-		return
-	}
-
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
 
 	current := h.sources.Snapshot()
-	idx := -1
-	for i, s := range current {
-		if s.Key == key {
-			idx = i
-			break
-		}
-	}
+	idx := slices.IndexFunc(current, func(s domain.CrawlSource) bool { return s.Key == key })
 	if idx < 0 {
 		http.Error(w, "source not found", http.StatusNotFound)
 		return
 	}
-
-	current[idx].Name = r.FormValue("name")
-	current[idx].SeedURL = r.FormValue("seed_url")
-	current[idx].Description = strings.TrimSpace(r.FormValue("description"))
-	current[idx].Tags = parseTags(r.FormValue("tags"))
-	current[idx].Enabled = r.FormValue("enabled") == "true"
+	current[idx] = sourceFromForm(r, key)
 
 	if err := h.sources.Replace(current); err != nil {
 		h.sourceError(w, r, "update source", err)
@@ -254,13 +212,8 @@ func (h *Handler) SourceUpdate(w http.ResponseWriter, r *http.Request) {
 
 // SourceDelete handles DELETE /admin/crawler/sources/{key}.
 func (h *Handler) SourceDelete(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	if err := validateSourceKey(key); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if h.sources == nil {
-		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
+	key, ok := h.sourceKey(w, r)
+	if !ok {
 		return
 	}
 
@@ -295,11 +248,42 @@ func (h *Handler) SourceDelete(w http.ResponseWriter, r *http.Request) {
 	h.renderCrawler(w, r, msg, "success")
 }
 
+// sourceKey returns the validated {key} URL parameter, replying 400 or 503
+// and returning false when the key is invalid or no registry is wired.
+func (h *Handler) sourceKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key := chi.URLParam(r, "key")
+	if err := validateSourceKey(key); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	return key, h.sourcesReady(w)
+}
+
+// sourcesReady replies 503 and returns false when no registry is wired.
+func (h *Handler) sourcesReady(w http.ResponseWriter) bool {
+	if h.sources == nil {
+		http.Error(w, "sources registry not configured", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
+}
+
+// sourceFromForm builds the source with the given key from the create/edit form.
+func sourceFromForm(r *http.Request, key string) domain.CrawlSource {
+	return domain.CrawlSource{
+		Key:         key,
+		Name:        r.FormValue("name"),
+		SeedURL:     r.FormValue("seed_url"),
+		Description: strings.TrimSpace(r.FormValue("description")),
+		Tags:        parseTags(r.FormValue("tags")),
+		Enabled:     r.FormValue("enabled") == "true",
+	}
+}
+
 // sourceError logs and returns a toast for a failed source operation.
 func (h *Handler) sourceError(w http.ResponseWriter, r *http.Request, op string, err error) {
 	h.logger.Error().Err(err).Str("op", op).Msg("source operation failed")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.Toast(fmt.Sprintf("Failed to %s: %s", op, err.Error()), "error").Render(r.Context(), w)
+	writeToast(w, r, fmt.Sprintf("Failed to %s: %s", op, err.Error()), "error")
 }
 
 // PurgeStale handles POST /admin/crawler/purge.
@@ -307,23 +291,16 @@ func (h *Handler) PurgeStale(w http.ResponseWriter, r *http.Request) {
 	count, err := h.store.PurgeStaleDocuments(r.Context())
 	if err != nil {
 		h.logger.Error().Err(err).Msg("purging stale documents")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		templates.Toast("Purge failed: "+err.Error(), "error").Render(r.Context(), w)
+		writeToast(w, r, "Purge failed: "+err.Error(), "error")
 		return
 	}
 
 	h.renderCrawler(w, r, fmt.Sprintf("Purged %d stale documents", count), "success")
 }
 
-// renderCrawler writes the refreshed crawler content fragment plus an optional toast.
-// If msg is empty, no toast is rendered.
+// renderCrawler writes the refreshed crawler content fragment plus a toast.
 func (h *Handler) renderCrawler(w http.ResponseWriter, r *http.Request, msg, level string) {
-	data := h.crawlerData(r.Context())
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.CrawlerContent(data).Render(r.Context(), w)
-	if msg != "" {
-		templates.Toast(msg, level).Render(r.Context(), w)
-	}
+	writeHTML(w, r, templates.CrawlerContent(h.crawlerData(r.Context())), templates.Toast(msg, level))
 }
 
 // progressSnapshotFrom maps a crawler progress snapshot to its templates-package twin.

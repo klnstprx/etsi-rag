@@ -6,6 +6,7 @@ func TestIsLowQualityContent(t *testing.T) {
 	// Default rejection patterns shipped in applyDefaults; duplicated here so
 	// the filter unit test stays decoupled from config.
 	defaultPatterns := []string{
+		"no ha sido posible cargar esta página",
 		"página no encontrada",
 		"error 404",
 		"página en construcción",
@@ -191,7 +192,7 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-func TestSubjectCode(t *testing.T) {
+func TestSubjectKey(t *testing.T) {
 	tests := []struct {
 		name string
 		url  string
@@ -201,29 +202,35 @@ func TestSubjectCode(t *testing.T) {
 		{
 			name: "two-segment subject URL",
 			url:  "https://www.uma.es/centers/subject/5393/55154",
-			want: "55154",
+			want: "5393/55154",
 		},
 		{
+			// Each plan's page links its own guía PDF, so plans must not collapse.
 			name: "different plan same code",
 			url:  "https://www.uma.es/centers/subject/5296/55154",
-			want: "55154",
+			want: "5296/55154",
 		},
 		{
 			name: "trailing slash",
 			url:  "https://www.uma.es/centers/subject/5381/55772/",
-			want: "55772",
+			want: "5381/55772",
 		},
 
 		// Extended /centers/subject/{center}/{plan}/{code}/{year?} pattern
 		{
 			name: "three-segment with center",
 			url:  "https://www.uma.es/centers/subject/etsi-informatica/5310/51003/212",
-			want: "51003",
+			want: "5310/51003",
 		},
 		{
-			name: "three-segment trailing slash",
-			url:  "https://www.uma.es/centers/subject/etsi-informatica/5102/51003/210",
-			want: "51003",
+			name: "year variant shares the short form's key",
+			url:  "https://www.uma.es/centers/subject/etsi-informatica/5102/51003/210/",
+			want: "5102/51003",
+		},
+		{
+			name: "short form of the same plan and code",
+			url:  "https://www.uma.es/centers/subject/5102/51003",
+			want: "5102/51003",
 		},
 
 		// Non-subject URLs return empty
@@ -246,9 +253,9 @@ func TestSubjectCode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := subjectCode(tt.url)
+			got := subjectKey(tt.url)
 			if got != tt.want {
-				t.Errorf("subjectCode(%q) = %q, want %q", tt.url, got, tt.want)
+				t.Errorf("subjectKey(%q) = %q, want %q", tt.url, got, tt.want)
 			}
 		})
 	}

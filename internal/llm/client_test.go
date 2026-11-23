@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -316,6 +317,38 @@ func TestEmbed_RequestBody(t *testing.T) {
 	}
 }
 
+func TestEmbed_StalledBackendTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release) // runs before srv.Close, which waits for handlers
+
+	client := NewEmbedClient(EmbedClientConfig{
+		BaseURL:        srv.URL,
+		Model:          "test-model",
+		MaxRetries:     -1,
+		RequestTimeout: 100 * time.Millisecond,
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Embed(context.Background(), "text")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a stalled backend")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Embed still blocked 5s into a stalled request, want it to give up after the request timeout")
+	}
+}
+
 // --- EmbedBatch ---
 
 func TestEmbedBatch(t *testing.T) {
@@ -561,254 +594,6 @@ func TestEmbedBatch_SubBatchSingleBatch(t *testing.T) {
 	}
 }
 
-// --- Chat ---
-
-func TestChat(t *testing.T) {
-	tests := []struct {
-		name    string
-		handler http.HandlerFunc
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "success",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(chatResponse("Hello!"))
-			},
-			want: "Hello!",
-		},
-		{
-			name: "empty choices",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"id":      "chatcmpl-test",
-					"object":  "chat.completion",
-					"created": 1234567890,
-					"model":   "test",
-					"choices": []any{},
-					"usage":   map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-				})
-			},
-			wantErr: true,
-		},
-		{
-			name: "server error",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]any{
-					"error": map[string]any{"message": "overloaded", "type": "server_error"},
-				})
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(tt.handler)
-			defer srv.Close()
-
-			client := newTestChatClient(srv.URL)
-			msgs := []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("Hi"),
-					},
-				}},
-			}
-
-			resp, err := client.Chat(context.Background(), msgs)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if resp != tt.want {
-				t.Errorf("response = %q, want %q", resp, tt.want)
-			}
-		})
-	}
-}
-
-func TestChat_RequestBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var req map[string]any
-		json.Unmarshal(body, &req)
-
-		if req["model"] != "test-model" {
-			t.Errorf("model = %v, want test-model", req["model"])
-		}
-		if r.URL.Path != "/chat/completions" {
-			t.Errorf("path = %s, want /chat/completions", r.URL.Path)
-		}
-		// max_completion_tokens should be 100 (from newTestChatClient);
-		// the deprecated max_tokens must not be sent — OpenAI rejects it
-		// on newer models ("use 'max_completion_tokens' instead").
-		if mt, ok := req["max_completion_tokens"].(float64); !ok || int64(mt) != 100 {
-			t.Errorf("max_completion_tokens = %v, want 100", req["max_completion_tokens"])
-		}
-		if _, present := req["max_tokens"]; present {
-			t.Errorf("max_tokens = %v, want absent", req["max_tokens"])
-		}
-		// temperature should be 0.5
-		if temp, ok := req["temperature"].(float64); !ok || temp != 0.5 {
-			t.Errorf("temperature = %v, want 0.5", req["temperature"])
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(chatResponse("ok"))
-	}))
-	defer srv.Close()
-
-	client := newTestChatClient(srv.URL)
-	msgs := []openai.ChatCompletionMessageParamUnion{
-		{OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfString: openai.String("test"),
-			},
-		}},
-	}
-	_, err := client.Chat(context.Background(), msgs)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// --- ChatStream ---
-
-func TestChatStream(t *testing.T) {
-	tests := []struct {
-		name    string
-		handler http.HandlerFunc
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "multiple chunks",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("Cache-Control", "no-cache")
-				flusher := w.(http.Flusher)
-
-				fmt.Fprint(w, sseChunk("Hello", nil))
-				flusher.Flush()
-				fmt.Fprint(w, sseChunk(" world", nil))
-				flusher.Flush()
-				fmt.Fprint(w, sseChunk("", ptr("stop")))
-				flusher.Flush()
-				fmt.Fprint(w, "data: [DONE]\n\n")
-				flusher.Flush()
-			},
-			want: "Hello world",
-		},
-		{
-			name: "server error",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]any{
-					"error": map[string]any{"message": "fail", "type": "server_error"},
-				})
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty stream",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprint(w, "data: [DONE]\n\n")
-			},
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(tt.handler)
-			defer srv.Close()
-
-			client := newTestChatClient(srv.URL)
-			msgs := []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("Hi"),
-					},
-				}},
-			}
-
-			tokens, errc := client.ChatStream(context.Background(), msgs)
-
-			var result string
-			for tok := range tokens {
-				result += tok
-			}
-
-			if err := <-errc; err != nil {
-				if !tt.wantErr {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				return
-			}
-			if tt.wantErr {
-				t.Fatal("expected error, got nil")
-			}
-			if result != tt.want {
-				t.Errorf("result = %q, want %q", result, tt.want)
-			}
-		})
-	}
-}
-
-func TestChatStream_ContextCancellation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		flusher := w.(http.Flusher)
-
-		// Send one chunk, then wait (simulating a slow server)
-		fmt.Fprint(w, sseChunk("start", nil))
-		flusher.Flush()
-
-		// Block until the client disconnects
-		<-r.Context().Done()
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	client := newTestChatClient(srv.URL)
-	msgs := []openai.ChatCompletionMessageParamUnion{
-		{OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfString: openai.String("Hi"),
-			},
-		}},
-	}
-
-	tokens, errc := client.ChatStream(ctx, msgs)
-
-	// Read first token then cancel
-	tok := <-tokens
-	if tok != "start" {
-		t.Errorf("first token = %q, want %q", tok, "start")
-	}
-	cancel()
-
-	// Drain remaining tokens
-	for range tokens {
-	}
-
-	// Should get a context-related error
-	if err := <-errc; err == nil {
-		t.Error("expected error after cancellation, got nil")
-	}
-}
-
 // --- ChatWithTools ---
 
 func TestChatWithTools(t *testing.T) {
@@ -988,22 +773,160 @@ func TestEmbedBatch_ShortResponseSentinel(t *testing.T) {
 
 func TestChatWithTools_RequestBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var req map[string]any
-		json.Unmarshal(body, &req)
-
-		tools, ok := req["tools"].([]any)
-		if !ok || len(tools) == 0 {
-			t.Error("tools not sent in request")
-		}
-
+		assertChatRequest(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(chatResponse("no tools needed"))
 	}))
 	defer srv.Close()
 
+	_, err := newTestChatClient(srv.URL).ChatWithTools(context.Background(), userMessages("test"), testTools())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- ChatStreamWithTools ---
+
+func TestChatStreamWithTools(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "multiple chunks",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				flusher := w.(http.Flusher)
+
+				fmt.Fprint(w, sseChunk("Hello", nil))
+				flusher.Flush()
+				fmt.Fprint(w, sseChunk(" world", nil))
+				flusher.Flush()
+				fmt.Fprint(w, sseChunk("", ptr("stop")))
+				flusher.Flush()
+				fmt.Fprint(w, "data: [DONE]\n\n")
+				flusher.Flush()
+			},
+			want: "Hello world",
+		},
+		{
+			name: "server error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"message": "fail", "type": "server_error"},
+				})
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty stream",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, "data: [DONE]\n\n")
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(tt.handler)
+			defer srv.Close()
+
+			client := newTestChatClient(srv.URL)
+			tokens, results := client.ChatStreamWithTools(context.Background(), userMessages("Hi"), nil)
+
+			var streamed string
+			for tok := range tokens {
+				streamed += tok
+			}
+
+			res := <-results
+			if res.Err != nil {
+				if !tt.wantErr {
+					t.Fatalf("unexpected error: %v", res.Err)
+				}
+				return
+			}
+			if tt.wantErr {
+				t.Fatal("expected error, got nil")
+			}
+			if streamed != tt.want {
+				t.Errorf("streamed = %q, want %q", streamed, tt.want)
+			}
+		})
+	}
+}
+
+func TestChatStreamWithTools_ContextCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		// Send one chunk, then wait (simulating a slow server)
+		fmt.Fprint(w, sseChunk("start", nil))
+		flusher.Flush()
+
+		// Block until the client disconnects
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
 	client := newTestChatClient(srv.URL)
-	tools := []openai.ChatCompletionToolParam{
+
+	tokens, results := client.ChatStreamWithTools(ctx, userMessages("Hi"), nil)
+
+	// Read first token then cancel
+	tok := <-tokens
+	if tok != "start" {
+		t.Errorf("first token = %q, want %q", tok, "start")
+	}
+	cancel()
+
+	// Drain remaining tokens
+	for range tokens {
+	}
+
+	// Should get a context-related error
+	if res := <-results; res.Err == nil {
+		t.Error("expected error after cancellation, got nil")
+	}
+}
+
+func TestChatStreamWithTools_RequestBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertChatRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	tokens, results := newTestChatClient(srv.URL).ChatStreamWithTools(context.Background(), userMessages("test"), testTools())
+	for range tokens {
+	}
+	if res := <-results; res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+}
+
+// userMessages wraps text in a single user message.
+func userMessages(text string) []openai.ChatCompletionMessageParamUnion {
+	return []openai.ChatCompletionMessageParamUnion{
+		{OfUser: &openai.ChatCompletionUserMessageParam{
+			Content: openai.ChatCompletionUserMessageParamContentUnion{
+				OfString: openai.String(text),
+			},
+		}},
+	}
+}
+
+func testTools() []openai.ChatCompletionToolParam {
+	return []openai.ChatCompletionToolParam{
 		{
 			Function: openai.FunctionDefinitionParam{
 				Name: "test_tool",
@@ -1014,17 +937,37 @@ func TestChatWithTools_RequestBody(t *testing.T) {
 			},
 		},
 	}
-	msgs := []openai.ChatCompletionMessageParamUnion{
-		{OfUser: &openai.ChatCompletionUserMessageParam{
-			Content: openai.ChatCompletionUserMessageParamContentUnion{
-				OfString: openai.String("test"),
-			},
-		}},
-	}
+}
 
-	_, err := client.ChatWithTools(context.Background(), msgs, tools)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// assertChatRequest checks the sampling fields and tools newTestChatClient
+// sends to /chat/completions, shared by the blocking and streaming calls.
+func assertChatRequest(t *testing.T, r *http.Request) {
+	t.Helper()
+	body, _ := io.ReadAll(r.Body)
+	var req map[string]any
+	json.Unmarshal(body, &req)
+
+	if req["model"] != "test-model" {
+		t.Errorf("model = %v, want test-model", req["model"])
+	}
+	if r.URL.Path != "/chat/completions" {
+		t.Errorf("path = %s, want /chat/completions", r.URL.Path)
+	}
+	// max_completion_tokens should be 100 (from newTestChatClient);
+	// the deprecated max_tokens must not be sent — OpenAI rejects it
+	// on newer models ("use 'max_completion_tokens' instead").
+	if mt, ok := req["max_completion_tokens"].(float64); !ok || int64(mt) != 100 {
+		t.Errorf("max_completion_tokens = %v, want 100", req["max_completion_tokens"])
+	}
+	if _, present := req["max_tokens"]; present {
+		t.Errorf("max_tokens = %v, want absent", req["max_tokens"])
+	}
+	// temperature should be 0.5
+	if temp, ok := req["temperature"].(float64); !ok || temp != 0.5 {
+		t.Errorf("temperature = %v, want 0.5", req["temperature"])
+	}
+	if tools, ok := req["tools"].([]any); !ok || len(tools) == 0 {
+		t.Error("tools not sent in request")
 	}
 }
 

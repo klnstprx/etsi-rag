@@ -1,9 +1,14 @@
 package rag
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
@@ -113,7 +118,7 @@ func setupDenseRetriever(t *testing.T, topK int) (*Retriever, *store.SQLiteStore
 func TestRetrieve_RerankInvertsOrder(t *testing.T) {
 	r, _ := setupDenseRetriever(t, 5)
 	rr := &reverseReranker{}
-	r.SetReranker(rr, 5)
+	r.SetReranker(RerankerSetup{Reranker: rr, Pool: 5})
 
 	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
@@ -142,7 +147,7 @@ func TestRetrieve_RerankInvertsOrder(t *testing.T) {
 func TestRetrieve_RerankErrorFallsThrough(t *testing.T) {
 	r, _ := setupDenseRetriever(t, 3)
 	er := &erroringReranker{}
-	r.SetReranker(er, 5)
+	r.SetReranker(RerankerSetup{Reranker: er, Pool: 5})
 
 	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
@@ -182,7 +187,7 @@ func TestRetrieve_RerankOverFetchesCandidatePool(t *testing.T) {
 	// not 2, so the cross-encoder has room to swap.
 	r, _ := setupDenseRetriever(t, 2)
 	rec := &recordingReranker{}
-	r.SetReranker(rec, 5)
+	r.SetReranker(RerankerSetup{Reranker: rec, Pool: 5})
 
 	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
@@ -203,7 +208,7 @@ func TestRetrieve_RerankRespectsTopKWhenPoolSmaller(t *testing.T) {
 	// length.
 	r, _ := setupDenseRetriever(t, 5)
 	rec := &recordingReranker{}
-	r.SetReranker(rec, 2) // poolSize < topK
+	r.SetReranker(RerankerSetup{Reranker: rec, Pool: 2}) // poolSize < topK
 
 	got, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
@@ -223,7 +228,7 @@ func TestRetrieve_RerankWithHybridUsesPoolDepth(t *testing.T) {
 	// actually sees the bigger pool.
 	r, _ := setupHybridRetriever(t)
 	rec := &recordingReranker{}
-	r.SetReranker(rec, 50)
+	r.SetReranker(RerankerSetup{Reranker: rec, Pool: 50})
 
 	_, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{})
 	if err != nil {
@@ -242,12 +247,93 @@ func TestRetrieve_RerankSingleCandidateSkipsReranker(t *testing.T) {
 	// short-circuit rather than spending a network round-trip.
 	r, _ := setupDenseRetriever(t, 1)
 	rr := &reverseReranker{}
-	r.SetReranker(rr, 1)
+	r.SetReranker(RerankerSetup{Reranker: rr, Pool: 1})
 
 	if _, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{}); err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
 	if rr.calls != 0 {
 		t.Errorf("reranker should not be called with 1 candidate, got calls = %d", rr.calls)
+	}
+}
+
+// termReranker scores a doc 1 when it contains term and 0 otherwise, like a
+// cross-encoder that can only judge the text it is sent.
+type termReranker struct{ term string }
+
+func (t termReranker) Rerank(_ context.Context, _ string, docs []string, _ int) ([]llm.RerankResult, error) {
+	out := make([]llm.RerankResult, len(docs))
+	for i, d := range docs {
+		out[i] = llm.RerankResult{Index: i}
+		if strings.Contains(d, t.term) {
+			out[i].Score = 1
+		}
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Score > out[b].Score })
+	return out, nil
+}
+
+// setupTitledRetriever seeds two documents whose chunks never name their
+// document: the dense leader is from "Otro", the runner-up from a degree title.
+func setupTitledRetriever(t *testing.T) *Retriever {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("opening db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	s := store.NewSQLiteStore(db, func() int { return 4 })
+	for _, d := range []struct {
+		id, title string
+		vec       []float32
+	}{
+		{"doc-other", "Otro", []float32{1, 0, 0, 0}},
+		{"doc-degree", "Grado en Ingeniería del Software", []float32{0.8, 0.6, 0, 0}},
+	} {
+		if err := s.CreateDocument(ctx, &domain.Document{ID: d.id, Title: d.title, Content: "x", Language: domain.LanguageES}); err != nil {
+			t.Fatalf("create doc: %v", err)
+		}
+		chunk := domain.Chunk{Content: "Plazas de nuevo ingreso: 150", SectionTitle: "Datos Generales"}
+		if err := s.CreateChunks(ctx, d.id, []domain.Chunk{chunk}, [][]float32{d.vec}); err != nil {
+			t.Fatalf("create chunks: %v", err)
+		}
+	}
+	return NewRetriever(s, llm.NewEmbedderHandle(fixedEmbedder{vec: []float32{1, 0, 0, 0}}), &testutil.MockCounter{},
+		config.RetrievalConfig{TopK: 1, MaxContextTokens: 1024, RetrievalMode: "dense"})
+}
+
+func TestRetrieve_RerankSeesDocumentTitle(t *testing.T) {
+	for _, tc := range []struct {
+		titleInText bool
+		want        string
+	}{
+		{true, "doc-degree"},
+		{false, "doc-other"},
+	} {
+		r := setupTitledRetriever(t)
+		r.SetReranker(RerankerSetup{Reranker: termReranker{term: "Ingeniería del Software"}, Pool: 2, TitleInText: tc.titleInText})
+		got, err := r.Retrieve(context.Background(), "plazas ingeniería del software", RetrieveOpts{})
+		if err != nil {
+			t.Fatalf("Retrieve: %v", err)
+		}
+		if got.Chunks[0].Chunk.DocID != tc.want {
+			t.Errorf("TitleInText=%v: top document = %s, want %s", tc.titleInText, got.Chunks[0].Chunk.DocID, tc.want)
+		}
+	}
+}
+
+func TestRetrieve_RerankFailureIsLogged(t *testing.T) {
+	r, _ := setupDenseRetriever(t, 3)
+	var logs bytes.Buffer
+	r.SetReranker(RerankerSetup{Reranker: &erroringReranker{}, Pool: 5, Logger: zerolog.New(&logs)})
+	if _, err := r.Retrieve(context.Background(), "anything", RetrieveOpts{}); err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if !strings.Contains(logs.String(), `"level":"warn"`) || !strings.Contains(logs.String(), "rerank backend down") {
+		t.Errorf("rerank failure not logged as a warning; log = %q", logs.String())
 	}
 }

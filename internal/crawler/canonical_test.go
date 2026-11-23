@@ -72,6 +72,34 @@ func TestPreferCanonical(t *testing.T) {
 			want:      false,
 		},
 
+		// Same path: the bare URL beats a query variant.
+		{
+			name:      "bare URL beats its language-switcher variant",
+			candidate: "https://www.uma.es/etsi-informatica/info/1/buddy-program/",
+			existing:  "https://www.uma.es/etsi-informatica/info/1/buddy-program/?set_language=es",
+			want:      true,
+		},
+		{
+			name:      "query variant does not replace the bare URL",
+			candidate: "https://www.uma.es/etsi-informatica/info/1/buddy-program/?set_language=es",
+			existing:  "https://www.uma.es/etsi-informatica/info/1/buddy-program/",
+			want:      false,
+		},
+
+		// Same path: https beats the http URL an older crawl recorded.
+		{
+			name:      "https beats http",
+			candidate: "https://www.uma.es/etsi-informatica/info/72589/tfg-memoria-y-defensa/",
+			existing:  "http://www.uma.es/etsi-informatica/info/72589/tfg-memoria-y-defensa/",
+			want:      true,
+		},
+		{
+			name:      "http does not replace https",
+			candidate: "http://www.uma.es/etsi-informatica/info/72589/tfg-memoria-y-defensa/",
+			existing:  "https://www.uma.es/etsi-informatica/info/72589/tfg-memoria-y-defensa/",
+			want:      false,
+		},
+
 		// Non-program seed shape: /etsi-informatica/info/.../detail beating /cms/menu inside it.
 		{
 			name:      "etsi-informatica info prefers shorter path",

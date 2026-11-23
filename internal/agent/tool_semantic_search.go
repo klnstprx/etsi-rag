@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/openai/openai-go"
@@ -18,28 +17,28 @@ import (
 // When configured with a Store, it also resolves [[image:ref]] markers in
 // retrieved chunks to attached image artifacts (Images field on ToolResult).
 type SemanticSearchTool struct {
-	Retriever *rag.Retriever
+	retriever *rag.Retriever
 
-	// Store provides artifact lookup for image markers; optional. Without it
+	// store provides artifact lookup for image markers; optional. Without it
 	// the tool returns text-only.
-	Store *store.SQLiteStore
+	store *store.SQLiteStore
 
-	// MaxImages caps the number of image_url parts the agent attaches per
+	// maxImages caps the number of image_url parts the agent attaches per
 	// tool call. <= 0 disables image attachment.
-	MaxImages int
+	maxImages int
 }
 
 // NewSemanticSearchTool constructs a semantic_search tool backed by the given
 // retriever.
 func NewSemanticSearchTool(r *rag.Retriever) *SemanticSearchTool {
-	return &SemanticSearchTool{Retriever: r}
+	return &SemanticSearchTool{retriever: r}
 }
 
 // SetStore enables image-marker resolution. Pass nil to disable.
-func (t *SemanticSearchTool) SetStore(s *store.SQLiteStore) { t.Store = s }
+func (t *SemanticSearchTool) SetStore(s *store.SQLiteStore) { t.store = s }
 
 // SetMaxImages caps how many image artifacts a single tool call attaches.
-func (t *SemanticSearchTool) SetMaxImages(n int) { t.MaxImages = n }
+func (t *SemanticSearchTool) SetMaxImages(n int) { t.maxImages = n }
 
 type semanticSearchArgs struct {
 	Query string `json:"query"`
@@ -74,8 +73,11 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return ToolResult{}, fmt.Errorf("parsing args: %w", err)
 	}
+	if err := validTopK(args.TopK); err != nil {
+		return ToolResult{}, err
+	}
 
-	results, err := t.Retriever.Retrieve(ctx, args.Query, rag.RetrieveOpts{
+	results, err := t.retriever.Retrieve(ctx, args.Query, rag.RetrieveOpts{
 		TopK: args.TopK,
 	})
 	if err != nil {
@@ -90,7 +92,7 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, argsJSON string) (Tool
 	// the budget is hit, and returns an empty context if even the top-1 chunk
 	// does not fit. Its output is our authoritative result — do not fall back
 	// to an unbounded formatter.
-	ragContext, err := t.Retriever.BuildContext(ctx, results)
+	ragContext, err := t.retriever.BuildContext(ctx, results)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("building context: %w", err)
 	}
@@ -135,9 +137,9 @@ func dedupCitations(refs []domain.SourceReference) []Citation {
 // collectImages walks retrieved chunks' ImageRefs (stamped by the chunker at
 // ingest time), looks up each (doc_id, ref) pair in the store, and builds
 // path-only URLs that the agent can absolutize at injection time. Duplicates
-// (same doc_id+ref) are deduped; total count is capped by MaxImages.
+// (same doc_id+ref) are deduped; total count is capped by maxImages.
 func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.RetrievalResult) []ImageRef {
-	if t.Store == nil || t.MaxImages <= 0 {
+	if t.store == nil || t.maxImages <= 0 {
 		return nil
 	}
 
@@ -153,15 +155,10 @@ func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.Ret
 			}
 			picked[k] = struct{}{}
 
-			art, err := t.Store.GetArtifact(ctx, sc.Chunk.DocID, ref)
+			art, err := t.store.Artifact(ctx, sc.Chunk.DocID, ref)
 			if err != nil {
-				if !errors.Is(err, store.ErrNotFound) {
-					// Storage error is not fatal — log via the result text isn't
-					// useful, the agent layer just sees fewer images.
-					continue
-				}
-				// Ref without artifact: pdftoppm probably failed for this
-				// page, or backfill hasn't run yet. Skip silently.
+				// A missing artifact (pdftoppm failed, backfill pending) or a
+				// storage error only costs this image, never the search.
 				continue
 			}
 
@@ -170,7 +167,7 @@ func (t *SemanticSearchTool) collectImages(ctx context.Context, results *rag.Ret
 				Ref:   ref,
 				URL:   "/v1/artifacts/" + art.PublicToken + ".png",
 			})
-			if len(out) >= t.MaxImages {
+			if len(out) >= t.maxImages {
 				return out
 			}
 		}

@@ -38,6 +38,7 @@ func Migrate(db *sql.DB) error {
 			chunk_index INTEGER NOT NULL,
 			section_title TEXT NOT NULL DEFAULT '',
 			image_refs TEXT NOT NULL DEFAULT '',
+			search_prefix TEXT NOT NULL DEFAULT '',
 			UNIQUE(doc_id, chunk_index)
 		);
 
@@ -102,10 +103,11 @@ func Migrate(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_artifacts_doc ON document_artifacts(doc_id);
 
-		-- FTS5 keyword index over (section_title || ' ' || content). The
-		-- chunker stores plain body in chunks.content and the heading
-		-- breadcrumb in chunks.section_title; the trigger concatenates them
-		-- so BM25 sees heading words alongside the body. External-content
+		-- FTS5 keyword index over search_prefix, section_title and content
+		-- (see ftsTriggers). The chunker stores plain body in chunks.content
+		-- and the heading breadcrumb in chunks.section_title; the triggers
+		-- concatenate them so BM25 sees title and heading words alongside
+		-- the body. External-content
 		-- table (content='chunks', content_rowid='id') so the index
 		-- references rows in the chunks table without duplicating bytes;
 		-- snippet()/highlight() are not used (only bm25()), so the
@@ -118,34 +120,67 @@ func Migrate(db *sql.DB) error {
 			tokenize='unicode61 remove_diacritics 2'
 		);
 
-		-- Triggers keep chunks_fts in sync with chunks. The indexed value
-		-- prepends section_title onto content so heading words contribute
-		-- to BM25 scoring; section_title is coalesced because rows from
-		-- the heading-free fallback path leave it empty.
-		CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-			INSERT INTO chunks_fts(rowid, content)
-			VALUES (new.id, coalesce(new.section_title, '') || ' ' || new.content);
-		END;
-		CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content)
-			VALUES('delete', old.id, coalesce(old.section_title, '') || ' ' || old.content);
-		END;
-		CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content)
-			VALUES('delete', old.id, coalesce(old.section_title, '') || ' ' || old.content);
-			INSERT INTO chunks_fts(rowid, content)
-			VALUES (new.id, coalesce(new.section_title, '') || ' ' || new.content);
-		END;
-
 		-- Chunks created before the chunks_fts table existed are not
 		-- retroactively indexed. To populate the FTS5 index over a
 		-- pre-existing corpus, re-crawl the affected sources.
 	`
 
-	_, err := db.Exec(schema)
-	if err != nil {
+	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("running migrations: %w", err)
 	}
+	if err := addColumn(db, "chunks", "search_prefix", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// Triggers keep chunks_fts in sync with chunks. The indexed value is
+	// search_prefix (the document title, when chunking.title_in_search_text
+	// is on), section_title and content, so title and heading words count in
+	// BM25 scoring. They are recreated on every start so an older database
+	// picks up the current expression; rows indexed before search_prefix
+	// existed have it empty, which tokenises the same as the old expression.
+	if _, err := db.Exec(ftsTriggers); err != nil {
+		return fmt.Errorf("creating chunks_fts triggers: %w", err)
+	}
+	return nil
+}
 
+const ftsIndexed = `coalesce(%[1]s.search_prefix, '') || ' ' || coalesce(%[1]s.section_title, '') || ' ' || %[1]s.content`
+
+var ftsTriggers = fmt.Sprintf(`
+	DROP TRIGGER IF EXISTS chunks_ai;
+	DROP TRIGGER IF EXISTS chunks_ad;
+	DROP TRIGGER IF EXISTS chunks_au;
+	CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+		INSERT INTO chunks_fts(rowid, content) VALUES (new.id, %[1]s);
+	END;
+	CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, %[2]s);
+	END;
+	CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, %[2]s);
+		INSERT INTO chunks_fts(rowid, content) VALUES (new.id, %[1]s);
+	END;`, fmt.Sprintf(ftsIndexed, "new"), fmt.Sprintf(ftsIndexed, "old"))
+
+// addColumn adds a column to an existing table unless it is already there.
+func addColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("reading %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return fmt.Errorf("reading %s columns: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading %s columns: %w", table, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("adding %s.%s: %w", table, column, err)
+	}
 	return nil
 }

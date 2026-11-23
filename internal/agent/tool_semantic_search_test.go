@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,18 @@ func TestSemanticSearchTool_Execute_NoFilter(t *testing.T) {
 	// least one matches; ranking with the fixed embedder is irrelevant here.
 	if !strings.Contains(res.Text, "alpha-content") && !strings.Contains(res.Text, "beta-content") {
 		t.Errorf("unscoped search should return results, got: %s", res.Text)
+	}
+}
+
+func TestSemanticSearchTool_Execute_RejectsNonPositiveTopK(t *testing.T) {
+	tool, s := setupSemanticSearchFixture(t)
+	seedDocAndCrawlPage(t, s, "doc-a", "https://example.com/a", "Alpha", "alpha-content", "alpha-source")
+
+	for _, topK := range []int{0, -2} {
+		_, err := tool.Execute(context.Background(), fmt.Sprintf(`{"query":"content","top_k":%d}`, topK))
+		if err == nil || !strings.Contains(err.Error(), "top_k") {
+			t.Errorf("top_k=%d: want an error naming top_k, got %v", topK, err)
+		}
 	}
 }
 

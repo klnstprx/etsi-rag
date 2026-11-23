@@ -21,8 +21,7 @@ func (h *Handler) snapshotIssues() []diag.Issue {
 // HealthIssues handles GET /admin/health/issues — returns the IssuesCard
 // fragment for HTMX swap.
 func (h *Handler) HealthIssues(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.IssuesCard(h.snapshotIssues()).Render(r.Context(), w)
+	writeHTML(w, r, templates.IssuesCard(h.snapshotIssues()))
 }
 
 // HealthRecheck handles POST /admin/health/recheck — re-runs every recheck
@@ -31,8 +30,7 @@ func (h *Handler) HealthIssues(w http.ResponseWriter, r *http.Request) {
 // required" so the operator knows the button can't help them.
 func (h *Handler) HealthRecheck(w http.ResponseWriter, r *http.Request) {
 	if h.diag != nil {
-		_ = h.diag.Recheck(r.Context())
+		h.diag.Recheck(r.Context())
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.IssuesCard(h.snapshotIssues()).Render(r.Context(), w)
+	writeHTML(w, r, templates.IssuesCard(h.snapshotIssues()))
 }

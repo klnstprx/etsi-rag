@@ -10,54 +10,90 @@ import (
 	"etsi-rag/internal/backend"
 	"etsi-rag/internal/llm"
 	"etsi-rag/internal/prompts"
+	"etsi-rag/internal/rag"
 	"etsi-rag/internal/tokencount"
 )
 
-// embedClientConfig pulls the [embedding] stage cfg out of the live config so
-// callers don't restate the field-by-field literal at every call site
-// (server.New, rebuildClients, recheck closures all need the same shape).
-func (s *Server) embedClientConfig() (string, llm.EmbedClientConfig) {
-	return s.cfg.Embedding.Backend, llm.EmbedClientConfig{
-		Model:     s.cfg.Embedding.Model,
-		BatchSize: s.cfg.Embedding.BatchSize,
+// resolveEmbedClient builds the [embedding] stage client from the live config.
+func (s *Server) resolveEmbedClient() (*llm.EmbedClient, error) {
+	b := s.cfg.EnabledBackend(s.cfg.Embedding.Backend)
+	if b == nil {
+		return nil, fmt.Errorf("no enabled backend named %q for embedding", s.cfg.Embedding.Backend)
 	}
+	s.logger.Info().Str("stage", "embedding").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
+	return llm.NewEmbedClient(llm.EmbedClientConfig{
+		BaseURL:    b.BaseURL,
+		APIKey:     b.APIKey,
+		Model:      s.cfg.Embedding.Model,
+		BatchSize:  s.cfg.Embedding.BatchSize,
+		MaxRetries: b.MaxRetries,
+	}), nil
 }
 
-// chatClientConfig is the agent-stage equivalent of embedClientConfig.
-func (s *Server) chatClientConfig() (string, llm.ChatClientConfig) {
-	return s.cfg.Agent.Backend, llm.ChatClientConfig{
+// resolveChatClient builds the [agent] stage chat client from the live config.
+func (s *Server) resolveChatClient() (*llm.ChatClient, error) {
+	b := s.cfg.EnabledBackend(s.cfg.Agent.Backend)
+	if b == nil {
+		return nil, fmt.Errorf("no enabled backend named %q for chat", s.cfg.Agent.Backend)
+	}
+	s.logger.Info().Str("stage", "agent").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
+	return llm.NewChatClient(llm.ChatClientConfig{
+		BaseURL:     b.BaseURL,
+		APIKey:      b.APIKey,
 		Model:       s.cfg.Agent.Model,
 		MaxTokens:   int64(s.cfg.Agent.MaxTokens),
 		Temperature: s.cfg.Agent.Temperature,
-	}
+		MaxRetries:  b.MaxRetries,
+	}), nil
 }
 
-// resolveEmbedClient resolves a backend by name and builds an embedding client.
-func (s *Server) resolveEmbedClient(backendName string, partialCfg llm.EmbedClientConfig) (*llm.EmbedClient, error) {
-	b := s.cfg.GetBackend(backendName)
-	if b == nil {
-		return nil, fmt.Errorf("no enabled backend named %q for embedding", backendName)
+// resolveEmbedding resolves the embedding client and token counter from the
+// live config and publishes both diag issues. The embedder is a true nil
+// (not a typed-nil *EmbedClient) when resolution fails, so handle consumers'
+// nil checks hold.
+func (s *Server) resolveEmbedding() (llm.Embedder, tokencount.Counter) {
+	var embedder llm.Embedder
+	client, err := s.resolveEmbedClient()
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("embedding backend not available")
+	} else {
+		embedder = client
 	}
+	s.publishProbeResult(issueEmbeddingBackend, err)
 
-	partialCfg.BaseURL = b.BaseURL
-	partialCfg.APIKey = b.APIKey
-	partialCfg.MaxRetries = b.MaxRetries
-	s.logger.Info().Str("stage", "embedding").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
-	return llm.NewEmbedClient(partialCfg), nil
+	counter, err := s.resolveCounter(s.cfg.Embedding.Backend, s.cfg.Embedding.Model)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("token counter not available (fix via admin UI)")
+	}
+	s.publishProbeResult(issueEmbeddingCounter, err)
+	return embedder, counter
 }
 
-// resolveChatClient resolves a backend by name and builds a chat client.
-func (s *Server) resolveChatClient(backendName string, partialCfg llm.ChatClientConfig) (*llm.ChatClient, error) {
-	b := s.cfg.GetBackend(backendName)
-	if b == nil {
-		return nil, fmt.Errorf("no enabled backend named %q for chat", backendName)
+// resolveAgent builds the agent from the live config, or returns nil when no
+// [agent] backend is configured or it cannot be resolved. It keeps the agent
+// diag issues in step either way.
+func (s *Server) resolveAgent() *agent.Agent {
+	if s.cfg.Agent.Backend == "" {
+		s.logger.Warn().Msg("no [agent] backend configured, agent disabled")
+		s.diag.Set(issueAgentNoBackend)
+		s.clearBudgetIssues()
+		return nil
 	}
+	s.diag.Clear(issueAgentNoBackend.ID)
 
-	partialCfg.BaseURL = b.BaseURL
-	partialCfg.APIKey = b.APIKey
-	partialCfg.MaxRetries = b.MaxRetries
-	s.logger.Info().Str("stage", "agent").Str("backend", b.Name).Str("url", b.BaseURL).Msg("backend resolved")
-	return llm.NewChatClient(partialCfg), nil
+	client, err := s.resolveChatClient()
+	s.publishProbeResult(issueAgentBackend, err)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("agent backend not available, agent disabled")
+		s.clearBudgetIssues()
+		return nil
+	}
+	a := s.buildAgent(client)
+	s.logger.Info().Str("backend", s.cfg.Agent.Backend).
+		Bool("vision_enabled", s.cfg.Agent.Vision.Enabled).
+		Str("public_base_url", s.cfg.Agent.Vision.PublicBaseURL).
+		Msg("agent initialized")
+	return a
 }
 
 // resolveRerankClient resolves a backend by name and builds a reranker client.
@@ -65,7 +101,7 @@ func (s *Server) resolveChatClient(backendName string, partialCfg llm.ChatClient
 // not part of the OpenAI surface — config.Validate enforces this at load time
 // but we re-check here so a TOML edited on disk can't bypass the safeguard.
 func (s *Server) resolveRerankClient(backendName string, partialCfg llm.RerankClientConfig) (*llm.RerankClient, error) {
-	b := s.cfg.GetBackend(backendName)
+	b := s.cfg.EnabledBackend(backendName)
 	if b == nil {
 		return nil, fmt.Errorf("no enabled backend named %q for reranker", backendName)
 	}
@@ -88,7 +124,7 @@ func (s *Server) resolveRerankClient(backendName string, partialCfg llm.RerankCl
 // and the operator sees a warning in the logs.
 func (s *Server) attachReranker() {
 	if !s.cfg.Reranker.Enabled {
-		s.retriever.SetReranker(nil, 0)
+		s.retriever.SetReranker(rag.RerankerSetup{})
 		return
 	}
 
@@ -99,7 +135,7 @@ func (s *Server) attachReranker() {
 	counter, err := s.resolveCounter(s.cfg.Reranker.Backend, s.cfg.Reranker.Model)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reranker disabled: no token counter")
-		s.retriever.SetReranker(nil, 0)
+		s.retriever.SetReranker(rag.RerankerSetup{})
 		return
 	}
 
@@ -113,11 +149,16 @@ func (s *Server) attachReranker() {
 	})
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reranker disabled: client resolution failed")
-		s.retriever.SetReranker(nil, 0)
+		s.retriever.SetReranker(rag.RerankerSetup{})
 		return
 	}
 
-	s.retriever.SetReranker(rc, s.cfg.Reranker.TopN)
+	s.retriever.SetReranker(rag.RerankerSetup{
+		Reranker:    rc,
+		Pool:        s.cfg.Reranker.TopN,
+		TitleInText: s.cfg.Reranker.TitleInText,
+		Logger:      s.logger,
+	})
 	s.logger.Info().
 		Str("backend", s.cfg.Reranker.Backend).
 		Str("model", s.cfg.Reranker.Model).
@@ -128,7 +169,7 @@ func (s *Server) attachReranker() {
 
 // resolveCounter creates an appropriate token counter for the given backend.
 func (s *Server) resolveCounter(backendName, model string) (tokencount.Counter, error) {
-	b := s.cfg.GetBackend(backendName)
+	b := s.cfg.EnabledBackend(backendName)
 	if b == nil {
 		return nil, fmt.Errorf("no enabled backend named %q for token counter", backendName)
 	}
@@ -160,7 +201,11 @@ func (s *Server) probeLlamaCppBackends() {
 	stages := []stageRef{
 		{"embedding", s.cfg.Embedding.Backend, s.cfg.Embedding.Model},
 		{"agent", s.cfg.Agent.Backend, s.cfg.Agent.Model},
-		{"reranker", s.cfg.Reranker.Backend, s.cfg.Reranker.Model},
+	}
+	// The probe makes the router load the model; a disabled reranker must not
+	// occupy the VRAM that disabling it is meant to free.
+	if s.cfg.Reranker.Enabled {
+		stages = append(stages, stageRef{"reranker", s.cfg.Reranker.Backend, s.cfg.Reranker.Model})
 	}
 
 	probed := make(map[string]*backend.LlamaCppProps) // key: "backend:model"
@@ -172,7 +217,7 @@ func (s *Server) probeLlamaCppBackends() {
 		if _, done := probed[key]; done {
 			continue
 		}
-		b := s.cfg.GetBackend(st.backend)
+		b := s.cfg.EnabledBackend(st.backend)
 		if b == nil || !b.IsLlamaCpp {
 			continue
 		}
@@ -312,13 +357,17 @@ func (s *Server) buildAgent(client *llm.ChatClient) *agent.Agent {
 		budget, s.cfg.Agent.ToolOutputMaxTokens,
 		s.sessionStore, s.logger,
 	)
-	a.SetVisionGetter(func() (bool, string) {
-		if !s.cfg.Agent.Vision.Enabled {
-			return false, ""
-		}
-		return true, s.cfg.Agent.Vision.PublicBaseURL
-	})
+	a.SetVisionGetter(s.agentVision)
 	return a
+}
+
+// agentVision is the agent's VisionGetter. It reads the live config so admin
+// toggles apply without rebuilding the agent.
+func (s *Server) agentVision() (bool, string) {
+	if !s.cfg.Agent.Vision.Enabled {
+		return false, ""
+	}
+	return true, s.cfg.Agent.Vision.PublicBaseURL
 }
 
 // agentSystemPrompt renders the system prompt template with current data.
@@ -327,7 +376,7 @@ func (s *Server) agentSystemPrompt() string {
 	docCount, _ := s.store.CountDocuments(ctx)
 	chunkCount, _ := s.store.CountChunks(ctx)
 
-	rendered, err := prompts.RenderAgent(s.cfg.Agent.SystemPrompt, prompts.PromptData{
+	rendered, err := prompts.RenderAgent(s.cfg.Agent.SystemPrompt, prompts.Data{
 		DocumentCount: docCount,
 		ChunkCount:    chunkCount,
 	})

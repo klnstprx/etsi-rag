@@ -43,10 +43,11 @@ max_chunk_size = 256
 chunk_overlap = 32
 min_chunk_size = 64
 separators = ["\n\n", "\n", '. ', ' ', '']
+title_in_search_text = true  # embed and keyword-index each chunk with its document title ahead of the breadcrumb
 
 [embedding]
 backend = 'local-llama'
-model = 'Qwen3-Embedding-4B-Q8_0.gguf'
+model = 'Octen-Embedding-4B.Q8_0.gguf'  # Apache-2.0 fine-tune of Qwen3-Embedding-4B; the evaluated embedder
 dimension = 2560
 max_tokens = 0   # 0 = auto-detect via /props; non-zero overrides. 512-token floor when neither is available.
 batch_size = 8
@@ -75,14 +76,16 @@ top_n = 30                    # candidate pool size; must be >= retrieval.top_k
 max_tokens = 0                # 0 = auto-detect via /props; non-zero overrides
 reserved_tokens = 16          # BOS/EOS/separator budget held back from per-doc truncation
 timeout = '30s'               # per-request deadline; cold-load forgiving
+title_in_text = true          # rerank "document title > breadcrumb: body"; false = body only
 
 [agent]
 backend = 'local-llama'
-# MUST be a chat/instruct model — never an embedding model. Gemma 4 E4B (the
-# agent used in evaluation) is a sensible default; substitute any instruct model
+# MUST be a chat/instruct model — never an embedding model. Gemma 4 12B at Q8
+# fits a 24 GB GPU beside the embedder and reranker and beat E4B in evaluation;
+# use gemma-4-E4B-it-Q8_K_XL.gguf where memory is tight, or any instruct model
 # your backend serves. Reasoning models that emit hidden "thinking" tokens need
 # max_tokens raised well above their reasoning budget, or they return empty text.
-model = 'gemma-4-E4B-it-Q8_K_XL.gguf'
+model = 'gemma-4-12b-it-Q8_K_XL.gguf'
 max_tokens = 1024
 temperature = 0.7
 # 0 = auto: follow the llama.cpp /props probe (the per-request n_ctx the
@@ -90,7 +93,7 @@ temperature = 0.7
 # A non-zero value is an explicit operator override. Probe readings are never
 # written back to this file.
 context_window = 0
-max_iterations = 5
+max_iterations = 20
 tool_output_max_tokens = 0        # 0 = auto-derive from the agent token budget pool (floor 256)
 history_reserve_tokens = 1280     # token headroom reserved from the context window for session history
 user_reserve_tokens = 512         # token headroom reserved from the context window for the incoming user message
@@ -111,8 +114,15 @@ ttl_seconds = 3600
 # ============================================================
 
 [crawler]
-request_delay = '500ms'
+request_delay = '1s'
 request_timeout = '30s'
+# uma.es limits file-browser downloads far below its pages (about 1.4 a minute
+# from one IP, 429 from HAProxy); they get their own lane so pages keep going.
+throttled_paths = ['/navegador_de_ficheros/']
+throttled_path_delay = '45s'
+rate_limit_retries = 4
+rate_limit_backoff = '30s'
+rate_limit_max_wait = '5m'
 progress_log_interval = '30s'
 max_depth = 10
 max_pages = 5000
@@ -124,6 +134,7 @@ parse_workers = 4
 max_embed_fails = 10
 js_patterns = ['/centers/subject/']
 rejection_patterns = [
+    'no ha sido posible cargar esta página',
     'página no encontrada',
     'error 404',
     'página en construcción',
@@ -132,7 +143,7 @@ rejection_patterns = [
 ]
 strip_query_params = [
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
-    'fbclid', 'gclid', '_ga', 'ref', 'lang',
+    'fbclid', 'gclid', '_ga', 'ref', 'lang', 'set_language',
 ]
 
 [crawler.pdf]

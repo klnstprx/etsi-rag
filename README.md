@@ -58,9 +58,9 @@ The preset assigns per-model settings (multimodal projector, context size, sampl
 ```ini
 version = 1
 
-[gemma4-e4b]
-model = /home/you/Models/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-UD-Q8_K_XL.gguf
-mmproj = /home/you/Models/gemma-4-E4B-it-GGUF/mmproj-F32.gguf
+[gemma4-12b]
+model = /home/you/Models/gemma-4-12b-it-GGUF/gemma-4-12b-it-UD-Q8_K_XL.gguf
+mmproj = /home/you/Models/gemma-4-12b-it-GGUF/mmproj-F32.gguf
 c = 32768
 temp = 1.0
 top-p = 0.95
@@ -69,17 +69,21 @@ top-k = 64
 [bge-reranker-v2-m3]
 model = /home/you/Models/bge-reranker-v2-m3-GGUF/bge-reranker-v2-m3-Q8_0.gguf
 reranking = true
+b = 8192
+ub = 8192
 jinja = true
 fit = on
 
-[qwen-embeddings-4b]
-model = /home/you/Models/Qwen3-Embedding/Qwen3-Embedding-4B-Q4_K_M.gguf
+[octen-embedding-4b]
+model = /home/you/Models/Octen-Embedding-4B/Octen-Embedding-4B.Q8_0.gguf
 embedding = true
+b = 8192
+ub = 8192
 jinja = true
 fit = on
 ```
 
-The section names (`gemma4-e4b`, etc.) are the model identifiers the server exposes — the `model` values in each `config.toml` stage must match them.
+The reranker and embedder each process a whole input in one physical batch, so `b`/`ub` must cover their longest input; at llama-server's default of 512, longer inputs fail with HTTP 500. The section names (`gemma4-12b`, etc.) are the model identifiers the server exposes — the `model` values in each `config.toml` stage must match them.
 
 ### RustFS (object storage)
 
@@ -144,11 +148,5 @@ make reset-db      # Rename DB to a timestamped .bak so a fresh schema migrates
 - **SQLite** — documents, chunks, embeddings (modernc.org/sqlite)
 - **templ + Tailwind + HTMX** — admin UI
 - **openai-go** — LLM SDK
-- **go-rod** — headless Chrome for JS pages
+- **chromedp** — headless Chrome for JS pages
 - **go-readability** — content extraction
-
-## License
-
-Licensed under the **GNU Affero General Public License v3.0** — see [LICENSE](LICENSE).
-
-Copyright © 2026 Ignacy Borzestowski. Developed as a Final Degree Project (Trabajo de Fin de Grado) for the ETSI Informática, Universidad de Málaga.

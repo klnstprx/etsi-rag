@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"etsi-rag/internal/config"
@@ -74,8 +75,10 @@ func TestResolveEmbedClient_Found(t *testing.T) {
 		{Name: "local", BaseURL: "http://localhost:8080/v1", Enabled: true},
 	}
 
+	cfg.Embedding.Backend, cfg.Embedding.Model = "local", "test"
+
 	s := testServer(t, cfg)
-	client, err := s.resolveEmbedClient("local", llm.EmbedClientConfig{Model: "test"})
+	client, err := s.resolveEmbedClient()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,9 +88,11 @@ func TestResolveEmbedClient_Found(t *testing.T) {
 }
 
 func TestResolveEmbedClient_NotFound(t *testing.T) {
-	s := testServer(t, defaultConfig())
+	cfg := defaultConfig()
+	cfg.Embedding.Backend = "nonexistent"
+	s := testServer(t, cfg)
 
-	_, err := s.resolveEmbedClient("nonexistent", llm.EmbedClientConfig{})
+	_, err := s.resolveEmbedClient()
 	if err == nil {
 		t.Fatal("expected error for missing backend")
 	}
@@ -99,8 +104,10 @@ func TestResolveEmbedClient_Disabled(t *testing.T) {
 		{Name: "off", BaseURL: "http://localhost:8080/v1", Enabled: false},
 	}
 
+	cfg.Embedding.Backend = "off"
+
 	s := testServer(t, cfg)
-	_, err := s.resolveEmbedClient("off", llm.EmbedClientConfig{})
+	_, err := s.resolveEmbedClient()
 	if err == nil {
 		t.Fatal("expected error for disabled backend")
 	}
@@ -114,8 +121,10 @@ func TestResolveChatClient_Found(t *testing.T) {
 		{Name: "local", BaseURL: "http://localhost:8080/v1", Enabled: true},
 	}
 
+	cfg.Agent.Backend, cfg.Agent.Model = "local", "test"
+
 	s := testServer(t, cfg)
-	client, err := s.resolveChatClient("local", llm.ChatClientConfig{Model: "test"})
+	client, err := s.resolveChatClient()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,9 +134,11 @@ func TestResolveChatClient_Found(t *testing.T) {
 }
 
 func TestResolveChatClient_NotFound(t *testing.T) {
-	s := testServer(t, defaultConfig())
+	cfg := defaultConfig()
+	cfg.Agent.Backend = "nonexistent"
+	s := testServer(t, cfg)
 
-	_, err := s.resolveChatClient("nonexistent", llm.ChatClientConfig{})
+	_, err := s.resolveChatClient()
 	if err == nil {
 		t.Fatal("expected error for missing backend")
 	}
@@ -222,6 +233,50 @@ func TestResolveCounter_NotFound(t *testing.T) {
 
 // --- probeLlamaCppBackends ---
 
+// The /props probe makes the llama.cpp router load the model, so probing a
+// disabled reranker would occupy the VRAM that disabling it is meant to free.
+func TestProbeLlamaCppBackends_SkipsDisabledReranker(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		var mu sync.Mutex
+		probedModels := map[string]bool{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			probedModels[r.URL.Query().Get("model")] = true
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{
+				"default_generation_settings": map[string]any{"n_ctx": 4096},
+			})
+		})
+		mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{}})
+		})
+		ts := httptest.NewServer(mux)
+
+		cfg := defaultConfig()
+		cfg.Backends = []config.BackendConfig{
+			{Name: "llama", BaseURL: ts.URL + "/v1", Enabled: true, IsLlamaCpp: true},
+		}
+		cfg.Embedding.Backend, cfg.Embedding.Model = "llama", "embed-model"
+		cfg.Agent.Backend, cfg.Agent.Model = "llama", "chat-model"
+		cfg.Reranker.Enabled = enabled
+		cfg.Reranker.Backend, cfg.Reranker.Model = "llama", "rerank-model"
+
+		testServer(t, cfg).probeLlamaCppBackends()
+		ts.Close()
+
+		mu.Lock()
+		got := probedModels["rerank-model"]
+		mu.Unlock()
+		if got != enabled {
+			t.Errorf("reranker enabled=%v: probed rerank-model = %v, want %v", enabled, got, enabled)
+		}
+		if !probedModels["embed-model"] || !probedModels["chat-model"] {
+			t.Errorf("reranker enabled=%v: embedding and agent must still be probed; got %v", enabled, probedModels)
+		}
+	}
+}
+
 func TestProbeLlamaCppBackends_AppliesValues(t *testing.T) {
 	// Mock llama.cpp server returning /props and /v1/models
 	mux := http.NewServeMux()
@@ -295,6 +350,7 @@ func TestProbeLlamaCppBackends_AppliesRerankerContext(t *testing.T) {
 	cfg.Backends = []config.BackendConfig{
 		{Name: "llama", BaseURL: ts.URL + "/v1", Enabled: true, IsLlamaCpp: true},
 	}
+	cfg.Reranker.Enabled = true
 	cfg.Reranker.Backend = "llama"
 	cfg.Reranker.Model = "qwen-reranker"
 

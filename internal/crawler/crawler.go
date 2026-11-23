@@ -4,6 +4,7 @@ package crawler
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/ingest"
@@ -11,6 +12,7 @@ import (
 	"etsi-rag/internal/sources"
 	"etsi-rag/internal/store"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -32,7 +34,7 @@ type Crawler struct {
 
 	mu       sync.RWMutex
 	running  bool
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	progress *RunProgress
 }
 
@@ -47,8 +49,7 @@ func New(
 	srcs *sources.Registry,
 	logger zerolog.Logger,
 ) *Crawler {
-	f := NewFetcher(cfg.RequestTimeout, cfg.RequestDelay, cfg.MaxBodySize)
-	f.SetJSPatterns(cfg.JSPatterns)
+	f := NewFetcher(cfg, logger)
 
 	c := &Crawler{
 		store:    st,
@@ -79,10 +80,7 @@ func New(
 func (c *Crawler) SetConfig(cfg config.CrawlerConfig) {
 	c.mu.Lock()
 	c.config = cfg
-	c.fetcher.SetTimeout(cfg.RequestTimeout)
-	c.fetcher.SetDelay(cfg.RequestDelay)
-	c.fetcher.SetMaxBody(cfg.MaxBodySize)
-	c.fetcher.SetJSPatterns(cfg.JSPatterns)
+	c.fetcher.SetConfig(cfg)
 	c.mu.Unlock()
 }
 
@@ -115,7 +113,7 @@ func (c *Crawler) Cancel() {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.cancel != nil {
-		c.cancel()
+		c.cancel(nil)
 	}
 }
 
@@ -130,17 +128,27 @@ func (c *Crawler) Progress() *ProgressSnapshot {
 	return &snap
 }
 
+// run is the state every stage of one crawl or reprocess run shares.
+type run struct {
+	id        int64
+	startedAt time.Time
+	progress  *RunProgress
+	cancel    context.CancelCauseFunc // a non-nil cause fails the run instead of cancelling it
+}
+
 // withRunLock acquires the run lock, executes fn, and releases on return.
 // Returns an error if a run is already in progress.
-func (c *Crawler) withRunLock(ctx context.Context, fn func(ctx context.Context) (int64, error)) (int64, error) {
+func (c *Crawler) withRunLock(ctx context.Context, fn func(context.Context, *run) (int64, error)) (int64, error) {
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
 		return 0, fmt.Errorf("crawl already running")
 	}
 	c.running = true
-	c.progress = &RunProgress{}
-	ctx, c.cancel = context.WithCancel(ctx)
+	r := &run{progress: &RunProgress{}}
+	ctx, r.cancel = context.WithCancelCause(ctx)
+	c.progress = r.progress
+	c.cancel = r.cancel
 	c.mu.Unlock()
 
 	defer func() {
@@ -151,34 +159,170 @@ func (c *Crawler) withRunLock(ctx context.Context, fn func(ctx context.Context) 
 		c.mu.Unlock()
 	}()
 
-	return fn(ctx)
+	return fn(ctx, r)
 }
 
 // RunAll crawls all enabled sources concurrently. Returns the run ID.
 func (c *Crawler) RunAll(ctx context.Context) (int64, error) {
-	return c.withRunLock(ctx, func(ctx context.Context) (int64, error) {
-		return c.runCrawl(ctx, nil)
-	})
-}
-
-// RunSource crawls a single source identified by its TOML key. Returns the run ID.
-func (c *Crawler) RunSource(ctx context.Context, sourceKey string) (int64, error) {
-	return c.withRunLock(ctx, func(ctx context.Context) (int64, error) {
-		return c.runCrawl(ctx, &sourceKey)
-	})
+	return c.withRunLock(ctx, c.runCrawl)
 }
 
 // Reprocess re-runs the parse and embed stages for all fetched pages
 // using data from the object store, skipping the crawl stage entirely.
 // Useful when parsing/chunking/embedding code changes but crawled data is still fresh.
 func (c *Crawler) Reprocess(ctx context.Context) (int64, error) {
-	return c.withRunLock(ctx, func(ctx context.Context) (int64, error) {
-		return c.runReprocess(ctx)
+	return c.withRunLock(ctx, c.runReprocess)
+}
+
+func (c *Crawler) runCrawl(ctx context.Context, r *run) (int64, error) {
+	if err := c.begin(ctx, r); err != nil {
+		return 0, err
+	}
+
+	var enabled []domain.CrawlSource
+	for _, s := range c.snapshotSources() {
+		if s.Enabled {
+			enabled = append(enabled, s)
+		}
+	}
+	if len(enabled) == 0 {
+		c.finishRun(r.id, domain.CrawlRunCompleted, ProgressSnapshot{}, nil)
+		return r.id, nil
+	}
+
+	c.logger.Info().
+		Int64("run_id", r.id).
+		Int("sources", len(enabled)).
+		Int("max_pages", c.config.MaxPages).
+		Int("max_depth", c.config.MaxDepth).
+		Msg("crawl started")
+
+	c.pipeline(ctx, r, "crawl", false, func(parseCh chan<- CrawlItem) {
+		c.crawlStageAll(ctx, r, enabled, parseCh)
 	})
+
+	status, runErr := runOutcome(ctx)
+	snap := r.progress.Snapshot()
+	c.logger.Info().
+		Err(runErr).
+		Int64("run_id", r.id).
+		Str("status", string(status)).
+		Int("discovered", int(snap.Discovered)).
+		Int("fetched", int(snap.Fetched)).
+		Int("ingested", int(snap.Ingested)).
+		Int("skipped", int(snap.Skipped)).
+		Int("failed", int(snap.Failed())).
+		Dur("duration", time.Since(r.startedAt)).
+		Msg("crawl finished")
+
+	c.finishRun(r.id, status, snap, runErr)
+	return r.id, runErr
+}
+
+func (c *Crawler) runReprocess(ctx context.Context, r *run) (int64, error) {
+	if err := c.begin(ctx, r); err != nil {
+		return 0, err
+	}
+
+	all, err := c.store.ListCrawlPages(ctx, nil, nil)
+	if err != nil {
+		return r.id, fmt.Errorf("listing crawl pages: %w", err)
+	}
+	// A failed page keeps the document of its last good crawl, so it is
+	// replayed too; otherwise that document would keep the old embeddings.
+	var pages []domain.CrawlPage
+	for _, p := range all {
+		if p.Status == domain.CrawlPageFetched || (p.Status == domain.CrawlPageFailed && p.DocID != nil) {
+			pages = append(pages, p)
+		}
+	}
+	if len(pages) == 0 {
+		c.finishRun(r.id, domain.CrawlRunCompleted, ProgressSnapshot{}, nil)
+		return r.id, nil
+	}
+
+	c.logger.Info().
+		Int64("run_id", r.id).
+		Int("pages", len(pages)).
+		Msg("reprocess started")
+
+	c.pipeline(ctx, r, "reprocess", true, func(parseCh chan<- CrawlItem) {
+		c.replayStage(ctx, pages, parseCh, r.progress)
+	})
+
+	// After a model change the embedding cache invalidates itself on the first
+	// dim-mismatched insert and stays unloaded until restart, so re-Warm it here.
+	if n, err := c.store.Warm(cleanupCtx(ctx)); err != nil {
+		c.logger.Warn().Err(err).Int64("run_id", r.id).Msg("post-reprocess cache warm failed; SearchSimilar will use SQL fallback")
+	} else {
+		c.logger.Info().Int64("run_id", r.id).Int("vectors", n).Msg("post-reprocess cache warmed")
+	}
+
+	status, runErr := runOutcome(ctx)
+	snap := r.progress.Snapshot()
+	c.logger.Info().
+		Err(runErr).
+		Int64("run_id", r.id).
+		Str("status", string(status)).
+		Int("pages", int(snap.Discovered)).
+		Int("ingested", int(snap.Ingested)).
+		Int("failed", int(snap.Failed())).
+		Dur("duration", time.Since(r.startedAt)).
+		Msg("reprocess finished")
+
+	c.finishRun(r.id, status, snap, runErr)
+	return r.id, runErr
+}
+
+// begin fails fast on an unreachable embedder or object store, before any run
+// row or partial side effect exists, then records the run. Without the bucket
+// every raw body and image would be dropped with only a warning per page.
+func (c *Crawler) begin(ctx context.Context, r *run) error {
+	if err := c.ingester.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("health check: %w", err)
+	}
+	if !c.objStore.Healthy(ctx) {
+		return fmt.Errorf("health check: object store bucket unreachable")
+	}
+	id, err := c.store.CreateCrawlRun(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("creating crawl run: %w", err)
+	}
+	r.id = id
+	r.startedAt = time.Now()
+	return nil
+}
+
+// pipeline runs feed into the parse and embed worker pools and returns once
+// every stage has drained. force makes the embed stage re-embed documents that
+// already exist (reprocess).
+func (c *Crawler) pipeline(ctx context.Context, r *run, label string, force bool, feed func(chan<- CrawlItem)) {
+	parseCh := make(chan CrawlItem, 16)
+	embedCh := make(chan ParseItem, 16)
+
+	stopTicker := c.startProgressTicker(r, label)
+
+	var parseWG, embedWG sync.WaitGroup
+	for range c.config.EmbedWorkers {
+		embedWG.Go(func() { c.embedStage(ctx, embedCh, r.progress, func() { r.cancel(errEmbedFailures) }, force) })
+	}
+	for range c.config.ParseWorkers {
+		parseWG.Go(func() { c.parseStage(ctx, parseCh, embedCh, r.progress) })
+	}
+
+	// Cascade close: feed done → close parseCh → parsers drain → close embedCh → embedders drain.
+	feed(parseCh)
+	close(parseCh)
+	parseWG.Wait()
+	close(embedCh)
+	embedWG.Wait()
+	stopTicker()
+
+	c.purgeOrphans(ctx, r.id)
 }
 
 // startProgressTicker logs progress at CrawlerConfig.ProgressLogInterval and returns a stop function.
-func (c *Crawler) startProgressTicker(runID int64, progress *RunProgress, startedAt time.Time, label string) func() {
+func (c *Crawler) startProgressTicker(r *run, label string) func() {
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(c.config.ProgressLogInterval)
@@ -186,15 +330,15 @@ func (c *Crawler) startProgressTicker(runID int64, progress *RunProgress, starte
 		for {
 			select {
 			case <-ticker.C:
-				snap := progress.Snapshot()
+				snap := r.progress.Snapshot()
 				c.logger.Info().
-					Int64("run_id", runID).
+					Int64("run_id", r.id).
 					Int64("discovered", snap.Discovered).
 					Int64("fetched", snap.Fetched).
 					Int64("parsed", snap.Parsed).
 					Int64("ingested", snap.Ingested).
-					Int64("failed", snap.CrawlFail+snap.ParseFail+snap.EmbedFail).
-					Dur("elapsed", time.Since(startedAt)).
+					Int64("failed", snap.Failed()).
+					Dur("elapsed", time.Since(r.startedAt)).
 					Msg(label + " progress")
 			case <-done:
 				return
@@ -204,404 +348,41 @@ func (c *Crawler) startProgressTicker(runID int64, progress *RunProgress, starte
 	return func() { close(done) }
 }
 
-// startWorkers launches parse and embed worker goroutines and returns a
-// drain function that waits for all workers to complete.
-func (c *Crawler) startWorkers(
-	ctx context.Context,
-	parseCh chan CrawlItem,
-	embedCh chan ParseItem,
-	progress *RunProgress,
-	cancel context.CancelFunc,
-	deleteOld bool,
-	startedAt time.Time,
-) func() {
-	var embedWG sync.WaitGroup
-	for range c.config.EmbedWorkers {
-		embedWG.Add(1)
-		go func() {
-			defer embedWG.Done()
-			c.embedStage(ctx, embedCh, progress, startedAt, cancel, deleteOld)
-		}()
-	}
+// errEmbedFailures is the cause recorded when max_embed_fails consecutive
+// ingest failures abort a run.
+var errEmbedFailures = errors.New("too many consecutive embed failures")
 
-	var parseWG sync.WaitGroup
-	for range c.config.ParseWorkers {
-		parseWG.Add(1)
-		go func() {
-			defer parseWG.Done()
-			c.parseStage(ctx, parseCh, embedCh, progress)
-		}()
-	}
-
-	return func() {
-		parseWG.Wait()
-		close(embedCh)
-		embedWG.Wait()
+// runOutcome reports how the run ended: on its own, cancelled by the operator
+// or shutdown, or failed with the cause that aborted it.
+func runOutcome(ctx context.Context) (domain.CrawlRunStatus, error) {
+	switch cause := context.Cause(ctx); {
+	case cause == nil:
+		return domain.CrawlRunCompleted, nil
+	case errors.Is(cause, context.Canceled):
+		return domain.CrawlRunCancelled, nil
+	default:
+		return domain.CrawlRunFailed, cause
 	}
 }
 
-func (c *Crawler) runReprocess(ctx context.Context) (int64, error) {
-	if err := c.ingester.HealthCheck(ctx); err != nil {
-		return 0, fmt.Errorf("health check: %w", err)
-	}
-
-	c.mu.RLock()
-	cancel := c.cancel
-	c.mu.RUnlock()
-
-	runID, err := c.store.CreateCrawlRun(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("creating crawl run: %w", err)
-	}
-	runStartedAt := time.Now()
-
-	fetched := string(domain.CrawlPageFetched)
-	pages, err := c.store.ListCrawlPages(ctx, nil, &fetched)
-	if err != nil {
-		return runID, fmt.Errorf("listing crawl pages: %w", err)
-	}
-
-	if len(pages) == 0 {
-		c.finishRun(ctx, runID, domain.CrawlRunCompleted, nil, 0, 0, 0, 0)
-		return runID, nil
-	}
-
-	c.logger.Info().
-		Int64("run_id", runID).
-		Int("pages", len(pages)).
-		Msg("reprocess started")
-
-	progress := c.progress
-
-	parseCh := make(chan CrawlItem, 16)
-	embedCh := make(chan ParseItem, 16)
-
-	stopTicker := c.startProgressTicker(runID, progress, runStartedAt, "reprocess")
-	drainWorkers := c.startWorkers(ctx, parseCh, embedCh, progress, cancel, true, runStartedAt)
-
-	// Feed pages from object store into parse channel
-	go func() {
-		defer close(parseCh)
-		for _, page := range pages {
-			if ctx.Err() != nil {
-				return
-			}
-
-			body, err := c.objStore.Get(ctx, page.ObjectStoreKey)
-			if err != nil {
-				c.logger.Warn().Err(err).Str("url", page.URL).Msg("object store get failed")
-				progress.CrawlFail.Add(1)
-				continue
-			}
-			progress.Discovered.Add(1)
-			progress.Fetched.Add(1)
-
-			ci := CrawlItem{
-				URL:         page.URL,
-				ContentType: page.ContentType,
-				Body:        body,
-				ObjKey:      page.ObjectStoreKey,
-				Source: CrawlSourceRef{
-					Key: page.SourceKey,
-				},
-			}
-
-			// For HTML, parse inline (same as crawl stage but without link extraction)
-			if page.ContentType != "pdf" {
-				parsed, err := ParseHTML(body, page.URL)
-				if err != nil {
-					c.logger.Warn().Err(err).Str("url", page.URL).Msg("html parse failed")
-					progress.CrawlFail.Add(1)
-					continue
-				}
-				ci.HTMLParsed = parsed
-				ci.Body = nil
-			}
-
-			select {
-			case parseCh <- ci:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	drainWorkers()
-	stopTicker()
-
-	c.purgeOrphans(ctx, runID)
-
-	// After a model change the embedding cache invalidates itself on the
-	// first dim-mismatched insert and stays unloaded, so SearchSimilar would
-	// pay the full SQL-scan cost until server restart. Re-Warm here so the
-	// cache is hot again with vectors at the new dim.
-	warmCtx := ctx
+// cleanupCtx returns ctx while it is live and a background context once it is
+// cancelled, so end-of-run cleanup still runs after a cancelled crawl.
+func cleanupCtx(ctx context.Context) context.Context {
 	if ctx.Err() != nil {
-		warmCtx = context.Background()
+		return context.Background()
 	}
-	if n, err := c.store.Warm(warmCtx); err != nil {
-		c.logger.Warn().Err(err).Int64("run_id", runID).Msg("post-reprocess cache warm failed; SearchSimilar will use SQL fallback")
-	} else {
-		c.logger.Info().Int64("run_id", runID).Int("vectors", n).Msg("post-reprocess cache warmed")
-	}
-
-	status := domain.CrawlRunCompleted
-	if ctx.Err() != nil {
-		status = domain.CrawlRunCancelled
-	}
-
-	snap := progress.Snapshot()
-	discovered := int(snap.Discovered)
-	fetchedCount := int(snap.Fetched)
-	changed := int(snap.Ingested)
-	failed := int(snap.CrawlFail + snap.ParseFail + snap.EmbedFail)
-
-	c.logger.Info().
-		Int64("run_id", runID).
-		Str("status", string(status)).
-		Int("pages", discovered).
-		Int("ingested", changed).
-		Int("failed", failed).
-		Dur("duration", time.Since(runStartedAt)).
-		Msg("reprocess finished")
-
-	c.finishRun(ctx, runID, status, nil, discovered, fetchedCount, changed, failed)
-	return runID, nil
-}
-
-func (c *Crawler) runCrawl(ctx context.Context, sourceKey *string) (int64, error) {
-	if err := c.ingester.HealthCheck(ctx); err != nil {
-		return 0, fmt.Errorf("health check: %w", err)
-	}
-
-	// Capture cancel func for embed abort (set by RunAll/RunSource before this call)
-	c.mu.RLock()
-	cancel := c.cancel
-	c.mu.RUnlock()
-
-	runID, err := c.store.CreateCrawlRun(ctx, sourceKey)
-	if err != nil {
-		return 0, fmt.Errorf("creating crawl run: %w", err)
-	}
-	runStartedAt := time.Now()
-
-	sources := c.snapshotSources()
-
-	var enabled []domain.CrawlSource
-	for _, s := range sources {
-		if !s.Enabled {
-			continue
-		}
-		if sourceKey != nil && s.Key != *sourceKey {
-			continue
-		}
-		enabled = append(enabled, s)
-	}
-
-	if len(enabled) == 0 {
-		c.finishRun(ctx, runID, domain.CrawlRunCompleted, nil, 0, 0, 0, 0)
-		return runID, nil
-	}
-
-	c.logger.Info().
-		Int64("run_id", runID).
-		Int("sources", len(enabled)).
-		Int("max_pages", c.config.MaxPages).
-		Int("max_depth", c.config.MaxDepth).
-		Msg("crawl started")
-
-	progress := c.progress
-
-	// Pipeline channels
-	parseCh := make(chan CrawlItem, 16)
-	embedCh := make(chan ParseItem, 16)
-
-	stopTicker := c.startProgressTicker(runID, progress, runStartedAt, "crawl")
-	drainWorkers := c.startWorkers(ctx, parseCh, embedCh, progress, cancel, false, runStartedAt)
-
-	// Run crawl stage (blocks until all sources done)
-	c.crawlStageAll(ctx, enabled, parseCh, progress, runStartedAt)
-
-	// Cascade close: crawl done → close parseCh → parsers drain → close embedCh → embedders drain
-	close(parseCh)
-	drainWorkers()
-	stopTicker()
-
-	c.purgeOrphans(ctx, runID)
-
-	// Determine final status from progress counters
-	status := domain.CrawlRunCompleted
-	if ctx.Err() != nil {
-		status = domain.CrawlRunCancelled
-	}
-
-	snap := progress.Snapshot()
-	discovered := int(snap.Discovered)
-	fetched := int(snap.Fetched)
-	changed := int(snap.Ingested)
-	failed := int(snap.CrawlFail + snap.ParseFail + snap.EmbedFail)
-
-	c.logger.Info().
-		Int64("run_id", runID).
-		Str("status", string(status)).
-		Int("discovered", discovered).
-		Int("fetched", fetched).
-		Int("ingested", changed).
-		Int("skipped", int(snap.Skipped)).
-		Int("failed", failed).
-		Dur("duration", time.Since(runStartedAt)).
-		Msg("crawl finished")
-
-	c.finishRun(ctx, runID, status, nil, discovered, fetched, changed, failed)
-	return runID, nil
+	return ctx
 }
 
 // purgeOrphans removes documents no longer referenced by any crawl_page.
-// Called at the end of runCrawl / runReprocess. Uses a background context so
-// cleanup still runs if the crawl context was cancelled.
 func (c *Crawler) purgeOrphans(ctx context.Context, runID int64) {
-	purgeCtx := ctx
-	if ctx.Err() != nil {
-		purgeCtx = context.Background()
-	}
-	n, err := c.store.PurgeOrphanDocuments(purgeCtx)
+	n, err := c.store.PurgeOrphanDocuments(cleanupCtx(ctx))
 	if err != nil {
 		c.logger.Warn().Err(err).Int64("run_id", runID).Msg("purging orphan documents failed")
 		return
 	}
 	if n > 0 {
 		c.logger.Info().Int64("run_id", runID).Int("orphans", n).Msg("purged orphan documents")
-	}
-}
-
-// blockedExtensions contains file extensions that should never be crawled.
-// These are binary or non-text formats that can't be meaningfully embedded.
-var blockedExtensions = map[string]bool{
-	// Office documents (non-PDF)
-	".docx": true, ".dotx": true, ".doc": true,
-	".pptx": true, ".ppt": true,
-	".xlsx": true, ".xls": true,
-	// Images
-	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
-	".svg": true, ".webp": true, ".ico": true, ".bmp": true, ".tiff": true,
-	// Archives
-	".zip": true, ".rar": true, ".gz": true, ".tar": true, ".7z": true,
-	// Media
-	".mp3": true, ".mp4": true, ".avi": true, ".mov": true, ".wmv": true,
-	".wav": true, ".flac": true, ".ogg": true,
-	// Executables
-	".exe": true, ".msi": true, ".dmg": true, ".apk": true,
-}
-
-// hasBlockedExtension returns true if the URL path ends with a blocked file extension.
-func hasBlockedExtension(path string) bool {
-	lower := strings.ToLower(path)
-	// Find last dot in the path (ignore query string)
-	if idx := strings.LastIndex(lower, "."); idx >= 0 {
-		ext := lower[idx:]
-		return blockedExtensions[ext]
-	}
-	return false
-}
-
-// preferCanonical reports whether candidate is a more canonical URL than
-// existing for the same content. Used by the embed-stage dedup to swap
-// documents.url when a content-hash collision surfaces a closer-to-the-seed
-// URL than the one that originally won the timing race.
-//
-// UMA's CMS serves identical extracted content at the bare program URL
-// (/grado-en-X/) and at one of its menu sub-pages (/grado-en-X/cms/menu/Y/).
-// Without this, documents.url is whichever URL hit the embed worker first —
-// which on a re-crawl can flip arbitrarily and breaks eval lookups against
-// the bare URL. With this, the bare URL always wins because it has fewer
-// path segments.
-//
-// Rules, in order:
-//  1. If only one URL parses, it wins.
-//  2. Cross-host candidates never replace existing — host swaps are never
-//     "more canonical."
-//  3. Same host: prefer fewer non-empty path segments. The bare program URL
-//     has 1 segment (`/grado-en-X`); a sub-page has 4+
-//     (`/grado-en-X/cms/menu/Y`). 1 < 4 → bare wins.
-//  4. Same segment count: prefer shorter total path string. Stable
-//     tie-breaker that doesn't depend on crawl order.
-//  5. Otherwise the existing URL wins.
-//
-// Pure function; no I/O.
-func preferCanonical(candidate, existing string) bool {
-	if candidate == "" {
-		return false
-	}
-	if existing == "" {
-		return true
-	}
-	cu, cerr := url.Parse(candidate)
-	eu, eerr := url.Parse(existing)
-	if cerr != nil {
-		return false
-	}
-	if eerr != nil {
-		return true
-	}
-	if !strings.EqualFold(cu.Host, eu.Host) {
-		return false
-	}
-	cSegs := pathSegments(cu.Path)
-	eSegs := pathSegments(eu.Path)
-	if cSegs != eSegs {
-		return cSegs < eSegs
-	}
-	return len(cu.Path) < len(eu.Path)
-}
-
-// pathSegments counts non-empty path segments. "/" → 0, "/a" → 1, "/a/b/" → 2.
-func pathSegments(p string) int {
-	n := 0
-	for _, seg := range strings.Split(p, "/") {
-		if seg != "" {
-			n++
-		}
-	}
-	return n
-}
-
-// shouldFollow decides whether a discovered link should be crawled.
-func shouldFollow(link, seedPath string) bool {
-	parsed, err := url.Parse(link)
-	if err != nil {
-		return false
-	}
-
-	host := strings.ToLower(parsed.Hostname())
-	path := strings.ToLower(parsed.Path)
-
-	if hasBlockedExtension(path) {
-		return false
-	}
-
-	switch host {
-	case "www.uma.es":
-		// Follow: seed path prefix, etsi-informatica, subject pages, media files
-		if strings.HasPrefix(path, seedPath) {
-			// Skip news
-			if strings.Contains(path, "noticias") || strings.Contains(path, "news") || strings.Contains(path, "newsitem") {
-				return false
-			}
-			return true
-		}
-		if strings.HasPrefix(path, "/etsi-informatica/") ||
-			strings.HasPrefix(path, "/centers/subject/") ||
-			strings.HasPrefix(path, "/media/files/") {
-			return true
-		}
-		return false
-
-	case "sara.uma.es":
-		// Only follow guía docente PDFs
-		return strings.Contains(path, "programasasignaturas")
-
-	default:
-		return false
 	}
 }
 
@@ -633,39 +414,52 @@ func titleFromURL(u string) string {
 	return u
 }
 
+// recordFailedPage marks pageURL failed in this run. Stamping last_crawled_at
+// keeps the end-of-source stale sweep from relabelling the failure as stale.
+// A page the site answers 404 or 410 for is gone, so its row drops the
+// document and the end-of-run orphan purge deletes it; any other failure keeps
+// the document of the last good crawl.
 func (c *Crawler) recordFailedPage(ctx context.Context, sourceKey, pageURL string, fetchErr error) {
 	errMsg := fetchErr.Error()
+	now := time.Now()
 	page := &domain.CrawlPage{
-		SourceKey:    sourceKey,
-		URL:          pageURL,
-		Status:       domain.CrawlPageFailed,
-		ErrorMessage: &errMsg,
+		SourceKey:     sourceKey,
+		URL:           pageURL,
+		Status:        domain.CrawlPageFailed,
+		ErrorMessage:  &errMsg,
+		LastCrawledAt: &now,
 	}
-	if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
+	record := c.store.MarkCrawlPageFailed
+	if pageGone(fetchErr) {
+		record = c.store.UpsertCrawlPage
+	}
+	if err := record(ctx, page); err != nil {
 		c.logger.Warn().Err(err).Str("url", pageURL).Msg("failed to record page failure")
 	}
 }
 
-func (c *Crawler) finishRun(
-	ctx context.Context,
-	runID int64,
-	status domain.CrawlRunStatus,
-	runErr error,
-	discovered, fetched, changed, failed int,
-) {
+// pageGone reports whether err is the site saying the page no longer exists.
+func pageGone(err error) bool {
+	var status *statusError
+	return errors.As(err, &status) && (status.code == http.StatusNotFound || status.code == http.StatusGone)
+}
+
+func (c *Crawler) finishRun(runID int64, status domain.CrawlRunStatus, snap ProgressSnapshot, runErr error) {
 	now := time.Now()
+	var errMsg *string
+	if runErr != nil {
+		msg := runErr.Error()
+		errMsg = &msg
+	}
 	run := &domain.CrawlRun{
 		ID:              runID,
 		Status:          status,
-		PagesDiscovered: discovered,
-		PagesFetched:    fetched,
-		PagesChanged:    changed,
-		PagesFailed:     failed,
+		PagesDiscovered: int(snap.Discovered),
+		PagesFetched:    int(snap.Fetched),
+		PagesChanged:    int(snap.Ingested),
+		PagesFailed:     int(snap.Failed()),
+		ErrorMessage:    errMsg,
 		FinishedAt:      &now,
-	}
-	if runErr != nil {
-		msg := runErr.Error()
-		run.ErrorMessage = &msg
 	}
 
 	// Use background context since the crawl context may be cancelled

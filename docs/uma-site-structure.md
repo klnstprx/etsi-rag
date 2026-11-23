@@ -26,7 +26,7 @@ Seed page (e.g. /grado-en-ingenieria-informatica/)
 ## Link Chain to Guia Docente PDFs
 
 1. Seed -> `programacion-docente` page (lists all courses as links)
-2. Each course -> `/centers/subject/{degree_id}/{course_id}` (JS-rendered, needs go-rod)
+2. Each course -> `/centers/subject/{degree_id}/{course_id}` (JS-rendered, needs the headless browser)
 3. Each subject page -> exactly one PDF on `sara.uma.es`
 
 Note: `plan-de-estudios` pages list courses as **plain text** (no links) — only `programacion-docente` has clickable subject links.
@@ -65,7 +65,8 @@ All URLs relative to `https://www.uma.es`.
 - Plone-based CMS with Open Graph metadata (`og:title`, `og:url`, `og:description`)
 - `lang` attribute on `<html>` tag for language detection
 - Left sidebars contain relevant local navigation; right sidebars are mostly generic banners
-- Global boilerplate: nav headers, institutional footer (seals, social links) — stripped by go-readability
+- Global boilerplate: nav headers, institutional footer (seals, social links), a hidden iDUMA "Sesión terminada" modal and CMS block placeholders ("beforecontenttitle", "Trozos html editables") — stripped by the parser before extraction
+- A site's root page has the portal name as `og:title` ("Grado UMA", "Máster Universitario UMA"); its `<title>` starts with the site name
 
 ## Scope Boundaries
 

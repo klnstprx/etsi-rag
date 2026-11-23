@@ -1,25 +1,7 @@
 // Package chunking provides document chunking strategies for RAG.
 package chunking
 
-import (
-	"context"
-
-	"etsi-rag/internal/config"
-)
-
-// stampImageRefs assigns the same ref slice to every chunk and returns the
-// (possibly modified) chunks. Used by chunkers that don't track section-level
-// page boundaries — they take the union of all refs in the input as a
-// best-effort attribution.
-func stampImageRefs(chunks []Chunk, refs []string) []Chunk {
-	if len(refs) == 0 || len(chunks) == 0 {
-		return chunks
-	}
-	for i := range chunks {
-		chunks[i].ImageRefs = cloneRefs(refs)
-	}
-	return chunks
-}
+import "context"
 
 // Chunk represents a text chunk with metadata.
 type Chunk struct {
@@ -61,11 +43,16 @@ func EmbeddingText(breadcrumb, body string) string {
 	return breadcrumb + ":\n" + body
 }
 
-// DefaultChunkingConfig returns sensible defaults for chunking.
-func DefaultChunkingConfig() config.ChunkingConfig {
-	return config.ChunkingConfig{
-		MaxChunkSize: 256,
-		ChunkOverlap: 32,
-		Separators:   []string{"\n\n", "\n", ". ", " ", ""},
+// SearchBreadcrumb puts prefix (the document title, when the search text
+// carries it) ahead of a chunk's heading breadcrumb, so a chunk whose own
+// headings never name its document ("Datos Generales del Título") is still
+// found by a query that does.
+func SearchBreadcrumb(prefix, breadcrumb string) string {
+	switch {
+	case prefix == "":
+		return breadcrumb
+	case breadcrumb == "":
+		return prefix
 	}
+	return prefix + " > " + breadcrumb
 }

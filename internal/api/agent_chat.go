@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/go-chi/chi/v5/middleware"
-
 	"etsi-rag/internal/agent"
 )
 
@@ -68,15 +66,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionIDHeader := r.Header.Get("X-Session-ID")
-	var sessionIDPtr *string
-	if sessionIDHeader != "" {
-		sessionIDPtr = &sessionIDHeader
-	}
-	sessionID, _ := h.sessionStore.GetOrCreate(sessionIDPtr)
+	sessionID := h.sessionStore.GetOrCreate(r.Header.Get(sessionHeader))
 
 	if req.Stream {
-		h.agentChatStreaming(w, r, ag, sessionID, req.Message)
+		relayStream(w, r, ag, sessionID, req.Message, func(w http.ResponseWriter, f http.Flusher) agent.StreamSink {
+			return &agentSSESink{w: w, flusher: f}
+		})
 		return
 	}
 
@@ -86,37 +81,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Session-ID", sessionID)
-	json.NewEncoder(w).Encode(AgentChatResponse{
+	w.Header().Set(sessionHeader, sessionID)
+	writeJSON(w, http.StatusOK, AgentChatResponse{
 		SessionID: sessionID,
 		Content:   result.Response,
 		Citations: toCitationDTOs(result.Citations),
 		Images:    result.Images,
 		ToolCalls: result.ToolCalls,
 	})
-}
-
-// agentChatStreaming streams the agent turn as proprietary JSON-SSE.
-func (h *Handler) agentChatStreaming(w http.ResponseWriter, r *http.Request, ag *agent.Agent, sessionID, message string) {
-	flusher, err := prepareSSE(w)
-	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
-		return
-	}
-	w.Header().Set("X-Session-ID", sessionID)
-
-	sink := &agentSSESink{w: w, flusher: flusher}
-	// A RelayChat error here almost always means the client disconnected
-	// mid-stream; headers are already flushed so there's nothing to surface to
-	// the client — log at debug for observability.
-	if err := agent.RelayChat(r.Context(), ag, sessionID, message, sink); err != nil {
-		logger.Debug().
-			Err(err).
-			Str("path", r.URL.Path).
-			Str("request_id", middleware.GetReqID(r.Context())).
-			Msg("agent chat stream relay ended early (likely client disconnect)")
-	}
 }
 
 // agentSSESink implements agent.StreamSink for the proprietary API, emitting a
@@ -132,7 +104,7 @@ type agentSSESink struct {
 }
 
 func (s *agentSSESink) OnToken(tok string) error {
-	return writeSSENamedEvent(s.w, s.flusher, "token", map[string]string{"text": tok})
+	return writeSSE(s.w, s.flusher, "token", map[string]string{"text": tok})
 }
 
 type agentToolEventDTO struct {
@@ -150,14 +122,14 @@ type agentToolEventDTO struct {
 func (s *agentSSESink) OnToolEvent(evt agent.ToolEvent) error {
 	switch evt.Type {
 	case "start":
-		return writeSSENamedEvent(s.w, s.flusher, "tool", agentToolEventDTO{
+		return writeSSE(s.w, s.flusher, "tool", agentToolEventDTO{
 			Phase:  "start",
 			CallID: evt.CallID,
 			Name:   evt.Name,
 			Args:   evt.Args,
 		})
 	case "done":
-		return writeSSENamedEvent(s.w, s.flusher, "tool", agentToolEventDTO{
+		return writeSSE(s.w, s.flusher, "tool", agentToolEventDTO{
 			Phase:          "done",
 			CallID:         evt.CallID,
 			Name:           evt.Name,
@@ -180,7 +152,7 @@ type agentDoneDTO struct {
 
 func (s *agentSSESink) OnEnd(result *agent.ChatResult, agentErr error) error {
 	if agentErr != nil {
-		return writeSSENamedEvent(s.w, s.flusher, "error", map[string]string{"message": agentErr.Error()})
+		return writeSSE(s.w, s.flusher, "error", map[string]string{"message": agentErr.Error()})
 	}
 	done := agentDoneDTO{}
 	if result != nil {
@@ -190,5 +162,5 @@ func (s *agentSSESink) OnEnd(result *agent.ChatResult, agentErr error) error {
 			ToolCalls: result.ToolCalls,
 		}
 	}
-	return writeSSENamedEvent(s.w, s.flusher, "done", done)
+	return writeSSE(s.w, s.flusher, "done", done)
 }

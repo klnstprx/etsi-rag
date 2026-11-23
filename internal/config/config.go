@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,10 +16,10 @@ import (
 )
 
 const (
-	// ConfigFileName is the user-editable config file (gitignored).
-	ConfigFileName = "config.toml"
-	// DefaultConfigFileName is the tracked template with default values.
-	DefaultConfigFileName = "config.default.toml"
+	// FileName is the user-editable config file (gitignored).
+	FileName = "config.toml"
+	// DefaultFileName is the tracked template with default values.
+	DefaultFileName = "config.default.toml"
 
 	envPrefix    = "APP__"
 	envSeparator = "__"
@@ -66,8 +67,8 @@ type Config struct {
 	Crawler CrawlerConfig `koanf:"crawler"`
 }
 
-// GetBackend returns the first enabled backend with the given name, or nil.
-func (c *Config) GetBackend(name string) *BackendConfig {
+// EnabledBackend returns the first enabled backend with the given name, or nil.
+func (c *Config) EnabledBackend(name string) *BackendConfig {
 	for i := range c.Backends {
 		if c.Backends[i].Name == name && c.Backends[i].Enabled {
 			return &c.Backends[i]
@@ -174,6 +175,11 @@ type RerankerConfig struct {
 	MaxTokens      int           `koanf:"max_tokens"`      // 0 = auto-detect via /props
 	ReservedTokens int           `koanf:"reserved_tokens"` // BOS/EOS/sep budget reserved before truncation
 	Timeout        time.Duration `koanf:"timeout"`
+
+	// TitleInText sends each candidate to the reranker as "document title >
+	// breadcrumb:\nbody", the same text chunking.title_in_search_text indexes;
+	// false sends the body alone. Load turns it on when the key is absent.
+	TitleInText bool `koanf:"title_in_text"`
 }
 
 // ChunkingConfig holds document chunking settings.
@@ -182,6 +188,12 @@ type ChunkingConfig struct {
 	ChunkOverlap int      `koanf:"chunk_overlap"`
 	MinChunkSize int      `koanf:"min_chunk_size"`
 	Separators   []string `koanf:"separators"`
+
+	// TitleInSearchText puts the document title ahead of each chunk's
+	// breadcrumb in the text that is embedded and keyword-indexed; false
+	// keeps the breadcrumb-only search text. Load turns it on when the key
+	// is absent, so configs written before it existed get the new default.
+	TitleInSearchText bool `koanf:"title_in_search_text"`
 }
 
 // SessionConfig holds session management settings.
@@ -194,6 +206,11 @@ type SessionConfig struct {
 type CrawlerConfig struct {
 	RequestDelay        time.Duration `koanf:"request_delay"`
 	RequestTimeout      time.Duration `koanf:"request_timeout"`
+	ThrottledPaths      []string      `koanf:"throttled_paths"`       // case-insensitive path substrings paced in their own lane per host (downloads a site limits harder than pages)
+	ThrottledPathDelay  time.Duration `koanf:"throttled_path_delay"`  // minimum gap between requests in a throttled lane
+	RateLimitRetries    int           `koanf:"rate_limit_retries"`    // retries of a page answered 429 or 503 before it fails
+	RateLimitBackoff    time.Duration `koanf:"rate_limit_backoff"`    // first wait without Retry-After; doubles per retry
+	RateLimitMaxWait    time.Duration `koanf:"rate_limit_max_wait"`   // cap on any single wait, Retry-After included
 	ProgressLogInterval time.Duration `koanf:"progress_log_interval"` // how often to log crawl progress
 	MaxDepth            int           `koanf:"max_depth"`
 	MaxPages            int           `koanf:"max_pages"`
@@ -224,38 +241,46 @@ type ObjectStoreConfig struct {
 	Region    string `koanf:"region"`
 }
 
-// ConfigPath returns the full path to the user config file within a config directory.
-func ConfigPath(configDir string) string {
-	return configDir + "/" + ConfigFileName
+// Path returns the full path to the user config file within a config directory.
+func Path(configDir string) string {
+	return filepath.Join(configDir, FileName)
 }
 
-// DefaultConfigPath returns the full path to the default config template within a config directory.
-func DefaultConfigPath(configDir string) string {
-	return configDir + "/" + DefaultConfigFileName
+// copyIfMissing seeds dst from the tracked template src when dst does not
+// exist yet; config.toml and sources.toml are both created this way.
+func copyIfMissing(dst, src string) error {
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", filepath.Base(src), err)
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Base(dst), err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copying %s: %w", filepath.Base(src), err)
+	}
+	return nil
 }
 
-// ensureConfigFile copies the default config to the user config path if it does not exist.
-func ensureConfigFile(configDir string) error {
-	cfgPath := ConfigPath(configDir)
-	if _, err := os.Stat(cfgPath); err == nil {
-		return nil // already exists
+// writeAtomic writes data to a temp sibling and renames it over path, so a
+// crash never leaves a half-written file.
+func writeAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", filepath.Base(tmp), err)
 	}
-
-	defaultPath := DefaultConfigPath(configDir)
-	src, err := os.Open(defaultPath)
-	if err != nil {
-		return fmt.Errorf("opening %s: %w", DefaultConfigFileName, err)
-	}
-	defer src.Close()
-
-	dst, err := os.Create(cfgPath)
-	if err != nil {
-		return fmt.Errorf("creating %s: %w", ConfigFileName, err)
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("copying default config: %w", err)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("renaming %s: %w", filepath.Base(tmp), err)
 	}
 	return nil
 }
@@ -264,16 +289,16 @@ func ensureConfigFile(configDir string) error {
 // It ensures config.toml exists (copying from config.default.toml if needed),
 // then loads config.toml → APP__* env vars.
 func Load(configDir string) (*Config, error) {
-	if err := ensureConfigFile(configDir); err != nil {
+	cfgPath := Path(configDir)
+	if err := copyIfMissing(cfgPath, filepath.Join(configDir, DefaultFileName)); err != nil {
 		return nil, fmt.Errorf("ensuring config file: %w", err)
 	}
 
 	k := koanf.New(".")
 
 	// Load user config
-	cfgPath := ConfigPath(configDir)
 	if err := k.Load(file.Provider(cfgPath), toml.Parser()); err != nil {
-		return nil, fmt.Errorf("loading %s: %w", ConfigFileName, err)
+		return nil, fmt.Errorf("loading %s: %w", FileName, err)
 	}
 
 	// Load environment variables with APP__ prefix
@@ -292,6 +317,11 @@ func Load(configDir string) (*Config, error) {
 	}
 
 	var cfg Config
+	for _, key := range []string{"chunking.title_in_search_text", "reranker.title_in_text"} {
+		if !k.Exists(key) {
+			k.Set(key, true)
+		}
+	}
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return nil, err
 	}
@@ -349,7 +379,7 @@ func checkLegacyKeys(k *koanf.Koanf) error {
 	}
 	return fmt.Errorf(
 		"config uses legacy keys; rename the following in your %s and retry:\n%s",
-		ConfigFileName, strings.Join(found, "\n"),
+		FileName, strings.Join(found, "\n"),
 	)
 }
 
@@ -373,6 +403,9 @@ func (c *Config) Validate() error {
 			c.Retrieval.RetrievalMode,
 		)
 	}
+	if err := c.Crawler.validateRateLimit(); err != nil {
+		return err
+	}
 	if c.Reranker.Enabled {
 		if c.Reranker.Backend == "" {
 			return fmt.Errorf("reranker.enabled = true requires reranker.backend to be set")
@@ -380,7 +413,7 @@ func (c *Config) Validate() error {
 		if c.Reranker.Model == "" {
 			return fmt.Errorf("reranker.enabled = true requires reranker.model to be set")
 		}
-		b := c.GetBackend(c.Reranker.Backend)
+		b := c.EnabledBackend(c.Reranker.Backend)
 		if b == nil {
 			return fmt.Errorf(
 				"reranker.backend = %q does not match any enabled [[backends]] entry",
@@ -401,6 +434,25 @@ func (c *Config) Validate() error {
 				c.Reranker.TopN, c.Retrieval.TopK,
 			)
 		}
+	}
+	return nil
+}
+
+func (c CrawlerConfig) validateRateLimit() error {
+	if c.ThrottledPathDelay < 0 {
+		return fmt.Errorf("crawler.throttled_path_delay (%s) must not be negative", c.ThrottledPathDelay)
+	}
+	if c.RateLimitRetries < 1 {
+		return fmt.Errorf("crawler.rate_limit_retries (%d) must be at least 1", c.RateLimitRetries)
+	}
+	if c.RateLimitBackoff <= 0 {
+		return fmt.Errorf("crawler.rate_limit_backoff (%s) must be positive", c.RateLimitBackoff)
+	}
+	if c.RateLimitMaxWait < c.RateLimitBackoff {
+		return fmt.Errorf(
+			"crawler.rate_limit_max_wait (%s) must not be shorter than crawler.rate_limit_backoff (%s)",
+			c.RateLimitMaxWait, c.RateLimitBackoff,
+		)
 	}
 	return nil
 }
@@ -442,7 +494,7 @@ func (c *Config) applyDefaults() {
 		c.Agent.Temperature = 0.7
 	}
 	if c.Agent.MaxIterations == 0 {
-		c.Agent.MaxIterations = 5
+		c.Agent.MaxIterations = 20
 	}
 	if c.Agent.HistoryReserveTokens == 0 {
 		c.Agent.HistoryReserveTokens = 1280
@@ -502,10 +554,25 @@ func (c *Config) applyDefaults() {
 	}
 
 	if c.Crawler.RequestDelay == 0 {
-		c.Crawler.RequestDelay = 500 * time.Millisecond
+		c.Crawler.RequestDelay = time.Second
 	}
 	if c.Crawler.RequestTimeout == 0 {
 		c.Crawler.RequestTimeout = 30 * time.Second
+	}
+	if len(c.Crawler.ThrottledPaths) == 0 {
+		c.Crawler.ThrottledPaths = []string{"/navegador_de_ficheros/"}
+	}
+	if c.Crawler.ThrottledPathDelay == 0 {
+		c.Crawler.ThrottledPathDelay = 45 * time.Second
+	}
+	if c.Crawler.RateLimitRetries == 0 {
+		c.Crawler.RateLimitRetries = 4
+	}
+	if c.Crawler.RateLimitBackoff == 0 {
+		c.Crawler.RateLimitBackoff = 30 * time.Second
+	}
+	if c.Crawler.RateLimitMaxWait == 0 {
+		c.Crawler.RateLimitMaxWait = 5 * time.Minute
 	}
 	if c.Crawler.ProgressLogInterval == 0 {
 		c.Crawler.ProgressLogInterval = 30 * time.Second
@@ -536,17 +603,18 @@ func (c *Config) applyDefaults() {
 	}
 	if len(c.Crawler.RejectionPatterns) == 0 {
 		c.Crawler.RejectionPatterns = []string{
-			"página no encontrada",       // soft 404
-			"error 404",                  // soft 404
-			"página en construcción",     // stub
-			"sitio en construcción",      // stub
-			"sin descripción disponible", // CMS placeholder
+			"no ha sido posible cargar esta página", // UMA CMS error page served with 200
+			"página no encontrada",                  // soft 404
+			"error 404",                             // soft 404
+			"página en construcción",                // stub
+			"sitio en construcción",                 // stub
+			"sin descripción disponible",            // CMS placeholder
 		}
 	}
 	if len(c.Crawler.StripQueryParams) == 0 {
 		c.Crawler.StripQueryParams = []string{
 			"utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
-			"fbclid", "gclid", "_ga", "ref", "lang",
+			"fbclid", "gclid", "_ga", "ref", "lang", "set_language",
 		}
 	}
 	if len(c.Crawler.PDF.HeadingPatterns) == 0 {
@@ -600,13 +668,5 @@ func WriteTo(cfg *Config, path string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("writing temp config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming config: %w", err)
-	}
-	return nil
+	return writeAtomic(path, data)
 }

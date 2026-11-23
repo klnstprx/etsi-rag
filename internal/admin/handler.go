@@ -10,7 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"etsi-rag/internal/agent"
+	"etsi-rag/internal/admin/templates"
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/crawler"
 	"etsi-rag/internal/diag"
@@ -21,10 +21,9 @@ import (
 	"etsi-rag/internal/store"
 )
 
-//go:embed static/styles.css static/htmx.min.js static/htmx-sse.js static/htmx-remove-me.js static/chat.js
+//go:embed static/styles.css static/htmx.min.js static/htmx-remove-me.js static/chat.js
 var staticFiles embed.FS
 
-// Handler serves the admin UI.
 // Capacities reports the live effective values for the capacity fields whose
 // config semantics are "0 = auto" (agent context window, embedding/reranker
 // max tokens). Implemented by the server's runtime probe holder. The config
@@ -36,15 +35,14 @@ type Capacities interface {
 	RerankerMaxTokens() int
 }
 
+// Handler serves the admin UI.
 type Handler struct {
 	store        *store.SQLiteStore
 	config       *config.Config
 	configPath   string
-	configDir    string // directory holding config.toml and sources.toml
 	sources      *sources.Registry
 	diag         *diag.Registry
 	sessionStore *session.Store
-	agentHandle  *agent.Handle
 	crawler      *crawler.Crawler
 	ingester     *ingest.Ingester
 	objStore     *objectstore.Client
@@ -59,15 +57,14 @@ type HandlerConfig struct {
 	Store        *store.SQLiteStore
 	Config       *config.Config
 	ConfigPath   string
-	ConfigDir    string
 	Sources      *sources.Registry
 	Diag         *diag.Registry
 	SessionStore *session.Store
-	AgentHandle  *agent.Handle
 	Crawler      *crawler.Crawler
 	Ingester     *ingest.Ingester
 	ObjStore     *objectstore.Client
 	Logger       zerolog.Logger
+	// OnConfigSave runs after every successful config or backend save.
 	OnConfigSave func()
 	Capacities   Capacities
 	// BaseCtx is a server-lifetime context used for background goroutines
@@ -86,11 +83,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		store:        cfg.Store,
 		config:       cfg.Config,
 		configPath:   cfg.ConfigPath,
-		configDir:    cfg.ConfigDir,
 		sources:      cfg.Sources,
 		diag:         cfg.Diag,
 		sessionStore: cfg.SessionStore,
-		agentHandle:  cfg.AgentHandle,
 		crawler:      cfg.Crawler,
 		ingester:     cfg.Ingester,
 		objStore:     cfg.ObjStore,
@@ -101,16 +96,16 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 }
 
-// SetOnConfigSave sets the callback invoked after every successful config save.
-func (h *Handler) SetOnConfigSave(fn func()) {
-	h.onConfigSave = fn
-}
-
-// fireConfigSave calls the onConfigSave callback if set.
-func (h *Handler) fireConfigSave() {
+// saveConfig persists the live config and then runs the OnConfigSave hook,
+// so every save path rebuilds clients the same way.
+func (h *Handler) saveConfig() error {
+	if err := config.WriteTo(h.config, h.configPath); err != nil {
+		return err
+	}
 	if h.onConfigSave != nil {
 		h.onConfigSave()
 	}
+	return nil
 }
 
 // Routes returns a chi router with all admin routes mounted.
@@ -169,10 +164,23 @@ func isHTMX(r *http.Request) bool {
 // Boosted navigations (hx-boost) receive the full page so HTMX can swap the
 // entire body, which updates both the sidebar active state and the main content.
 func render(w http.ResponseWriter, r *http.Request, page, fragment templ.Component) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if isHTMX(r) {
-		fragment.Render(r.Context(), w)
+		writeHTML(w, r, fragment)
 	} else {
-		page.Render(r.Context(), w)
+		writeHTML(w, r, page)
 	}
+}
+
+// writeHTML renders components in order as one HTML response.
+func writeHTML(w http.ResponseWriter, r *http.Request, components ...templ.Component) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	for _, c := range components {
+		c.Render(r.Context(), w)
+	}
+}
+
+// writeToast renders a single toast, the reply for actions that fail
+// without re-rendering their panel.
+func writeToast(w http.ResponseWriter, r *http.Request, msg, kind string) {
+	writeHTML(w, r, templates.Toast(msg, kind))
 }

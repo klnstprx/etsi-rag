@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/openai/openai-go"
 )
@@ -55,4 +56,12 @@ func toFunctionTool(t Tool) openai.ChatCompletionToolParam {
 			Parameters:  t.Parameters(),
 		},
 	}
+}
+
+// validTopK rejects a non-positive top_k from the model; a bad request must not look like "no results".
+func validTopK(topK *int) error {
+	if topK != nil && *topK < 1 {
+		return fmt.Errorf("top_k must be at least 1, got %d", *topK)
+	}
+	return nil
 }

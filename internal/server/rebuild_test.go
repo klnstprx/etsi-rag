@@ -147,31 +147,31 @@ func TestRebuildClients_PreservesVisionWiring(t *testing.T) {
 	t.Cleanup(func() { srv.store.Close(); srv.sessionStore.Close() })
 
 	// Initial state: vision wired through to the configured backend + URL.
-	a := srv.adminHandler.GetAgent()
+	a := srv.agentHandle.Get()
 	if a == nil {
 		t.Fatal("agent should be wired after New()")
 	}
-	if enabled, baseURL := a.Vision(); !enabled || baseURL != "http://localhost:3000" {
-		t.Fatalf("after New: Vision()=(%v,%q), want (true,%q)", enabled, baseURL, "http://localhost:3000")
+	if enabled, baseURL := srv.agentVision(); !enabled || baseURL != "http://localhost:3000" {
+		t.Fatalf("after New: agentVision()=(%v,%q), want (true,%q)", enabled, baseURL, "http://localhost:3000")
 	}
 
 	// Simulate any admin save (e.g. tweaking another config section). The
 	// rebuilt agent must keep the same vision wiring.
 	srv.rebuildClients()
 
-	a = srv.adminHandler.GetAgent()
+	a = srv.agentHandle.Get()
 	if a == nil {
 		t.Fatal("agent should still be wired after rebuildClients()")
 	}
-	if enabled, baseURL := a.Vision(); !enabled || baseURL != "http://localhost:3000" {
-		t.Errorf("after rebuild: Vision()=(%v,%q), want (true,%q) — VisionGetter dropped on rebuild", enabled, baseURL, "http://localhost:3000")
+	if enabled, baseURL := srv.agentVision(); !enabled || baseURL != "http://localhost:3000" {
+		t.Errorf("after rebuild: agentVision()=(%v,%q), want (true,%q)", enabled, baseURL, "http://localhost:3000")
 	}
 
 	// Toggling agent.vision.enabled off via the live cfg pointer must take
 	// effect without a further rebuild — the getter reads cfg per call.
 	cfg.Agent.Vision.Enabled = false
-	if enabled, _ := a.Vision(); enabled {
-		t.Error("Vision() should observe agent.vision.enabled=false through live cfg")
+	if enabled, _ := srv.agentVision(); enabled {
+		t.Error("agentVision() should observe agent.vision.enabled=false through live cfg")
 	}
 }
 
@@ -201,15 +201,15 @@ func TestRebuildClients_VisionReportsBaseURLEmpty(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.store.Close(); srv.sessionStore.Close() })
 
-	a := srv.adminHandler.GetAgent()
+	a := srv.agentHandle.Get()
 	if a == nil {
 		t.Fatal("agent should be wired")
 	}
-	enabled, baseURL := a.Vision()
+	enabled, baseURL := srv.agentVision()
 	if !enabled {
-		t.Error("Vision().enabled should be true when agent.vision.enabled=true even with empty PublicBaseURL — distinguishes the two failure modes for diagnostic logging")
+		t.Error("agentVision().enabled should be true when agent.vision.enabled=true even with empty PublicBaseURL — distinguishes the two failure modes for diagnostic logging")
 	}
 	if baseURL != "" {
-		t.Errorf("Vision().baseURL = %q, want empty", baseURL)
+		t.Errorf("agentVision().baseURL = %q, want empty", baseURL)
 	}
 }

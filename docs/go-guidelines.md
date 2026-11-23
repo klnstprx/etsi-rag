@@ -40,7 +40,7 @@ Project-specific Go conventions and the Go Proverbs that guide design decisions.
 
 ### Interfaces
 
-Keep interfaces small and focused. The `llm.Embedder` interface exists for testability — it wraps only what consumers need. The `tokencount.Counter` interface has three implementations (LlamaCpp, Tiktoken, Estimate) selected at runtime. The agent takes `*llm.ChatClient` concretely because it needs `ChatWithTools`.
+Keep interfaces small and focused. The `llm.Embedder` interface exists for testability — it wraps only what consumers need. The `tokencount.Counter` interface has two implementations (LlamaCpp, Tiktoken) selected at runtime. The agent takes `*llm.ChatClient` concretely because it needs `ChatWithTools`.
 
 ```go
 // Good: small, focused
@@ -129,7 +129,7 @@ func Greet(name string) { fmt.Printf("Hello, %s", name) }
 #### Project-Specific
 
 - Run `make test` after every change. No regressions allowed.
-- Browser tests (go-rod) skip in `-short` mode.
+- Browser tests (chromedp, need Chrome) skip in `-short` mode.
 - This project uses mock structs in `_test.go` files (e.g., `mockLLM` in `pipeline_test.go`, `handler_test.go`). These are simple stubs/fakes — keep them minimal.
 
 ### Configuration

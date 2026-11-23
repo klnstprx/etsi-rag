@@ -3,12 +3,12 @@
 # ============================================================
 # Stage 1 — build the server binary + admin assets
 # ============================================================
-# golang:1.25 tracks the latest 1.25.x patch (>= the go.mod toolchain).
-FROM golang:1.25-bookworm AS builder
+# golang:1.26 tracks the latest 1.26.x patch (>= the go.mod toolchain).
+FROM golang:1.26-bookworm AS builder
 
 # Pinned tool versions. templ matches go.mod; tailwind matches the dev machine.
-ARG TEMPL_VERSION=v0.3.1001
-ARG TAILWIND_VERSION=v4.3.0
+ARG TEMPL_VERSION=v0.3.1118
+ARG TAILWIND_VERSION=v4.3.5
 
 WORKDIR /src
 
@@ -37,11 +37,11 @@ RUN templ generate \
 # Stage 2 — runtime
 # ============================================================
 # Debian slim (not scratch/alpine): the crawler shells out to poppler and
-# drives a system Chromium via go-rod.
+# drives a system Chromium via chromedp.
 FROM debian:bookworm-slim AS runtime
 
 # poppler-utils -> pdftotext / pdfinfo / pdftoppm (PDF text, metadata, page renders)
-# chromium      -> headless browser for JS-rendered pages and screenshots (go-rod)
+# chromium      -> headless browser for JS-rendered pages and screenshots (chromedp)
 # fonts-liberation -> baseline fonts so Chromium renders text in screenshots
 # ca-certificates  -> outbound TLS to the crawl targets and the LLM backend
 RUN apt-get update \
@@ -52,8 +52,9 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Run unprivileged. Chromium refuses to start as root without --no-sandbox;
-# as a non-root user it works under Docker's default seccomp profile.
+# Run unprivileged. Inside a container the crawler starts Chromium with
+# --no-sandbox (container runtimes commonly block the namespaces its sandbox
+# needs), so the non-root user is what confines the browser.
 RUN useradd --system --uid 10001 --create-home --home-dir /home/app app
 
 WORKDIR /app

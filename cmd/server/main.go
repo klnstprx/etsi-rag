@@ -29,7 +29,7 @@ func run(logger zerolog.Logger) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	srv, err := server.New(cfg, config.ConfigPath(configDir), logger)
+	srv, err := server.New(cfg, config.Path(configDir), logger)
 	if err != nil {
 		return err
 	}

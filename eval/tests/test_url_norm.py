@@ -23,9 +23,13 @@ from etsi_eval.url_norm import canonicalize
         ("https://www.uma.es/foo/#section", "https://www.uma.es/foo"),
         # Default ports stripped.
         ("https://www.uma.es:443/foo", "https://www.uma.es/foo"),
-        ("http://www.uma.es:80/foo", "http://www.uma.es/foo"),
+        ("http://www.uma.es:80/foo", "https://www.uma.es/foo"),
+        ("http://example.org:80/foo", "http://example.org/foo"),
         # Non-default port preserved.
-        ("http://www.uma.es:8080/foo", "http://www.uma.es:8080/foo"),
+        ("http://example.org:8080/foo", "http://example.org:8080/foo"),
+        # uma.es hosts go to https, as the crawler records them.
+        ("http://www.uma.es/etsi-informatica/", "https://www.uma.es/etsi-informatica"),
+        ("http://sara.uma.es/ht/a.pdf", "https://sara.uma.es/ht/a.pdf"),
         # Query preserved unchanged.
         ("https://www.uma.es/foo?a=1&b=2", "https://www.uma.es/foo?a=1&b=2"),
         # Whitespace trimmed.

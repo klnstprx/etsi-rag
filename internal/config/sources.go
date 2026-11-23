@@ -2,9 +2,7 @@ package config
 
 import (
 	"fmt"
-	"io"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -34,48 +32,15 @@ func SourcesPath(configDir string) string {
 	return filepath.Join(configDir, SourcesFileName)
 }
 
-// DefaultSourcesPath returns the full path to the default sources template.
-func DefaultSourcesPath(configDir string) string {
-	return filepath.Join(configDir, DefaultSourcesFileName)
-}
-
 // EnsureSourcesFile copies the default sources file to the user path if the
-// user file does not exist. Mirrors ensureConfigFile for config.toml.
+// user file does not exist.
 func EnsureSourcesFile(configDir string) error {
-	userPath := SourcesPath(configDir)
-	if _, err := os.Stat(userPath); err == nil {
-		return nil
-	}
-
-	defaultPath := DefaultSourcesPath(configDir)
-	src, err := os.Open(defaultPath)
-	if err != nil {
-		return fmt.Errorf("opening %s: %w", DefaultSourcesFileName, err)
-	}
-	defer src.Close()
-
-	dst, err := os.Create(userPath)
-	if err != nil {
-		return fmt.Errorf("creating %s: %w", SourcesFileName, err)
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("copying default sources: %w", err)
-	}
-	return nil
+	return copyIfMissing(SourcesPath(configDir), filepath.Join(configDir, DefaultSourcesFileName))
 }
 
-// LoadSources reads sources.toml from configDir and validates it. The file is
+// LoadSourcesFile reads and validates the sources file at path. The file is
 // the single source of truth for crawl_sources; crawl_pages and crawl_runs
 // reference each entry by its stable Key.
-func LoadSources(configDir string) ([]domain.CrawlSource, error) {
-	path := SourcesPath(configDir)
-	return LoadSourcesFile(path)
-}
-
-// LoadSourcesFile reads a sources file at the given path. Useful for tests
-// that operate on temp files outside a configDir layout.
 func LoadSourcesFile(path string) ([]domain.CrawlSource, error) {
 	k := koanf.New(".")
 	if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
@@ -110,15 +75,7 @@ func WriteSources(sources []domain.CrawlSource, path string) error {
 		return fmt.Errorf("marshaling sources: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("writing temp sources: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming sources: %w", err)
-	}
-	return nil
+	return writeAtomic(path, data)
 }
 
 // validateSources enforces invariants the rest of the system relies on:
@@ -153,7 +110,7 @@ func validateSources(sources []domain.CrawlSource) error {
 			sources[i].Tags[j] = trimmed
 		}
 		// Normalise empty slice to nil so round-trip equality (nil vs []) is
-		// stable across LoadSources → WriteSources → LoadSources.
+		// stable across a load → write → load round trip.
 		if len(sources[i].Tags) == 0 {
 			sources[i].Tags = nil
 		}

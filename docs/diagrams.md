@@ -162,7 +162,7 @@ flowchart TB
 ```mermaid
 flowchart TD
     Seeds["Seed URLs"] --> BFS["BFS traversal"]
-    BFS --> Fetch["Fetch (HTTP / go-rod)"]
+    BFS --> Fetch["Fetch (HTTP / chromedp)"]
     Fetch --> RawStore["Store raw in RustFS"]
     Fetch --> Links["Extract links"]
     Links -->|"enqueue"| BFS
@@ -175,7 +175,7 @@ flowchart TD
         PDFIn["PDF"] --> PDFText["pdftotext (poppler)"]
         Readability --> MD["Markdown<br/>(with [[image:ref]] markers)"]
         PDFText --> MD
-        HTML -.->|"go-rod screenshot"| Screenshot["HTML page PNG"]
+        HTML -.->|"chromedp screenshot"| Screenshot["HTML page PNG"]
         PDFIn -.->|"pdftoppm"| PDFPages["PDF page PNGs"]
         Screenshot --> ArtUpload["Upload to RustFS<br/>crawl/img/{sha}/{ref}.png"]
         PDFPages --> ArtUpload
@@ -215,7 +215,7 @@ flowchart TB
 
     Counter{"Iterations<br/>< max_iterations?"}
     Counter -->|"Yes"| LLMCall
-    Counter -->|"No"| ErrorBox["Error: max iterations<br/>([agent].max_iterations, default 5)"]
+    Counter -->|"No"| ErrorBox["Error: max iterations<br/>([agent].max_iterations, default 20)"]
 ```
 
 ## 6. Configuration & Client Resolution
@@ -229,7 +229,7 @@ flowchart TD
     end
 
     Config --> Stage["Stage config<br/>([embedding] / [agent] / [reranker])"]
-    Stage --> Resolve["server.resolveEmbedClient / resolveChatClient / resolveReranker<br/>(GetBackend by name + merge stage cfg)"]
+    Stage --> Resolve["server.resolveEmbedClient / resolveChatClient / resolveReranker<br/>(EnabledBackend by name + merge stage cfg)"]
     Resolve --> Backend["BackendConfig"]
 
     Backend --> EmbedClient["llm.EmbedClient"]

@@ -1,10 +1,7 @@
-// Admin chat client for the proprietary POST /v1/agent/chat endpoint.
-//
-// This replaces the old htmx-sse pair: the admin UI is now a plain client of
-// the same proprietary API the eval harness uses. It POSTs a single message,
-// reads the JSON-SSE stream (event: token / tool / done / error), and renders
-// tokens + tool cards client-side. External file (CSP-safe); a single
-// delegated submit listener survives htmx-boost navigation.
+// Admin chat client for the proprietary POST /v1/agent/chat endpoint, the
+// same API the eval harness uses. It POSTs one message, reads the JSON-SSE
+// stream (event: token / tool / done / error) and renders tokens and tool
+// cards client-side; one delegated submit listener survives htmx-boost.
 (function () {
   "use strict";
 
@@ -77,7 +74,7 @@
       '<span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>' +
       '<span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]"></span>' +
       '<span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]"></span>';
-    const tools = el("div", "assistant-tools space-y-1");
+    const tools = el("div", "space-y-1");
     const bubble = el("div", "rounded-lg px-4 py-2 bg-gray-100 text-gray-900 text-sm whitespace-pre-wrap");
     bubble.hidden = true;
     host.append(thinking, tools, bubble);

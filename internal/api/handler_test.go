@@ -63,7 +63,7 @@ func setupTestHandler(t *testing.T) (*Handler, *store.SQLiteStore) {
 		TopK:             5,
 		MaxContextTokens: 1024,
 	})
-	ingester := ingest.NewIngester(s, h, testutil.FakeChunker{})
+	ingester := ingest.New(s, h, testutil.FakeChunker{})
 	sessionStore := session.NewStore(config.SessionConfig{MaxMessages: 10, TTLSeconds: 3600})
 	t.Cleanup(sessionStore.Close)
 
@@ -127,7 +127,7 @@ func TestGetArtifact_TokenStripsPngSuffix(t *testing.T) {
 	// Hit with the .png suffix; we expect to reach the store lookup, which
 	// will succeed in finding the artifact, then fail on the missing
 	// objStore (nil → 500). The 500 here proves we got past the
-	// store.GetArtifactByToken call (would be 404 if the suffix were not
+	// store.ArtifactByToken call (would be 404 if the suffix were not
 	// stripped).
 	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/"+a.PublicToken+".png", nil)
 	w := httptest.NewRecorder()
@@ -501,18 +501,7 @@ func TestChatCompletions_SessionMode_HappyPath(t *testing.T) {
 	sessionID := h.sessionStore.Create()
 
 	// Send a chat completion request
-	body, _ := json.Marshal(ChatCompletionRequest{
-		ChatCompletionNewParams: openai.ChatCompletionNewParams{
-			Messages: []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("Hi there"),
-					},
-				}},
-			},
-			Model: "test-model",
-		},
-	})
+	body := chatRequestBody("Hi there", false)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("X-Session-ID", sessionID)
@@ -594,19 +583,7 @@ func TestChatCompletions_Streaming_HappyPath(t *testing.T) {
 	h.agentHandle.Set(ag)
 
 	sessionID := h.sessionStore.Create()
-	body, _ := json.Marshal(ChatCompletionRequest{
-		ChatCompletionNewParams: openai.ChatCompletionNewParams{
-			Messages: []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("saludos"),
-					},
-				}},
-			},
-			Model: "test-model",
-		},
-		Stream: true,
-	})
+	body := chatRequestBody("saludos", true)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("X-Session-ID", sessionID)
@@ -665,19 +642,7 @@ func TestChatCompletions_Streaming_NoSessionHeaderMintsOne(t *testing.T) {
 	ag := agent.NewAgent(chatClient, nil, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
-	body, _ := json.Marshal(ChatCompletionRequest{
-		ChatCompletionNewParams: openai.ChatCompletionNewParams{
-			Messages: []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("hello"),
-					},
-				}},
-			},
-			Model: "test-model",
-		},
-		Stream: true,
-	})
+	body := chatRequestBody("hello", true)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -732,19 +697,7 @@ func TestChatCompletions_Streaming_StaysPure(t *testing.T) {
 	ag := agent.NewAgent(chatClient, []agent.Tool{echo}, "system", 5, nil, agent.Budget{}, 0, h.sessionStore, zerolog.Nop())
 	h.agentHandle.Set(ag)
 
-	body, _ := json.Marshal(ChatCompletionRequest{
-		ChatCompletionNewParams: openai.ChatCompletionNewParams{
-			Messages: []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("call echo please"),
-					},
-				}},
-			},
-			Model: "test-model",
-		},
-		Stream: true,
-	})
+	body := chatRequestBody("call echo please", true)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -799,19 +752,7 @@ func TestChatCompletions_Streaming_OverRealSocket(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	body, _ := json.Marshal(ChatCompletionRequest{
-		ChatCompletionNewParams: openai.ChatCompletionNewParams{
-			Messages: []openai.ChatCompletionMessageParamUnion{
-				{OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.ChatCompletionUserMessageParamContentUnion{
-						OfString: openai.String("saludos"),
-					},
-				}},
-			},
-			Model: "test-model",
-		},
-		Stream: true,
-	})
+	body := chatRequestBody("saludos", true)
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -846,3 +787,14 @@ func TestChatCompletions_Streaming_OverRealSocket(t *testing.T) {
 }
 
 func stubEchoTool() agent.Tool { return stubEchoTool_{} }
+
+// chatRequestBody builds the wire JSON an OpenAI SDK client sends to
+// /v1/chat/completions: one user message, optionally streamed.
+func chatRequestBody(msg string, stream bool) []byte {
+	body, _ := json.Marshal(map[string]any{
+		"model":    "test-model",
+		"messages": []map[string]string{{"role": "user", "content": msg}},
+		"stream":   stream,
+	})
+	return body
+}

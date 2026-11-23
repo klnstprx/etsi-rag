@@ -2,7 +2,9 @@ package chunking
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -266,6 +268,7 @@ func TestStructureAwareChunker(t *testing.T) {
 				MaxChunkSize: tt.chunkSize,
 				ChunkOverlap: 0,
 				MinChunkSize: tt.minMaxChunkSize,
+				Separators:   []string{"\n\n", "\n", ". ", " ", ""}, // config.default.toml
 			}
 			if cfg.MinChunkSize == 0 {
 				cfg.MinChunkSize = 5
@@ -489,6 +492,185 @@ func TestBuildBreadcrumbs(t *testing.T) {
 		if breadcrumbs[i] != w {
 			t.Errorf("breadcrumb[%d] = %q, want %q", i, breadcrumbs[i], w)
 		}
+	}
+}
+
+// TestStructureAwareChunkerKeepsBodilessHeadings: a heading with no body is
+// only redundant when a child section follows, because the child's breadcrumb
+// carries it. Otherwise its text must still reach a chunk.
+func TestStructureAwareChunkerKeepsBodilessHeadings(t *testing.T) {
+	type out struct{ title, content string }
+	tests := []struct {
+		name     string
+		content  string
+		minChunk int
+		want     []out
+	}{
+		{
+			name:     "bodiless heading followed by a sibling",
+			content:  "# Centro\n\nIntro.\n\n## Contacto\n\n## Horario\n\nDe nueve a dos.",
+			minChunk: 1,
+			want: []out{
+				{"Centro", "# Centro\n\nIntro."},
+				{"Centro > Contacto", "## Contacto"},
+				{"Centro > Horario", "## Horario\n\nDe nueve a dos."},
+			},
+		},
+		{
+			name:     "bodiless heading followed by a parent-level heading",
+			content:  "# A\n\nIntro.\n\n## Enlaces\n\n# B\n\nBody.",
+			minChunk: 1,
+			want: []out{
+				{"A", "# A\n\nIntro."},
+				{"A > Enlaces", "## Enlaces"},
+				{"B", "# B\n\nBody."},
+			},
+		},
+		{
+			name:     "bodiless parent is carried by its child's breadcrumb",
+			content:  "# Grado\n\n## Plan\n\nAsignaturas.",
+			minChunk: 1,
+			want: []out{
+				{"Grado > Plan", "## Plan\n\nAsignaturas."},
+			},
+		},
+		{
+			name:     "page made only of headings",
+			content:  "## Inicio\n\n## Noticias\n\n## Contacto",
+			minChunk: 64,
+			want: []out{
+				{"", "## Inicio\n\n## Noticias"},
+				{"Contacto", "## Contacto"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunker := NewStructureAwareChunker(config.ChunkingConfig{
+				MaxChunkSize: 100,
+				MinChunkSize: tt.minChunk,
+				Separators:   []string{"\n\n", "\n", ". ", " ", ""},
+			}, &mockCounter{}, 512)
+			chunks, err := chunker.Chunk(context.Background(), tt.content)
+			if err != nil {
+				t.Fatalf("Chunk: %v", err)
+			}
+			got := make([]out, len(chunks))
+			for i, c := range chunks {
+				got[i] = out{c.SectionTitle, c.Content}
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("chunks = %q\nwant     %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStructureAwareChunkerSplitsOversizedTableByRows: a table too large for
+// one chunk is a single "\n\n" segment. It must be split on the finer "\n"
+// separator so each chunk holds whole rows, not cut by token count.
+func TestStructureAwareChunkerSplitsOversizedTableByRows(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("## Horario\n\nClases del primer curso.\n\n| Asignatura | Día | Aula |\n| --- | --- | --- |\n")
+	for i := range 30 {
+		fmt.Fprintf(&sb, "| Programación %d | Lunes | Aula %d |\n", i, i)
+	}
+	content := sb.String()
+
+	chunker := NewStructureAwareChunker(config.ChunkingConfig{
+		MaxChunkSize: 60,
+		MinChunkSize: 5,
+		Separators:   []string{"\n\n", "\n", ". ", " ", ""},
+	}, &mockCounter{}, 512)
+	chunks, err := chunker.Chunk(context.Background(), content)
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) < 3 {
+		t.Fatalf("expected the table to span several chunks, got %d", len(chunks))
+	}
+
+	inputLines := strings.Split(content, "\n")
+	var rows int
+	for i, c := range chunks {
+		for line := range strings.SplitSeq(c.Content, "\n") {
+			if !slices.Contains(inputLines, line) {
+				t.Errorf("chunk[%d] has a line that is not a whole input line: %q", i, line)
+			}
+			if strings.HasPrefix(line, "| Programación") {
+				rows++
+			}
+		}
+	}
+	if rows != 30 {
+		t.Errorf("chunks hold %d table rows, want all 30", rows)
+	}
+}
+
+// TestStructureAwareChunkerOverlapsCutParagraphs: when a paragraph or table
+// is too large for one chunk and gets cut between sentences or rows, each
+// chunk after the first repeats the trailing sentences or rows of the
+// previous one, up to chunk_overlap tokens. Chunks that break between whole
+// paragraphs stand alone.
+func TestStructureAwareChunkerOverlapsCutParagraphs(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		max     int
+		want    []string
+	}{
+		{
+			name: "long paragraph cut between sentences",
+			content: "## Normativa\n\nLa regla uno aplica. La regla dos aplica. " +
+				"La regla tres aplica. La regla cuatro aplica. La regla cinco aplica.",
+			max: 13,
+			want: []string{
+				"## Normativa",
+				"La regla uno aplica. La regla dos aplica. La regla tres aplica.",
+				"La regla tres aplica. La regla cuatro aplica. La regla cinco aplica.",
+			},
+		},
+		{
+			name:    "table cut between rows",
+			content: "## Horario\n\n| Lunes | 1 |\n| Martes | 2 |\n| Jueves | 3 |\n| Viernes | 4 |",
+			max:     13,
+			want: []string{
+				"## Horario",
+				"| Lunes | 1 |\n| Martes | 2 |",
+				"| Martes | 2 |\n| Jueves | 3 |",
+				"| Jueves | 3 |\n| Viernes | 4 |",
+			},
+		},
+		{
+			name:    "chunks split between paragraphs do not overlap",
+			content: "## Avisos\n\nPrimer aviso corto.\n\nSegundo aviso corto.\n\nTercer aviso corto.",
+			max:     8,
+			want: []string{
+				"## Avisos\n\nPrimer aviso corto.",
+				"Segundo aviso corto.\n\nTercer aviso corto.",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunker := NewStructureAwareChunker(config.ChunkingConfig{
+				MaxChunkSize: tt.max,
+				MinChunkSize: 1,
+				ChunkOverlap: 5,
+				Separators:   []string{"\n\n", "\n", ". ", " ", ""},
+			}, &mockCounter{}, 512)
+			chunks, err := chunker.Chunk(context.Background(), tt.content)
+			if err != nil {
+				t.Fatalf("Chunk: %v", err)
+			}
+			got := make([]string, len(chunks))
+			for i, c := range chunks {
+				got[i] = c.Content
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("chunks = %q\nwant     %q", got, tt.want)
+			}
+		})
 	}
 }
 

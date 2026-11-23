@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"etsi-rag/internal/config"
+	"etsi-rag/internal/diag"
 	"etsi-rag/internal/domain"
 )
 
@@ -45,7 +46,7 @@ func TestDiag_NoBackendIssueOnBoot(t *testing.T) {
 	cfg := defaultConfig()
 	srv := startupTestServer(t, cfg, "")
 
-	if !srv.diag.Has("agent.no_backend") {
+	if !hasIssue(srv.diag.Snapshot(), "agent.no_backend") {
 		t.Errorf("expected agent.no_backend issue at boot with empty Agent.Backend; got snapshot=%+v", srv.diag.Snapshot())
 	}
 }
@@ -54,7 +55,7 @@ func TestDiag_NoBackendClearedAfterRebuild(t *testing.T) {
 	// Boot with no agent backend → issue set. Add a backend, rebuild → cleared.
 	cfg := defaultConfig()
 	srv := startupTestServer(t, cfg, "")
-	if !srv.diag.Has("agent.no_backend") {
+	if !hasIssue(srv.diag.Snapshot(), "agent.no_backend") {
 		t.Fatal("precondition: agent.no_backend should be set on boot")
 	}
 
@@ -69,7 +70,7 @@ func TestDiag_NoBackendClearedAfterRebuild(t *testing.T) {
 
 	srv.rebuildClients()
 
-	if srv.diag.Has("agent.no_backend") {
+	if hasIssue(srv.diag.Snapshot(), "agent.no_backend") {
 		t.Errorf("agent.no_backend should be cleared after configuring an agent backend; got snapshot=%+v", srv.diag.Snapshot())
 	}
 }
@@ -79,7 +80,7 @@ func TestDiag_SourcesEmptyOnBoot(t *testing.T) {
 	// Empty sources.toml — defaults file exists but contents are empty.
 	srv := startupTestServer(t, cfg, "# empty\n")
 
-	if !srv.diag.Has("sources.empty") {
+	if !hasIssue(srv.diag.Snapshot(), "sources.empty") {
 		t.Errorf("expected sources.empty when sources.toml has no entries; got snapshot=%+v", srv.diag.Snapshot())
 	}
 }
@@ -100,7 +101,7 @@ seed_url = 'https://example.com/2/'
 `
 	srv := startupTestServer(t, cfg, bad)
 
-	if !srv.diag.Has("sources.parse") {
+	if !hasIssue(srv.diag.Snapshot(), "sources.parse") {
 		t.Errorf("expected sources.parse on duplicate-key sources.toml; got snapshot=%+v", srv.diag.Snapshot())
 	}
 }
@@ -109,17 +110,15 @@ func TestDiag_RecheckCoversRegisteredIDs(t *testing.T) {
 	cfg := defaultConfig()
 	srv := startupTestServer(t, cfg, "")
 
-	// All recheck IDs we register should be callable. Call Recheck explicitly
-	// for the agent.no_backend ID — that probe should return an error (since
-	// the cfg has no backend), confirming Recheck wires through to the
-	// registered closure.
-	got, ok := srv.diag.Get("agent.no_backend")
+	// The agent.no_backend probe returns an error while the cfg has no
+	// backend, so a Recheck that reaches the registered closure re-Sets it.
+	got, ok := lookupIssue(srv.diag, "agent.no_backend")
 	if !ok {
 		t.Fatal("precondition: agent.no_backend should be set")
 	}
 	priorAt := got.At
-	srv.diag.Recheck(context.Background(), "agent.no_backend")
-	updated, _ := srv.diag.Get("agent.no_backend")
+	srv.diag.Recheck(context.Background())
+	updated, _ := lookupIssue(srv.diag, "agent.no_backend")
 	if !updated.At.After(priorAt) {
 		t.Errorf("Recheck did not update At for agent.no_backend (probe was not invoked)")
 	}
@@ -128,7 +127,7 @@ func TestDiag_RecheckCoversRegisteredIDs(t *testing.T) {
 func TestDiag_SourcesEmptyClearedAfterReplace(t *testing.T) {
 	cfg := defaultConfig()
 	srv := startupTestServer(t, cfg, "# empty\n")
-	if !srv.diag.Has("sources.empty") {
+	if !hasIssue(srv.diag.Snapshot(), "sources.empty") {
 		t.Fatal("precondition: sources.empty should be set on boot")
 	}
 
@@ -138,8 +137,8 @@ func TestDiag_SourcesEmptyClearedAfterReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	if srv.diag.Has("sources.empty") {
-		got, _ := srv.diag.Get("sources.empty")
+	if hasIssue(srv.diag.Snapshot(), "sources.empty") {
+		got, _ := lookupIssue(srv.diag, "sources.empty")
 		t.Errorf("sources.empty should clear after Replace with non-empty list; got %+v", got)
 	}
 	if len(srv.sources.Snapshot()) != 1 {
@@ -172,14 +171,14 @@ func TestDiag_BudgetPublishedAndCleared(t *testing.T) {
 
 	srv := startupTestServer(t, cfg, "")
 
-	if !srv.diag.Has(issueAgentBudget.ID) {
+	if !hasIssue(srv.diag.Snapshot(), issueAgentBudget.ID) {
 		t.Fatalf("expected agent.budget at boot when pool < max_context_tokens; snapshot=%+v", srv.diag.Snapshot())
 	}
 
 	// Removing the agent backend must clear the stale budget error.
 	srv.cfg.Agent.Backend = ""
 	srv.rebuildClients()
-	if srv.diag.Has(issueAgentBudget.ID) {
+	if hasIssue(srv.diag.Snapshot(), issueAgentBudget.ID) {
 		t.Errorf("agent.budget should be cleared after removing the agent backend; snapshot=%+v", srv.diag.Snapshot())
 	}
 }
@@ -204,14 +203,19 @@ func TestDiag_BudgetNotSetWhenHealthy(t *testing.T) {
 
 	srv := startupTestServer(t, cfg, "")
 
-	if srv.diag.Has(issueAgentBudget.ID) {
+	if hasIssue(srv.diag.Snapshot(), issueAgentBudget.ID) {
 		t.Errorf("agent.budget should not fire with a healthy window; snapshot=%+v", srv.diag.Snapshot())
 	}
-	if srv.diag.Has(issueRetrievalTopKClip.ID) {
+	if hasIssue(srv.diag.Snapshot(), issueRetrievalTopKClip.ID) {
 		t.Errorf("retrieval.topk_clip should not fire when top_k chunks fit; snapshot=%+v", srv.diag.Snapshot())
 	}
 }
 
-// Touch config so the import remains used even if a future test removes the
-// last config.* reference.
-var _ = config.Config{}
+func lookupIssue(r *diag.Registry, id string) (diag.Issue, bool) {
+	for _, i := range r.Snapshot() {
+		if i.ID == id {
+			return i, true
+		}
+	}
+	return diag.Issue{}, false
+}

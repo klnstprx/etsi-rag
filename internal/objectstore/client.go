@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -13,10 +14,16 @@ import (
 	"etsi-rag/internal/config"
 )
 
+// opTimeout bounds each Put and Get, retries included, so a stalled store
+// fails the call instead of hanging a crawl; it is far above a 10 MB body to
+// a local RustFS.
+const opTimeout = time.Minute
+
 // Client wraps an S3-compatible client for object storage (RustFS).
 type Client struct {
-	s3     *s3.Client
-	bucket string
+	s3      *s3.Client
+	bucket  string
+	timeout time.Duration // per Put or Get
 }
 
 // New creates a new object store client from config.
@@ -32,11 +39,13 @@ func New(cfg config.ObjectStoreConfig) (*Client, error) {
 		UsePathStyle: true, // Required for MinIO/RustFS
 	})
 
-	return &Client{s3: client, bucket: cfg.Bucket}, nil
+	return &Client{s3: client, bucket: cfg.Bucket, timeout: opTimeout}, nil
 }
 
 // Put stores data under the given key.
 func (c *Client) Put(ctx context.Context, key string, data []byte, contentType string) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(c.bucket),
 		Key:         aws.String(key),
@@ -51,6 +60,8 @@ func (c *Client) Put(ctx context.Context, key string, data []byte, contentType s
 
 // Get retrieves data stored under the given key.
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 	resp, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
@@ -67,52 +78,10 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
-// Delete removes an object by key.
-func (c *Client) Delete(ctx context.Context, key string) error {
-	_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(c.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return fmt.Errorf("deleting object %s: %w", key, err)
-	}
-	return nil
-}
-
-// List returns keys matching a prefix.
-func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
-	resp, err := c.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(c.bucket),
-		Prefix: aws.String(prefix),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing objects with prefix %s: %w", prefix, err)
-	}
-
-	keys := make([]string, 0, len(resp.Contents))
-	for _, obj := range resp.Contents {
-		keys = append(keys, *obj.Key)
-	}
-	return keys, nil
-}
-
-// Healthy checks if the object store is reachable by listing the bucket.
+// Healthy reports whether the bucket answers a HEAD request.
 func (c *Client) Healthy(ctx context.Context) bool {
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(c.bucket),
 	})
 	return err == nil
-}
-
-// Exists checks if a key exists.
-func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
-	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(c.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		// HeadObject returns an error for missing objects; treat as not found
-		return false, nil
-	}
-	return true, nil
 }

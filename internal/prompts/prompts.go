@@ -11,15 +11,15 @@ import (
 //go:embed agent.tmpl
 var Agent string
 
-// PromptData holds dynamic data available for template rendering.
-type PromptData struct {
+// Data holds the dynamic values a prompt template can reference.
+type Data struct {
 	DocumentCount int
 	ChunkCount    int
 }
 
 // RenderAgent renders the agent system prompt. If customTemplate is empty,
 // the embedded default template is used.
-func RenderAgent(customTemplate string, data PromptData) (string, error) {
+func RenderAgent(customTemplate string, data Data) (string, error) {
 	tmpl := customTemplate
 	if tmpl == "" {
 		tmpl = Agent
@@ -28,7 +28,7 @@ func RenderAgent(customTemplate string, data PromptData) (string, error) {
 }
 
 // render parses tmplStr as a text/template and executes it with the given data.
-func render(tmplStr string, data PromptData) (string, error) {
+func render(tmplStr string, data Data) (string, error) {
 	t, err := template.New("prompt").Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parsing prompt template: %w", err)

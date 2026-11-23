@@ -17,7 +17,7 @@ import (
 func writeTempConfig(t *testing.T, toml string) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range []string{DefaultConfigFileName, ConfigFileName} {
+	for _, name := range []string{DefaultFileName, FileName} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(toml), 0o644); err != nil {
 			t.Fatalf("writing %s: %v", name, err)
 		}
@@ -75,7 +75,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"server.write_timeout", cfg.Server.WriteTimeout, 300},
 		{"server.request_timeout", cfg.Server.RequestTimeout, 120},
 		{"agent.max_tokens", cfg.Agent.MaxTokens, 1024},
-		{"agent.max_iterations", cfg.Agent.MaxIterations, 5},
+		{"agent.max_iterations", cfg.Agent.MaxIterations, 20},
 		{"agent.history_reserve_tokens", cfg.Agent.HistoryReserveTokens, 1280},
 		{"agent.user_reserve_tokens", cfg.Agent.UserReserveTokens, 512},
 		{"embedding.max_tokens", cfg.Embedding.MaxTokens, 0}, // 0 = auto (probe); safe floor applied at consumption
@@ -89,6 +89,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"crawler.max_depth", cfg.Crawler.MaxDepth, 10},
 		{"crawler.max_pages", cfg.Crawler.MaxPages, 5000},
 		{"crawler.concurrency", cfg.Crawler.Concurrency, 4},
+		{"crawler.rate_limit_retries", cfg.Crawler.RateLimitRetries, 4},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -117,11 +118,43 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"admin.backend_models_timeout", cfg.Admin.BackendModelsTimeout, 5 * time.Second},
 		{"admin.chat_stream_timeout", cfg.Admin.ChatStreamTimeout, 5 * time.Minute},
 		{"crawler.progress_log_interval", cfg.Crawler.ProgressLogInterval, 30 * time.Second},
+		{"crawler.rate_limit_backoff", cfg.Crawler.RateLimitBackoff, 30 * time.Second},
+		{"crawler.rate_limit_max_wait", cfg.Crawler.RateLimitMaxWait, 5 * time.Minute},
 	}
 	for _, tt := range durationTests {
 		if tt.got != tt.want {
 			t.Errorf("%s = %s, want %s", tt.name, tt.got, tt.want)
 		}
+	}
+}
+
+// TestLoadRejectionPatternsCoverCMSErrorPage checks the built-in defaults and
+// every shipped config, since a config that lists rejection_patterns replaces
+// the defaults.
+func TestLoadRejectionPatternsCoverCMSErrorPage(t *testing.T) {
+	configs := map[string]string{"built-in defaults": ""}
+	for _, path := range []string{"../../config/config.default.toml", "../../deploy/config.docker.toml"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		configs[path] = string(data)
+	}
+	// The text UMA's CMS error template shows, served with status 200.
+	const text = "ha ocurrido un error al intentar obtener los datos y no ha sido posible cargar esta página."
+	for name, toml := range configs {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeTempConfig(t, toml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			for _, pattern := range cfg.Crawler.RejectionPatterns {
+				if strings.Contains(text, strings.ToLower(pattern)) {
+					return
+				}
+			}
+			t.Errorf("no rejection pattern matches the CMS error text; patterns: %q", cfg.Crawler.RejectionPatterns)
+		})
 	}
 }
 
@@ -274,22 +307,22 @@ is_llama_cpp = false
 		t.Fatalf("backends count = %d, want 2", len(cfg.Backends))
 	}
 
-	b := cfg.GetBackend("llama")
+	b := cfg.EnabledBackend("llama")
 	if b == nil {
-		t.Fatal("GetBackend(llama) = nil")
+		t.Fatal("EnabledBackend(llama) = nil")
 	}
 	if !b.IsLlamaCpp {
 		t.Error("llama backend should be is_llama_cpp=true")
 	}
 
 	// Disabled backend should not be returned
-	if cfg.GetBackend("openai") != nil {
-		t.Error("GetBackend(openai) should be nil (disabled)")
+	if cfg.EnabledBackend("openai") != nil {
+		t.Error("EnabledBackend(openai) should be nil (disabled)")
 	}
 
 	// Non-existent backend
-	if cfg.GetBackend("missing") != nil {
-		t.Error("GetBackend(missing) should be nil")
+	if cfg.EnabledBackend("missing") != nil {
+		t.Error("EnabledBackend(missing) should be nil")
 	}
 }
 
@@ -298,9 +331,22 @@ func TestLoadCrawlerConfig(t *testing.T) {
 [crawler]
 max_body_size = 5242880
 js_patterns = ["/subject/", "/grades/"]
+rate_limit_retries = 2
+rate_limit_backoff = '250ms'
+rate_limit_max_wait = '2s'
 `))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Crawler.RateLimitRetries != 2 {
+		t.Errorf("rate_limit_retries = %d, want 2", cfg.Crawler.RateLimitRetries)
+	}
+	if cfg.Crawler.RateLimitBackoff != 250*time.Millisecond {
+		t.Errorf("rate_limit_backoff = %s, want 250ms", cfg.Crawler.RateLimitBackoff)
+	}
+	if cfg.Crawler.RateLimitMaxWait != 2*time.Second {
+		t.Errorf("rate_limit_max_wait = %s, want 2s", cfg.Crawler.RateLimitMaxWait)
 	}
 
 	if cfg.Crawler.MaxBodySize != 5242880 {
@@ -314,6 +360,29 @@ js_patterns = ["/subject/", "/grades/"]
 	}
 }
 
+func TestLoad_RejectsInvalidRateLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    string
+		wantKey string
+	}{
+		{"negative retries", "rate_limit_retries = -1", "rate_limit_retries"},
+		{"negative backoff", "rate_limit_backoff = '-1s'", "rate_limit_backoff"},
+		{"max wait below backoff", "rate_limit_backoff = '30s'\nrate_limit_max_wait = '10s'", "rate_limit_max_wait"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeTempConfig(t, "[crawler]\n"+tt.toml+"\n"))
+			if err == nil {
+				t.Fatal("expected Load to reject the rate limit settings")
+			}
+			if !strings.Contains(err.Error(), tt.wantKey) {
+				t.Errorf("error should name %s, got: %v", tt.wantKey, err)
+			}
+		})
+	}
+}
+
 func TestEnsureConfigFileCopiesDefault(t *testing.T) {
 	dir := t.TempDir()
 
@@ -322,7 +391,7 @@ func TestEnsureConfigFileCopiesDefault(t *testing.T) {
 [server]
 port = 7777
 `
-	if err := os.WriteFile(filepath.Join(dir, DefaultConfigFileName), []byte(defaultToml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, DefaultFileName), []byte(defaultToml), 0o644); err != nil {
 		t.Fatalf("writing default config: %v", err)
 	}
 
@@ -336,7 +405,7 @@ port = 7777
 	}
 
 	// config.toml should now exist
-	if _, err := os.Stat(filepath.Join(dir, ConfigFileName)); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, FileName)); err != nil {
 		t.Errorf("config.toml should have been created: %v", err)
 	}
 }
@@ -358,10 +427,10 @@ func TestWriteTo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading written config: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, DefaultConfigFileName), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, DefaultFileName), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ConfigFileName), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, FileName), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -387,7 +456,7 @@ func TestWriteTo(t *testing.T) {
 // otherwise koanf's path-merge would let the deleted entry survive.
 func TestWriteTo_PreservesUnknownSections(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ConfigFileName)
+	path := filepath.Join(dir, FileName)
 
 	initial := `
 [server]
@@ -552,6 +621,48 @@ func TestMaskAPIKey(t *testing.T) {
 	for _, tt := range tests {
 		if got := MaskAPIKey(tt.key); got != tt.want {
 			t.Errorf("MaskAPIKey(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+// TestLoadTitleInSearchText checks that the flag is on when a config predates
+// it, and that an explicit false is kept.
+func TestLoadTitleInSearchText(t *testing.T) {
+	for _, tc := range []struct {
+		toml string
+		want bool
+	}{
+		{"[server]\nport = 8080\n", true},
+		{"[chunking]\ntitle_in_search_text = false\n", false},
+		{"[chunking]\ntitle_in_search_text = true\n", true},
+	} {
+		cfg, err := Load(writeTempConfig(t, tc.toml))
+		if err != nil {
+			t.Fatalf("Load(%q): %v", tc.toml, err)
+		}
+		if cfg.Chunking.TitleInSearchText != tc.want {
+			t.Errorf("Load(%q): TitleInSearchText = %v, want %v", tc.toml, cfg.Chunking.TitleInSearchText, tc.want)
+		}
+	}
+}
+
+// TestLoadRerankerTitleInText checks that the flag is on when a config
+// predates it, and that an explicit false is kept.
+func TestLoadRerankerTitleInText(t *testing.T) {
+	for _, tc := range []struct {
+		toml string
+		want bool
+	}{
+		{"[server]\nport = 8080\n", true},
+		{"[reranker]\ntitle_in_text = false\n", false},
+		{"[reranker]\ntitle_in_text = true\n", true},
+	} {
+		cfg, err := Load(writeTempConfig(t, tc.toml))
+		if err != nil {
+			t.Fatalf("Load(%q): %v", tc.toml, err)
+		}
+		if cfg.Reranker.TitleInText != tc.want {
+			t.Errorf("Load(%q): Reranker.TitleInText = %v, want %v", tc.toml, cfg.Reranker.TitleInText, tc.want)
 		}
 	}
 }

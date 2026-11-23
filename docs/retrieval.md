@@ -81,11 +81,14 @@ of the same term saturates; `b` controls whether long chunks get penalised
   `maria`). No stemmer, no stop-word list (short factoid queries lose recall
   when stop-style tokens are stripped).
 - **Query sanitisation.** `sanitizeFTS5Query` replaces every
-  non-alphanumeric Unicode rune with a space, then joins the surviving
-  tokens with ` OR `. This (a) splits the query the same way the tokenizer
-  indexes, (b) defuses FTS5 operator characters (`*`, `"`, `:`, `^`, …)
-  that the user might paste, and (c) maximises recall — BM25 handles
-  ranking.
+  non-alphanumeric Unicode rune with a space, wraps each surviving token
+  in double quotes and joins them with ` OR `. This (a) splits the query
+  the same way the tokenizer indexes, (b) defuses FTS5 operator characters
+  (`*`, `"`, `:`, `^`, …) that the user might paste, (c) turns the
+  operator words `AND`, `OR`, `NOT` and `NEAR` into plain terms (an agent
+  writing `matrícula OR plazo` otherwise produced an FTS5 syntax error),
+  and (d) maximises recall — BM25 handles ranking. Quoted tokens still go
+  through the tokenizer, so case and accent folding apply.
 
 ### Sources
 
@@ -136,7 +139,7 @@ default across production RAG systems.
 
 ### Candidate-pool depth
 
-Each leg runs at `kEach = max(top_k * 3, 30)` so RRF has enough candidates
+Each leg runs at `perList = max(top_k * 3, 30)` so RRF has enough candidates
 to fuse before the merger trims back to `top_k`. The floor of 30 was chosen
 from the eval-D1 finding that 15 of 19 missed gold chunks in dense
 retrieval ranked at positions 7–12 in top-30 — a 30-deep pool covers them
@@ -182,6 +185,14 @@ config-load time and at admin save time. Models loaded with
 `Qwen3-Reranker-2B`) are supported; the router build at
 `localhost:1337` auto-loads the reranker model on the first request.
 
+### Candidate text
+
+With `title_in_text` (default on), each candidate is sent as
+`document title > breadcrumb:\nbody`, the text the index embeds when
+`chunking.title_in_search_text` is on; otherwise the body alone. A chunk
+rarely names its own document, so without the title the cross-encoder
+cannot tell a degree's "150 plazas" chunk from another degree's.
+
 ### Score convention
 
 `SearchResult.Score` after rerank carries the cross-encoder's raw relevance
@@ -210,6 +221,12 @@ must fit the model's context window. Before sending each batch,
 4. If the query alone overflows the budget, the rerank step is skipped
    and the pre-rerank ordering passes through unchanged.
 
+llama-server evaluates each `(query, doc)` pair in one physical batch, so
+start the reranker with `--batch-size` and `--ubatch-size` at least as large
+as its context size (e.g. `--ctx-size 8192 -b 8192 -ub 8192`). At the
+default 512-token `--ubatch-size`, any pair over 512 tokens makes the whole
+`/rerank` call fail with HTTP 500.
+
 ### Failure modes (all soft fall-through)
 
 The reranker is opt-in optimisation, never a critical path. On any of:
@@ -232,8 +249,8 @@ The reranker only helps when it sees more candidates than the agent
 will. `Retrieve` raises the candidate-pool depth to
 `reranker.top_n` (configurable, default 30):
 
-- **dense** mode: `kEach = max(reranker.top_n, retrieval.top_k)`.
-- **hybrid** mode: `kEach = max(reranker.top_n, top_k * 3, 30)` —
+- **dense** mode: `pool = max(reranker.top_n, retrieval.top_k)`.
+- **hybrid** mode: each leg fetches `perList = max(reranker.top_n, top_k * 3, 30)` and RRF fuses down to `pool` —
   preserves ADR-008's existing 30-candidate floor.
 
 After rerank, the result is trimmed to `retrieval.top_k`.
@@ -265,7 +282,7 @@ After rerank, the result is trimmed to `retrieval.top_k`.
 
 | Component                                  | File                                  |
 | ------------------------------------------ | ------------------------------------- |
-| Cosine search, in-memory vector cache       | `internal/store/chunks.go`            |
+| Cosine search; in-memory vector cache        | `internal/store/chunks.go`, `cache.go` |
 | FTS5 schema, triggers, tokenizer            | `internal/store/db.go`                |
 | `SearchKeyword`, `sanitizeFTS5Query`        | `internal/store/chunks.go`            |
 | `FuseRRF`                                   | `internal/rag/rrf.go`                 |

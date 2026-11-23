@@ -26,7 +26,7 @@ func generatePublicToken() (string, error) {
 // by (doc_id, ref). On insert, ID and PublicToken are populated on the
 // passed-in struct.
 func (s *SQLiteStore) UpsertArtifact(ctx context.Context, a *domain.Artifact) error {
-	existing, err := s.GetArtifact(ctx, a.DocID, a.Ref)
+	existing, err := s.Artifact(ctx, a.DocID, a.Ref)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("checking existing artifact: %w", err)
 	}
@@ -73,52 +73,34 @@ const artifactSelect = `
 	FROM document_artifacts
 `
 
-func scanArtifact(row interface {
-	Scan(dest ...any) error
-}) (*domain.Artifact, error) {
-	var a domain.Artifact
-	var kind string
-	if err := row.Scan(&a.ID, &a.DocID, &a.Ref, &kind, &a.ObjectStoreKey, &a.MimeType, &a.Width, &a.Height, &a.PublicToken); err != nil {
-		return nil, err
-	}
-	a.Kind = domain.ArtifactKind(kind)
-	return &a, nil
-}
-
-// GetArtifact looks up an artifact by (doc_id, ref). Returns ErrNotFound when
+// Artifact looks up an artifact by (doc_id, ref). Returns ErrNotFound when
 // no row matches.
-func (s *SQLiteStore) GetArtifact(ctx context.Context, docID, ref string) (*domain.Artifact, error) {
-	row := s.db.QueryRowContext(ctx, artifactSelect+" WHERE doc_id = ? AND ref = ?", docID, ref)
-	a, err := scanArtifact(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("scanning artifact: %w", err)
-	}
-	return a, nil
+func (s *SQLiteStore) Artifact(ctx context.Context, docID, ref string) (*domain.Artifact, error) {
+	return s.queryArtifact(ctx, " WHERE doc_id = ? AND ref = ?", docID, ref)
 }
 
-// GetArtifactByToken looks up an artifact by its opaque public token (used by
+// ArtifactByToken looks up an artifact by its opaque public token (used by
 // the /v1/artifacts/{token}.png route).
-func (s *SQLiteStore) GetArtifactByToken(ctx context.Context, token string) (*domain.Artifact, error) {
-	row := s.db.QueryRowContext(ctx, artifactSelect+" WHERE public_token = ?", token)
-	a, err := scanArtifact(row)
+func (s *SQLiteStore) ArtifactByToken(ctx context.Context, token string) (*domain.Artifact, error) {
+	return s.queryArtifact(ctx, " WHERE public_token = ?", token)
+}
+
+// queryArtifact returns the artifact matching where, or ErrNotFound.
+func (s *SQLiteStore) queryArtifact(ctx context.Context, where string, args ...any) (*domain.Artifact, error) {
+	var a domain.Artifact
+	err := s.db.QueryRowContext(ctx, artifactSelect+where, args...).
+		Scan(&a.ID, &a.DocID, &a.Ref, &a.Kind, &a.ObjectStoreKey, &a.MimeType, &a.Width, &a.Height, &a.PublicToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scanning artifact: %w", err)
 	}
-	return a, nil
+	return &a, nil
 }
 
 // CountArtifacts returns the total number of stored artifact rows. Useful for
 // the admin dashboard counter.
 func (s *SQLiteStore) CountArtifacts(ctx context.Context) (int, error) {
-	var n int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM document_artifacts").Scan(&n); err != nil {
-		return 0, fmt.Errorf("counting artifacts: %w", err)
-	}
-	return n, nil
+	return s.count(ctx, "document_artifacts")
 }

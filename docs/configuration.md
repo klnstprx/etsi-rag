@@ -46,7 +46,7 @@ A controlled-but-extensible set; operators may invent new tags but should prefer
 - **Services**: `biblioteca`, `servicios-ti`, `calidad`
 - **Institution**: `escuela`
 
-`LoadSources` validates that `key` is non-empty and unique and that `seed_url` parses as an absolute URL. The admin UI at `/admin/crawler` performs CRUD against this file via `WriteSources` (atomic temp+rename) and calls `sources.Registry.Replace` so the next crawler / agent read sees the new snapshot without a server restart.
+`LoadSourcesFile` validates that `key` is non-empty and unique and that `seed_url` parses as an absolute URL. The admin UI at `/admin/crawler` performs CRUD against this file via `WriteSources` (atomic temp+rename) and calls `sources.Registry.Replace` so the next crawler / agent read sees the new snapshot without a server restart.
 
 Deleting a source — whether via the admin UI or by hand-editing `sources.toml` — marks the source's existing `crawl_pages` as `stale` rather than dropping them; embeddings, chunks and stored objects survive until the operator clicks **Purge Stale** on the crawler page. See [crawler.md](crawler.md#deletion-semantics) for the full mark-then-sweep flow and the rationale (typo recovery, history preservation).
 
@@ -54,7 +54,7 @@ Deleting a source — whether via the admin UI or by hand-editing `sources.toml`
 
 For headless installs (remote box, container, CI) where you can't reach the admin UI, you have three paths in increasing precedence — the later one always wins:
 
-1. **Drop a complete `config/config.toml`** into the project before first launch. Include every section the deployment needs, including `[eval]` if the Python harness will run there. This is the simplest path and is what `ensureConfigFile` will pick up on first boot (no template copy).
+1. **Drop a complete `config/config.toml`** into the project before first launch. Include every section the deployment needs, including `[eval]` if the Python harness will run there. This is the simplest path and is what `config.Load` will pick up on first boot (no template copy).
 2. **`APP__*` env vars** for last-mile injection (secrets, port pinning, etc.). Example: `APP__AGENT__TEMPERATURE=0.3`, `APP__OBJECT_STORE__SECRET_KEY=...`.
 
 Admin-UI saves only rewrite the sections the Go config struct owns; foreign top-level sections (notably `[eval]`) round-trip unchanged. So a pre-provisioned `[eval]` block survives any later edit performed through the UI. See [Persistence](#persistence).
@@ -110,14 +110,20 @@ is_llama_cpp = true           # enables llama.cpp /tokenize endpoint
 max_retries = 10              # per-call retry budget for transient 5xx (e.g. llama-server crash)
                               # 0 = use llm.DefaultMaxRetries; applies to
                               # every client targeting this backend (embed, chat, token counter).
+                              # Embedding requests also give up after 2 min per attempt (not configurable),
+                              # and object-store Put/Get after 1 min, so a stalled backend fails a page
+                              # instead of hanging the crawl.
 
 # ---------- Pipeline (chunk → embed → retrieve → answer) ----------
 
 [chunking]
 max_chunk_size = 256          # in tokens (not characters)
-chunk_overlap = 32            # in tokens
+chunk_overlap = 32            # in tokens; when a paragraph or table is cut, each piece repeats
+                              # the trailing rows/sentences of the previous one up to this budget
+                              # (pieces that break between paragraphs do not overlap)
 min_chunk_size = 64           # minimum chunk size in tokens
 separators = ["\n\n", "\n", '. ', ' ', '']  # fallback split separators used when a section exceeds the token budget or the document has no headings
+title_in_search_text = true  # embed and keyword-index each chunk as "document title > breadcrumb: body"; false = breadcrumb only. Reprocess after changing it
 
 [embedding]
 backend = 'local-llama'       # references backend by name
@@ -147,6 +153,7 @@ max_tokens = 0                # 0 = auto-detect via /props; non-zero overrides. 
 reserved_tokens = 16          # BOS/EOS/separator budget held back from per-doc truncation
 timeout = '30s'               # per-request deadline; the default is cold-load forgiving
                               # because router-loaded reranker models load lazily
+title_in_text = true          # rerank each candidate as "document title > breadcrumb: body"; false = body only
 
 [agent]
 backend = 'local-llama'
@@ -156,7 +163,7 @@ temperature = 0.7
 context_window = 0            # 0 = auto: follow the /props probe (re-read at startup and on every
                               # config save); a non-zero value is an explicit operator override.
                               # The probe never writes its reading back to config.toml.
-max_iterations = 5            # max tool-calling iterations per turn
+max_iterations = 20           # max tool-calling iterations per turn
 tool_output_max_tokens = 0    # per-tool-result token ceiling; 0 = auto-derive from the agent token budget
                               # pool (context_window - generation - fixed - reserves, min 256)
 history_reserve_tokens = 1280 # token headroom reserved from the context window for session history
@@ -180,8 +187,13 @@ ttl_seconds = 3600            # session expiry (1 hour)
 # ---------- Ingest ----------
 
 [crawler]
-request_delay = '500ms'
+request_delay = '1s'          # minimum gap between request starts to one host, shared by every source
 request_timeout = '30s'
+throttled_paths = ['/navegador_de_ficheros/']  # path substrings paced in their own lane per host
+throttled_path_delay = '45s'  # gap between requests in a throttled lane; a 429 there holds only that lane
+rate_limit_retries = 4        # retries of a page answered 429 or 503 before it is recorded as failed
+rate_limit_backoff = '30s'    # first wait when the server sends no Retry-After; doubles per retry; holds the whole lane
+rate_limit_max_wait = '5m'    # cap on any single wait, Retry-After included; >= rate_limit_backoff
 progress_log_interval = '30s' # how often the running crawl logs a progress line
 max_depth = 10
 max_pages = 5000
@@ -193,6 +205,7 @@ parse_workers = 4             # concurrent parse stage workers
 max_embed_fails = 3           # consecutive embed failures before aborting crawl
 js_patterns = ['/centers/subject/']
 rejection_patterns = [        # case-insensitive substrings that mark a page as low-quality
+    'no ha sido posible cargar esta página', # UMA CMS error page served with status 200
     'página no encontrada',                 # soft 404
     'error 404',
     'página en construcción',
@@ -201,7 +214,7 @@ rejection_patterns = [        # case-insensitive substrings that mark a page as 
 ]
 strip_query_params = [        # case-insensitive query-param names stripped during URL normalization
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
-    'fbclid', 'gclid', '_ga', 'ref', 'lang',
+    'fbclid', 'gclid', '_ga', 'ref', 'lang', 'set_language',
 ]
 
 [crawler.pdf]

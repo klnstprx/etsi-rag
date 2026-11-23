@@ -241,23 +241,6 @@ func equalSeq(a, b []string) bool {
 	return true
 }
 
-// containsSeq returns true if `sub` appears as a contiguous subsequence of `s`.
-func containsSeq(s, sub []string) bool {
-	if len(sub) == 0 {
-		return true
-	}
-outer:
-	for i := 0; i+len(sub) <= len(s); i++ {
-		for j := range sub {
-			if s[i+j] != sub[j] {
-				continue outer
-			}
-		}
-		return true
-	}
-	return false
-}
-
 // idxOf returns the index of v in s, or -1.
 func idxOf(s []string, v string) int {
 	for i, e := range s {

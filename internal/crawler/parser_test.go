@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"bytes"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,11 +183,8 @@ func TestExtractNaive_ExcludesTitleFromBody(t *testing.T) {
 		t.Fatalf("html.Parse: %v", err)
 	}
 
-	title, text := extractNaive(doc)
+	text := extractNaive(doc)
 
-	if title != titleMarker {
-		t.Errorf("expected title %q, got %q", titleMarker, title)
-	}
 	if strings.Contains(text, titleMarker) {
 		t.Errorf("title marker leaked into body: %q", text)
 	}
@@ -253,6 +251,30 @@ func TestNormalizeURL(t *testing.T) {
 			want:  "https://www.uma.es/page",
 		},
 		{
+			name:  "uma.es http upgraded to https and host lowercased",
+			raw:   "http://WWW.uma.es/etsi-informatica/",
+			strip: stripList,
+			want:  "https://www.uma.es/etsi-informatica/",
+		},
+		{
+			name:  "uma.es subdomain upgraded to https with query",
+			raw:   "http://sara.uma.es/ht/x.pdf?b=2&a=1",
+			strip: stripList,
+			want:  "https://sara.uma.es/ht/x.pdf?a=1&b=2",
+		},
+		{
+			name:  "non-uma host keeps its scheme",
+			raw:   "http://Example.com/page",
+			strip: stripList,
+			want:  "http://example.com/page",
+		},
+		{
+			name:  "lookalike host keeps its scheme",
+			raw:   "http://notuma.es/page",
+			strip: stripList,
+			want:  "http://notuma.es/page",
+		},
+		{
 			name:  "invalid url returned as-is",
 			raw:   "://bad",
 			strip: stripList,
@@ -288,9 +310,12 @@ func TestResolveLink(t *testing.T) {
 		{"strips fragment", "/page#section", "https://www.uma.es/page"},
 	}
 
+	base, err := url.Parse("https://www.uma.es/base/")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			base := mustParseURL("https://www.uma.es/base/")
 			got := resolveLink(base, tt.href)
 			if got != tt.want {
 				t.Errorf("resolveLink(%q) = %q, want %q", tt.href, got, tt.want)
@@ -633,25 +658,6 @@ func TestNormalizeStructuredCollapsesBlankLines(t *testing.T) {
 	}
 }
 
-func TestNormalizeWhitespace(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"  hello   world  ", "hello world"},
-		{"no\nnewlines\there", "no newlines here"},
-		{"", ""},
-		{"single", "single"},
-	}
-
-	for _, tt := range tests {
-		got := normalizeWhitespace(tt.input)
-		if got != tt.want {
-			t.Errorf("normalizeWhitespace(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func makeElement(tag string, attrs ...html.Attribute) *html.Node {
 	return &html.Node{
 		Type: html.ElementNode,
@@ -706,5 +712,167 @@ func TestIsBoilerplate(t *testing.T) {
 				t.Errorf("isBoilerplate(%s) = %v, want %v", tt.name, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseHTML_PlaceholderOGTitleFallsBackToDocumentTitle(t *testing.T) {
+	// UMA's CMS stamps og:title with its internal node name on course pages.
+	body := []byte(`<html><head><meta charset="utf-8"><title>Almacenes de Datos - Universidad de Málaga</title>` +
+		`<meta property="og:title" content="subject1"></head>` +
+		`<body><main><h1>Almacenes de Datos</h1><p>Información detallada de la asignatura con texto suficiente para extraer.</p>` +
+		`<svg><title>buscar</title><path d="M0 0"/></svg></main></body></html>`)
+	result, err := ParseHTML(body, "https://www.uma.es/centers/subject/5157/53412")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Title == "subject1" || !strings.Contains(result.Title, "Almacenes de Datos") {
+		t.Errorf("Title = %q, want the page's real title", result.Title)
+	}
+}
+
+func TestParseHTML_UMASiteRootDropsHiddenCMSBlocks(t *testing.T) {
+	// Trimmed from the live grado-en-ingenieria-informatica/ page: the iDUMA
+	// session modal and the CMS editor placeholders sit next to the content.
+	result, err := ParseHTML(loadFixture(t, "uma_grado_home.html"), "https://www.uma.es/grado-en-ingenieria-informatica/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, junk := range []string{"cierre de sesión", "Trozos html", "beforecontenttitle", "Antes del cuerpo del contenido"} {
+		if strings.Contains(result.Text, junk) {
+			t.Errorf("text contains hidden CMS block %q:\n%s", junk, result.Text)
+		}
+	}
+	if !strings.Contains(result.Text, "### Datos Generales del Título") {
+		t.Errorf("text lost the content heading:\n%s", result.Text)
+	}
+	if result.Title != "Grado en INGENIERÍA INFORMÁTICA" {
+		t.Errorf("Title = %q, want the site name from <title>", result.Title)
+	}
+}
+
+func TestParseHTML_PagesWithoutContentIgnoreSessionModal(t *testing.T) {
+	// Trimmed from master-en-ciberseguridad/cms/menu/plan-de-estudios/: no
+	// content container, only the hidden iDUMA modal and an empty-menu notice.
+	// The second page swaps the notice for the note of an iframe-only page
+	// (the máster horarios pages). Each page keeps its own text, so the shared
+	// modal no longer makes different pages hash to one document.
+	emptyMenu := loadFixture(t, "uma_empty_menu.html")
+	iframePage := bytes.Replace(emptyMenu,
+		[]byte(`<p class="emptyMenu">This menu does not link to any target</p>`),
+		[]byte(`<p>Horarios del primer semestre.</p><iframe src="https://docs.google.com/spreadsheets/d/x/pubhtml"></iframe>`), 1)
+
+	var texts []string
+	for _, page := range []struct {
+		body []byte
+		own  string
+	}{
+		{emptyMenu, "This menu does not link to any target"},
+		{iframePage, "Horarios del primer semestre."},
+	} {
+		result, err := ParseHTML(page.body, "https://www.uma.es/master-en-ciberseguridad/cms/menu/plan-de-estudios/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(result.Text, "cierre de sesión") || strings.Contains(result.Text, "Sesión terminada") {
+			t.Errorf("text is the hidden session modal:\n%s", result.Text)
+		}
+		if !strings.Contains(result.Text, page.own) {
+			t.Errorf("text lost the page's own content %q:\n%s", page.own, result.Text)
+		}
+		texts = append(texts, result.Text)
+	}
+	if texts[0] == texts[1] {
+		t.Errorf("two different pages without a content container produced the same text:\n%s", texts[0])
+	}
+}
+
+func TestParseHTML_SubpageKeepsOGTitle(t *testing.T) {
+	// Below a site's root, og:title is the page's own title even though
+	// <title> also starts with the site name.
+	body := []byte("<html><head><title> E.T.S.I. INFORMÁTICA -  Máster Universitario en Ing. Informática | Calendario\n - Universidad de Málaga</title>" +
+		`<meta property="og:title" content="Máster Universitario en Ing. Informática | Calendario"></head>` +
+		`<body><main><p>Calendario académico del máster con las fechas de inicio y fin de cada semestre.</p></main></body></html>`)
+	result, err := ParseHTML(body, "https://www.uma.es/etsi-informatica/info/154166/master-en-ing-informatica-calendario/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Máster Universitario en Ing. Informática | Calendario"; result.Title != want {
+		t.Errorf("Title = %q, want %q", result.Title, want)
+	}
+}
+
+func TestParseHTML_SiteRootKeepsSpecificOGTitle(t *testing.T) {
+	// UMA root pages whose og:title (also the page's h1) is longer than the
+	// site name in <title>: it is the specific name, not a portal name.
+	tests := []struct {
+		url, docTitle, ogTitle string
+	}{
+		{"https://www.uma.es/doctorado/", "Doctorado - Escuela de Doctorado Universidad de Málaga - Universidad de Málaga", "Escuela de Doctorado Universidad de Málaga"},
+		{"https://www.uma.es/etsi-informatica/", "E.T.S.I. INFORMÁTICA - E.T.S. de Ingeniería Informática - Universidad de Málaga", "E.T.S. de Ingeniería Informática"},
+		{"https://www.uma.es/becas/", "BECAS - Becas - Universidad de Málaga", "Becas"},
+	}
+	for _, tt := range tests {
+		body := []byte(`<html><head><title>` + tt.docTitle + `</title>` +
+			`<meta property="og:title" content="` + tt.ogTitle + `"></head>` +
+			`<body><main><h1>` + tt.ogTitle + `</h1><p>Información general, normativa, calendario y contacto.</p></main></body></html>`)
+		result, err := ParseHTML(body, tt.url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Title != tt.ogTitle {
+			t.Errorf("%s: Title = %q, want %q", tt.url, result.Title, tt.ogTitle)
+		}
+	}
+}
+
+func TestIsPlaceholderTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  bool
+	}{
+		{"subject1", true},
+		{"Presentación", true},
+		{"PRESENTACIÓN", true},
+		{"Presentación de PowerPoint", true},
+		{"Microsoft Word - normativa.doc", true},
+		{"Presentación y contacto", false},
+		{"Presentación del Grado en Ingeniería Informática", false},
+		{"Subject guide", false},
+		{"Book of abstracts", false},
+		{"Doc. 3 Normativa", false},
+		{"Doctorado", false},
+	}
+	for _, tt := range tests {
+		if got := isPlaceholderTitle(tt.title); got != tt.want {
+			t.Errorf("isPlaceholderTitle(%q) = %v, want %v", tt.title, got, tt.want)
+		}
+	}
+}
+
+func TestParseHTML_KeepsWordBoundaries(t *testing.T) {
+	body := []byte(`<html><head><title>Plan</title></head><body><div id="main_content">
+		<h2>Grado en<br>Ingeniería Informática</h2>
+		<table>
+			<tr><th>Código</th><th>Asignatura</th></tr>
+			<tr><td>201</td><td><div><a href="/x/201">Matemática Discreta</a><br/>Discrete Mathematics</div></td></tr>
+		</table>
+		<p>Plazo: <strong>15 de mayo</strong> hasta el final del curso.</p>
+		<p>Patrocinado por la <strong>Cátedra OPPLUS </strong>y la <a href="/tutorias">escuela</a>, consulte las tutorías.</p>
+		<p><span>El máster se imparte mediante la impartici</span><span style="font-size:11pt">ó</span><span>n de seminarios.</span></p>
+	</div></body></html>`)
+	result, err := ParseHTML(body, "https://www.uma.es/etsi-informatica/info/1/plan/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## Grado en Ingeniería Informática",
+		"| 201 | Matemática Discreta Discrete Mathematics |",
+		"Plazo: **15 de mayo** hasta",
+		"**Cátedra OPPLUS** y la [escuela](/tutorias), consulte",
+		"la impartición de seminarios",
+	} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("text missing %q:\n%s", want, result.Text)
+		}
 	}
 }

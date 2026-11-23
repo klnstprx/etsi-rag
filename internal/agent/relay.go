@@ -50,7 +50,7 @@ func drainStreams(
 	var (
 		finalResult *ChatResult
 		finalErr    error
-		eventsClose chan ToolEvent = events // separate name so we can nil the read side
+		pending     <-chan ToolEvent = events // read side; nil once drained, while events stays the close handle
 	)
 
 	for {
@@ -70,9 +70,9 @@ func drainStreams(
 				return err
 			}
 
-		case evt, ok := <-eventsClose:
+		case evt, ok := <-pending:
 			if !ok {
-				eventsClose = nil
+				pending = nil
 			} else if err := sink.OnToolEvent(evt); err != nil {
 				return err
 			}
@@ -92,7 +92,7 @@ func drainStreams(
 			}
 		}
 
-		if tokens == nil && eventsClose == nil && outcome == nil {
+		if tokens == nil && pending == nil && outcome == nil {
 			return sink.OnEnd(finalResult, finalErr)
 		}
 	}

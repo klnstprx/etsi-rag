@@ -121,7 +121,7 @@ Replaced with a parser→chunker handoff:
 
 - The PDF parser emits one `[[image:pN]]` line at the top of each page
   (sparse, no per-line repetition). HTML parsing emits `[[image:full]]`
-  once at the top when a go-rod screenshot was captured.
+  once at the top when a browser screenshot was captured.
 - `markers.ExtractBoundaries` returns the marker positions alongside
   marker-free text.
 - The chunker (`StructureAwareChunker`) walks the boundaries while

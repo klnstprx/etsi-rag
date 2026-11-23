@@ -19,10 +19,9 @@ func TestExtractContentArea_SubjectPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	title, text := extractContentArea(doc)
-	normalized := normalizeWhitespace(text)
+	stripBoilerplate(doc)
+	normalized := strings.Join(strings.Fields(extractContentArea(doc)), " ")
 
-	t.Logf("Title: %s", title)
 	t.Logf("Content length: %d", len(normalized))
 	t.Logf("Content: %s", normalized)
 

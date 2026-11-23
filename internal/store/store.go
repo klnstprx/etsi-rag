@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"etsi-rag/internal/domain"
 )
@@ -41,16 +42,48 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-// Warm loads every (chunk_id, doc_id, language, embedding) tuple from the DB
+// checkDim rejects a vector whose length differs from the configured
+// embedding dimension.
+func (s *SQLiteStore) checkDim(v []float32) error {
+	if dim := s.embeddingDim(); len(v) != dim {
+		return fmt.Errorf("embedding dimension mismatch: expected %d, got %d", dim, len(v))
+	}
+	return nil
+}
+
+// placeholders returns n comma-separated "?" markers for an SQL IN list.
+func placeholders(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return strings.Repeat("?,", n-1) + "?"
+}
+
+// scanner is the Scan method shared by *sql.Row and *sql.Rows, so one row
+// mapper serves both single lookups and list queries.
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+// count returns the number of rows in table.
+func (s *SQLiteStore) count(ctx context.Context, table string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting %s: %w", table, err)
+	}
+	return n, nil
+}
+
+// Warm loads every (chunk_id, doc_id, embedding) tuple from the DB
 // into the in-memory cache. Idempotent — calling it again clears and reloads.
 // SearchSimilar uses the cache after Warm returns; before then, it falls back
 // to a full SQL scan.
 //
 // Returns (chunks loaded, error).
 func (s *SQLiteStore) Warm(ctx context.Context) (int, error) {
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunk_embeddings`).Scan(&n); err != nil {
-		return 0, fmt.Errorf("counting embeddings: %w", err)
+	n, err := s.count(ctx, "chunk_embeddings")
+	if err != nil {
+		return 0, err
 	}
 
 	rows, err := s.db.QueryContext(ctx, `

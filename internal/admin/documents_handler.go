@@ -26,87 +26,63 @@ const docsPageSize = 50
 // SQL fall back to "no filter" — otherwise a typo'd tag would silently
 // return everything.
 func (h *Handler) DocumentList(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if page < 1 {
-		page = 1
+	data, err := h.documentsData(r, docFilterFrom(r.URL.Query()))
+	if err != nil {
+		h.logger.Error().Err(err).Msg("listing documents")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
-	search := r.URL.Query().Get("q")
-	source := r.URL.Query().Get("source")
-	tag := r.URL.Query().Get("tag")
-
-	data, ok := h.buildDocumentsData(w, r, search, source, tag, page)
-	if !ok {
-		return // helper already wrote the 500
-	}
-	pg := templates.DocumentsPage(data)
-	content := templates.DocumentsContent(data)
-	render(w, r, pg, content)
+	render(w, r, templates.DocumentsPage(data), templates.DocumentsContent(data))
 }
 
-// buildDocumentsData resolves the source/tag filter, queries the store, and
+// docFilter is the documents list view state carried in the page URL.
+type docFilter struct {
+	search, source, tag string
+	page                int
+}
+
+// docFilterFrom reads the list view state from URL query values; a missing or
+// invalid page means the first page.
+func docFilterFrom(q url.Values) docFilter {
+	page, _ := strconv.Atoi(q.Get("page"))
+	return docFilter{search: q.Get("q"), source: q.Get("source"), tag: q.Get("tag"), page: max(page, 1)}
+}
+
+// documentsData resolves the source/tag filter, queries the store, and
 // returns the populated DocumentsData. Shared by DocumentList and the
 // post-delete re-render in DocumentDelete so they cannot drift on filter
-// semantics. On error, writes a 500 directly and returns ok=false; callers
-// should bail without rendering.
-func (h *Handler) buildDocumentsData(w http.ResponseWriter, r *http.Request, search, source, tag string, page int) (templates.DocumentsData, bool) {
-	if page < 1 {
-		page = 1
-	}
-	offset := (page - 1) * docsPageSize
-
+// semantics.
+func (h *Handler) documentsData(r *http.Request, f docFilter) (templates.DocumentsData, error) {
 	allSources := h.snapshotSources()
-	filterKeys, forceEmpty := resolveSourceFilter(allSources, source, tag)
+	filterKeys, forceEmpty := resolveSourceFilter(allSources, f.source, f.tag)
 
 	var docs []store.DocumentSummary
 	var total int
 	if !forceEmpty {
 		filter := store.DocumentListFilter{
-			Search:     search,
+			Search:     f.search,
 			SourceKeys: filterKeys,
 		}
 		var err error
-		docs, total, err = h.store.ListDocumentsSummary(r.Context(), docsPageSize, offset, filter)
+		docs, total, err = h.store.ListDocumentsSummary(r.Context(), docsPageSize, (f.page-1)*docsPageSize, filter)
 		if err != nil {
-			h.logger.Error().Err(err).Msg("listing documents")
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return templates.DocumentsData{}, false
+			return templates.DocumentsData{}, err
 		}
 	}
 
 	return templates.DocumentsData{
 		Documents:     docs,
 		Total:         total,
-		Page:          page,
+		Page:          f.page,
 		PageSize:      docsPageSize,
-		Search:        search,
-		Source:        source,
-		Tag:           tag,
+		Search:        f.search,
+		Source:        f.source,
+		Tag:           f.tag,
 		SourceOptions: allSources,
 		SourceLabels:  sourceLabelMap(allSources),
 		SourceTags:    sourceTagsMap(allSources),
 		AllTags:       collectTags(allSources),
-	}, true
-}
-
-// currentFilters reconstructs the active filter state from the HX-Current-URL
-// header so post-action renders (e.g. DocumentDelete) keep the user's view
-// intact. Returns zero values when the header is absent or unparseable —
-// safe fallback that just renders the unfiltered first page.
-func currentFilters(r *http.Request) (search, source, tag string, page int) {
-	cur := r.Header.Get("HX-Current-URL")
-	if cur == "" {
-		return "", "", "", 1
-	}
-	u, err := url.Parse(cur)
-	if err != nil {
-		return "", "", "", 1
-	}
-	q := u.Query()
-	p, _ := strconv.Atoi(q.Get("page"))
-	if p < 1 {
-		p = 1
-	}
-	return q.Get("q"), q.Get("source"), q.Get("tag"), p
+	}, nil
 }
 
 // DocumentDetail handles GET /admin/documents/{id}.
@@ -117,7 +93,7 @@ func (h *Handler) DocumentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc, err := h.store.GetDocument(r.Context(), id)
+	doc, err := h.store.Document(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, "document not found", http.StatusNotFound)
@@ -128,7 +104,7 @@ func (h *Handler) DocumentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chunks, err := h.store.GetChunksByDocument(r.Context(), id)
+	chunks, err := h.store.ChunksByDocument(r.Context(), id)
 	if err != nil {
 		h.logger.Error().Err(err).Str("id", id).Msg("getting chunks")
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -160,22 +136,24 @@ func (h *Handler) DocumentDelete(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.store.DeleteDocument(r.Context(), id); err != nil {
 		h.logger.Error().Err(err).Str("id", id).Msg("deleting document")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		templates.Toast("Failed to delete document: "+err.Error(), "error").Render(r.Context(), w)
+		writeToast(w, r, "Failed to delete document: "+err.Error(), "error")
 		return
 	}
 
-	// Re-render the list with the user's active filters preserved. HTMX
-	// passes the current browser URL via HX-Current-URL; falling back to
-	// no-filter when the header is absent keeps non-HTMX callers working.
-	search, source, tag, page := currentFilters(r)
-	data, ok := h.buildDocumentsData(w, r, search, source, tag, page)
-	if !ok {
-		return // helper already wrote the 500
+	// Re-render the list with the user's active filters, which HTMX passes as
+	// the browser URL in HX-Current-URL. An absent or unparseable header
+	// renders the unfiltered first page.
+	var view url.Values
+	if u, err := url.Parse(r.Header.Get("HX-Current-URL")); err == nil {
+		view = u.Query()
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.DocumentsContent(data).Render(r.Context(), w)
-	templates.Toast("Document deleted", "success").Render(r.Context(), w)
+	data, err := h.documentsData(r, docFilterFrom(view))
+	if err != nil {
+		h.logger.Error().Err(err).Msg("listing documents")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeHTML(w, r, templates.DocumentsContent(data), templates.Toast("Document deleted", "success"))
 }
 
 // snapshotSources returns the registry snapshot, or nil when no registry is
@@ -207,7 +185,7 @@ func resolveSourceFilter(all []domain.CrawlSource, source, tag string) ([]string
 		return []string{source}, false
 	}
 
-	tagged := domain.SourceKeysWithAnyTag(all, tag)
+	tagged := domain.SourceKeysWithTag(all, tag)
 	if source == "" {
 		if len(tagged) == 0 {
 			return nil, true
@@ -265,7 +243,7 @@ func collectTags(sources []domain.CrawlSource) []string {
 // the source is no longer registered — the detail view simply omits those
 // fields in that case.
 func (h *Handler) documentSourceMeta(r *http.Request, docID string) (*string, string, []string) {
-	key, err := h.store.GetSourceKeyByDocID(r.Context(), docID)
+	key, err := h.store.SourceKeyByDocID(r.Context(), docID)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("id", docID).Msg("looking up source for document")
 		return nil, "", nil

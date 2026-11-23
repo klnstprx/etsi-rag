@@ -1,17 +1,15 @@
 package domain
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // CrawlSource represents a seed URL and its configuration.
 //
-// Key is a stable slug (e.g. "grado-informatica") chosen by the operator in
-// sources.toml. It is the foreign key used by crawl_pages and crawl_runs, so
-// a source's seed_url or display name can change without orphaning history.
-//
-// Description and Tags are agent-facing scoping hints surfaced through the
-// list_sources tool. They are not persisted on documents and not used as SQL
-// filters; the agent reads them and decides whether to scope a search by
-// passing source_keys to semantic_search.
+// Key is the operator-chosen slug that crawl_pages and crawl_runs reference,
+// so a source's seed URL or display name can change without orphaning
+// history. Description and Tags only drive admin grouping and filtering.
 type CrawlSource struct {
 	Key         string   `koanf:"key"`
 	Name        string   `koanf:"name"`
@@ -21,34 +19,16 @@ type CrawlSource struct {
 	Enabled     bool     `koanf:"enabled"`
 }
 
-// SourceKeysWithAnyTag returns the keys of every source whose Tags slice
-// contains at least one of `tags` (OR semantics). Empty-string tags are
-// ignored. Returns nil when no tags are supplied or no source matches.
-//
-// Shared by the admin Documents filter (single-tag intersection downstream)
-// and the agent's semantic_search scope resolver (multi-tag union upstream)
-// — both walk the same primitive: source.Tags membership.
-func SourceKeysWithAnyTag(sources []CrawlSource, tags ...string) []string {
-	if len(tags) == 0 {
-		return nil
-	}
-	want := make(map[string]struct{}, len(tags))
-	for _, t := range tags {
-		if t == "" {
-			continue
-		}
-		want[t] = struct{}{}
-	}
-	if len(want) == 0 {
+// SourceKeysWithTag returns the keys of every source tagged with tag, or nil
+// when tag is empty or no source carries it.
+func SourceKeysWithTag(sources []CrawlSource, tag string) []string {
+	if tag == "" {
 		return nil
 	}
 	var out []string
 	for _, s := range sources {
-		for _, st := range s.Tags {
-			if _, ok := want[st]; ok {
-				out = append(out, s.Key)
-				break
-			}
+		if slices.Contains(s.Tags, tag) {
+			out = append(out, s.Key)
 		}
 	}
 	return out

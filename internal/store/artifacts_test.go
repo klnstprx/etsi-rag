@@ -42,7 +42,7 @@ func TestArtifactCRUD(t *testing.T) {
 			t.Fatal("expected public token to be assigned")
 		}
 
-		got, err := store.GetArtifact(ctx, "doc-1", "p1")
+		got, err := store.Artifact(ctx, "doc-1", "p1")
 		if err != nil {
 			t.Fatalf("get by ref: %v", err)
 		}
@@ -65,7 +65,7 @@ func TestArtifactCRUD(t *testing.T) {
 		if err := store.UpsertArtifact(ctx, a); err != nil {
 			t.Fatalf("upserting: %v", err)
 		}
-		got, err := store.GetArtifactByToken(ctx, a.PublicToken)
+		got, err := store.ArtifactByToken(ctx, a.PublicToken)
 		if err != nil {
 			t.Fatalf("get by token: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestArtifactCRUD(t *testing.T) {
 		if err := store.UpsertArtifact(ctx, first); err != nil {
 			t.Fatalf("re-upsert: %v", err)
 		}
-		got, err := store.GetArtifact(ctx, "doc-1", "p1")
+		got, err := store.Artifact(ctx, "doc-1", "p1")
 		if err != nil {
 			t.Fatalf("get after re-upsert: %v", err)
 		}
@@ -97,11 +97,11 @@ func TestArtifactCRUD(t *testing.T) {
 	})
 
 	t.Run("missing returns ErrNotFound", func(t *testing.T) {
-		_, err := store.GetArtifact(ctx, "doc-1", "nope")
+		_, err := store.Artifact(ctx, "doc-1", "nope")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound, got %v", err)
 		}
-		_, err = store.GetArtifactByToken(ctx, "no-such-token")
+		_, err = store.ArtifactByToken(ctx, "no-such-token")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound for token, got %v", err)
 		}
@@ -137,7 +137,7 @@ func TestArtifactCascadesOnDocDelete(t *testing.T) {
 		t.Fatalf("deleting document: %v", err)
 	}
 
-	if _, err := store.GetArtifact(ctx, "doc-1", "p1"); !errors.Is(err, ErrNotFound) {
+	if _, err := store.Artifact(ctx, "doc-1", "p1"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound after cascade, got %v", err)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/openai/openai-go"
 
 	"etsi-rag/internal/agent"
@@ -56,10 +55,19 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 }
 
+// sessionHeader carries the chat session ID in both directions.
+const sessionHeader = "X-Session-ID"
+
 // HealthCheck handles GET /health.
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
+}
+
+// writeJSON writes v as the JSON response body with the given status.
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
 
 // ChatCompletions handles POST /v1/chat/completions. Single user message,
@@ -91,29 +99,23 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create session
-	sessionIDHeader := r.Header.Get("X-Session-ID")
-	var sessionIDPtr *string
-	if sessionIDHeader != "" {
-		sessionIDPtr = &sessionIDHeader
-	}
-	sessionID, _ := h.sessionStore.GetOrCreate(sessionIDPtr)
+	sessionID := h.sessionStore.GetOrCreate(r.Header.Get(sessionHeader))
 
 	if req.Stream {
-		h.chatSessionStreaming(w, r, ag, sessionID, string(req.Model), userMsg)
+		relayStream(w, r, ag, sessionID, userMsg, func(w http.ResponseWriter, f http.Flusher) agent.StreamSink {
+			return newOpenAISSESink(w, f, string(req.Model))
+		})
 		return
 	}
 
-	// Run agent
 	result, err := ag.Chat(r.Context(), sessionID, userMsg, nil)
 	if err != nil {
 		classifyUpstreamError(err).WriteJSON(w, r)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Session-ID", sessionID)
-	json.NewEncoder(w).Encode(openai.ChatCompletion{
+	w.Header().Set(sessionHeader, sessionID)
+	writeJSON(w, http.StatusOK, openai.ChatCompletion{
 		ID:      "chatcmpl-local",
 		Model:   string(req.Model),
 		Created: time.Now().Unix(),
@@ -127,31 +129,6 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	})
-}
-
-// chatSessionStreaming runs the agent through agent.RelayChat and writes the
-// resulting tokens / tool events / outcome to the response as OpenAI-spec SSE.
-// X-Session-ID is set before the first chunk goes out so the client can
-// persist it without parsing the body.
-func (h *Handler) chatSessionStreaming(w http.ResponseWriter, r *http.Request, ag *agent.Agent, sessionID, model, userMsg string) {
-	flusher, err := prepareSSE(w)
-	if err != nil {
-		ErrInternal(err).WriteJSON(w, r)
-		return
-	}
-	w.Header().Set("X-Session-ID", sessionID)
-
-	sink := newOpenAISSESink(w, flusher, model)
-	// Errors from RelayChat almost always mean the client disconnected mid-stream
-	// (writes to w fail). We can't change the status code after headers have been
-	// flushed, so just log at debug for observability.
-	if err := agent.RelayChat(r.Context(), ag, sessionID, userMsg, sink); err != nil {
-		logger.Debug().
-			Err(err).
-			Str("path", r.URL.Path).
-			Str("request_id", middleware.GetReqID(r.Context())).
-			Msg("chat stream relay ended early (likely client disconnect)")
-	}
 }
 
 // Ingest handles POST /v1/rag/ingest.
@@ -190,9 +167,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(IngestResponse{
+	writeJSON(w, http.StatusCreated, IngestResponse{
 		IngestedCount: ingested,
 		ChunksCreated: chunks,
 	})
@@ -242,8 +217,7 @@ func (h *Handler) RAGQuery(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(RAGQueryResponse{Results: out})
+	writeJSON(w, http.StatusOK, RAGQueryResponse{Results: out})
 }
 
 // ListDocuments handles GET /v1/rag/documents.
@@ -264,8 +238,7 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(docs)
+	writeJSON(w, http.StatusOK, docs)
 }
 
 // GetArtifact handles GET /v1/artifacts/{token}.png. The {token} path
@@ -290,7 +263,7 @@ func (h *Handler) GetArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a, err := h.store.GetArtifactByToken(r.Context(), token)
+	a, err := h.store.ArtifactByToken(r.Context(), token)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			ErrNotFound("artifact not found").WriteJSON(w, r)

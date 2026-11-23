@@ -7,9 +7,3 @@ summary::-webkit-details-marker { display: none; }
 
 /* Visual feedback during HTMX requests */
 .htmx-request { opacity: 0.7; cursor: wait; }
-
-/* Hide the assistant "thinking" placeholder once any SSE content arrives. */
-.assistant-thinking-host:has(.assistant-tools:not(:empty)) .assistant-thinking,
-.assistant-thinking-host:has(.assistant-bubble:not(:empty)) .assistant-thinking {
-    display: none;
-}

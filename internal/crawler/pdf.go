@@ -3,14 +3,18 @@ package crawler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/markers"
@@ -35,22 +39,16 @@ type PDFResult struct {
 // ExtractPDFText extracts text from a PDF using pdftotext (poppler) and
 // converts it to structured markdown with heading detection.
 func ExtractPDFText(ctx context.Context, pdfData []byte, cfg config.PDFConfig) (*PDFResult, error) {
-	tmp, err := os.CreateTemp("", "crawl-*.pdf")
+	path, err := writeTempPDF(pdfData)
 	if err != nil {
-		return nil, fmt.Errorf("creating temp file: %w", err)
+		return nil, err
 	}
-	defer os.Remove(tmp.Name())
-
-	if _, err := tmp.Write(pdfData); err != nil {
-		tmp.Close()
-		return nil, fmt.Errorf("writing temp file: %w", err)
-	}
-	tmp.Close()
+	defer os.Remove(path)
 
 	// Run pdftotext in default (reading order) mode — no -layout flag.
 	// Default mode undoes column formatting and reads in logical order.
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "pdftotext", "-enc", "UTF-8", tmp.Name(), "-")
+	cmd := exec.CommandContext(ctx, "pdftotext", "-enc", "UTF-8", path, "-")
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -58,10 +56,30 @@ func ExtractPDFText(ctx context.Context, pdfData []byte, cfg config.PDFConfig) (
 		return nil, fmt.Errorf("pdftotext: %w: %s", err, stderr.String())
 	}
 
-	title := extractPDFTitle(ctx, tmp.Name())
-	text := pdfTextToMarkdown(stdout.String(), cfg)
+	raw := stdout.String()
+	title := extractPDFTitle(ctx, path)
+	if title == "" {
+		title = subjectGuideTitle(raw)
+	}
+	text := pdfTextToMarkdown(raw, cfg)
 
 	return &PDFResult{Title: title, Text: text}, nil
+}
+
+// writeTempPDF writes data to a temp file for the poppler CLIs, which only
+// read from disk. The caller removes the returned path.
+func writeTempPDF(data []byte) (string, error) {
+	tmp, err := os.CreateTemp("", "crawl-*.pdf")
+	if err != nil {
+		return "", fmt.Errorf("creating temp pdf: %w", err)
+	}
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if err := errors.Join(werr, cerr); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("writing temp pdf: %w", err)
+	}
+	return tmp.Name(), nil
 }
 
 // extractPDFTitle runs pdfinfo and extracts the Title metadata field.
@@ -76,31 +94,97 @@ func extractPDFTitle(ctx context.Context, pdfPath string) string {
 	}
 
 	for line := range strings.SplitSeq(stdout.String(), "\n") {
-		title, _ := strings.CutPrefix(line, "Title:")
-		title = strings.TrimSpace(title)
-		if title != "" {
-			if isPlaceholderPDFTitle(title) {
-				return ""
-			}
-			return title
+		title, ok := strings.CutPrefix(line, "Title:")
+		if !ok {
+			continue
 		}
+		if title = strings.TrimSpace(title); isPlaceholderTitle(title) || isJunkPDFTitle(title) {
+			return ""
+		}
+		return title
 	}
 	return ""
 }
 
-// placeholderPDFTitle matches metadata titles that authoring tools stamp by
-// default ("subject1", "Document1", "PowerPoint Presentation", ...). These are
-// worse than the URL-derived fallback, so extractPDFTitle treats them as empty.
-var placeholderPDFTitle = regexp.MustCompile(`(?i)^(subject|document|doc|untitled|title|slide|book|presentation|presentación|sin título|microsoft word|powerpoint presentation)[ _-]?\d*\b`)
+// Bounds on a usable pdfinfo Title. Authoring tools fill Title with the first
+// line of the source document, cut at about 126 characters on UMA's PDFs.
+const (
+	minPDFTitleLetters = 4
+	maxPDFTitleRunes   = 120
+)
 
-func isPlaceholderPDFTitle(title string) bool {
-	return strings.TrimSpace(title) == "" || placeholderPDFTitle.MatchString(strings.TrimSpace(title))
+// authoringFileTitle matches a Title that is the source file's name
+// ("Listado definitivo.xlsx").
+var authoringFileTitle = regexp.MustCompile(`(?i)\.(docx?|xlsx?|xlsm|rtf|odt|pptx?|pdf|html?)$`)
+
+// cutTitle matches a Title ending in a one- or two-letter word, which on UMA's
+// PDFs is a template line cut short ("ESCUELA TÉCNICA SUPERIOR DE");
+// romanNumeral spares course numbers ("Cálculo II").
+var (
+	cutTitle     = regexp.MustCompile(`(^|\PL)\pL{1,2}$`)
+	romanNumeral = regexp.MustCompile(`\s[IVX]+$`)
+)
+
+// isJunkPDFTitle reports whether a pdfinfo Title is an authoring leftover
+// rather than the document's name: a source filename, a fragment ("D"), a
+// form label ("Destinatario:") or a first line cut mid-phrase.
+func isJunkPDFTitle(title string) bool {
+	letters := 0
+	for _, r := range title {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+	}
+	return letters < minPDFTitleLetters ||
+		utf8.RuneCountInString(title) > maxPDFTitleRunes ||
+		strings.HasSuffix(title, ":") ||
+		authoringFileTitle.MatchString(title) ||
+		(cutTitle.MatchString(title) && !romanNumeral.MatchString(title))
+}
+
+// subjectGuideTitle names a sara.uma.es subject guide from the "Asignatura:"
+// and "Grado/Máster en:" fields of its first page, because these PDFs carry no
+// Title. It returns "" for any other document.
+func subjectGuideTitle(raw string) string {
+	firstPage, _, _ := strings.Cut(raw, "\f")
+	degree, isGuide := fieldValue(firstPage, "Grado/Máster en:")
+	subject, _ := fieldValue(firstPage, "Asignatura:")
+	if !isGuide || subject == "" {
+		return ""
+	}
+	if degree == "" {
+		return "Guía docente de " + subject
+	}
+	return fmt.Sprintf("Guía docente de %s (%s)", subject, degree)
+}
+
+// fieldValue finds the line holding label and returns the next non-empty line
+// as its value. pdftotext's reading order sometimes puts another label there,
+// so a value ending in ":" counts as missing.
+func fieldValue(page, label string) (value string, found bool) {
+	lines := strings.Split(page, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != label {
+			continue
+		}
+		for _, next := range lines[i+1:] {
+			if next = strings.TrimSpace(next); next != "" {
+				if strings.HasSuffix(next, ":") {
+					return "", true
+				}
+				return next, true
+			}
+		}
+		return "", true
+	}
+	return "", false
 }
 
 // pdfTextToMarkdown converts raw pdftotext output to structured markdown with
-// a single `[[image:pN]]` line emitted at the top of each page block. The
-// chunker treats markers as page boundaries (see markers.ExtractBoundaries),
-// stamps each emitted chunk with the refs it covers, and strips markers from
+// a single `[[image:pN]]` line emitted at the top of each page block, N being
+// the physical page number so it matches the page's render; pages left
+// without text emit nothing. The chunker treats markers as page boundaries
+// (see markers.ExtractBoundaries), stamps each emitted chunk with the refs it covers, and strips markers from
 // final chunk content — so markers are an internal parser→chunker protocol,
 // never user-facing.
 //
@@ -110,17 +194,15 @@ func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 		return ""
 	}
 
-	pages := stripPageHeaders(raw)
-	if len(pages) == 0 {
-		return ""
-	}
-
 	var sb strings.Builder
-	for i, page := range pages {
-		if i > 0 {
+	for i, page := range stripPageHeaders(raw) {
+		if page == "" {
+			continue
+		}
+		if sb.Len() > 0 {
 			sb.WriteString("\n\n")
 		}
-		sb.WriteString(markers.Format(fmt.Sprintf("p%d", i+1)))
+		sb.WriteString(markers.Format(pageRef(i + 1)))
 		sb.WriteByte('\n')
 		for line := range strings.SplitSeq(page, "\n") {
 			trimmed := strings.TrimSpace(line)
@@ -142,88 +224,142 @@ func pdfTextToMarkdown(raw string, cfg config.PDFConfig) string {
 	return normalizeStructured(sb.String())
 }
 
+// A running header or footer is a line found once on, and within
+// headerZoneLines non-empty lines of the top or bottom of, at least
+// max(minHeaderPages, headerPageShare of all) pages. Fewer pages cannot tell a
+// header from a table cell repeated by chance, and a line repeated within a
+// page is a cell ("6", "Optativa"), not a header.
+const (
+	headerZoneLines = 6 // fits the UMA e-signature footer; 4 leaves half of it
+	minHeaderPages  = 3
+	headerPageShare = 0.6
+)
+
 // stripPageHeaders splits raw pdftotext output on \f (form feed) page
-// boundaries, removes lines that repeat across pages (running headers and
-// footers) and "Página X de Y" page-number lines, and returns the cleaned
-// per-page text. The slice length equals the number of pages with at least
-// one non-empty line; callers can map slice index → page number.
+// boundaries and returns each page's text without its running header and
+// footer or "Página X de Y" lines. The slice is indexed by physical page and
+// holds "" for a page with no text left. Running lines are dropped only near
+// the edges of a page (see headerLines), so the same text deeper in its body
+// (a table cell) stays.
 func stripPageHeaders(text string) []string {
 	if text == "" {
 		return nil
 	}
-
-	pages := strings.Split(text, "\f")
-
-	// Count line occurrences across pages to find repeating headers/footers.
-	// Single-page inputs have no repeating set; this loop is a no-op for them.
-	repeating := make(map[string]bool)
-	if len(pages) > 1 {
-		lineCounts := make(map[string]int)
-		for _, page := range pages {
-			seen := make(map[string]bool)
-			for line := range strings.SplitSeq(page, "\n") {
-				trimmed := strings.TrimSpace(line)
-				if trimmed == "" {
-					continue
-				}
-				if !seen[trimmed] {
-					seen[trimmed] = true
-					lineCounts[trimmed]++
-				}
-			}
-		}
-		for line, count := range lineCounts {
-			if count >= 2 {
-				repeating[line] = true
-			}
-		}
+	pages := strings.Split(strings.TrimSuffix(text, "\f"), "\f")
+	for i, page := range pages {
+		// On the whole page, so a "Página X de" split from its "Y" goes too.
+		pages[i] = pageNumberRe.ReplaceAllString(page, "")
 	}
+	running := runningLines(pages)
 
-	out := make([]string, 0, len(pages))
-	for _, page := range pages {
-		var pageLines []string
-		for line := range strings.SplitSeq(page, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if repeating[trimmed] {
-				continue
+	out := make([]string, len(pages))
+	for i, page := range pages {
+		lines := strings.Split(page, "\n")
+		header := headerLines(lines, running)
+		var body []string
+		for j, line := range lines {
+			if !header[j] {
+				body = append(body, line)
 			}
-			if pageNumberRe.MatchString(line) {
-				continue
-			}
-			pageLines = append(pageLines, line)
 		}
-		cleaned := strings.TrimSpace(strings.Join(pageLines, "\n"))
-		if cleaned != "" {
-			out = append(out, cleaned)
-		}
-	}
-	if len(out) == 0 {
-		return nil
+		out[i] = strings.TrimSpace(strings.Join(body, "\n"))
 	}
 	return out
 }
 
+// headerLines marks the lines of a page that belong to its running header or
+// footer. On a long page these are the running lines in its edge zone, even
+// with a body line between them and the edge (pdftotext often reads a footer
+// before the page's last body line), and none deeper in. On a short page the
+// zone is the whole page, so only the running and blank lines touching an
+// edge are marked, and a repeated cell mid-page stays.
+func headerLines(lines []string, running map[string]bool) []bool {
+	header := make([]bool, len(lines))
+	zone, whole := edgeZone(lines)
+	if !whole {
+		for _, j := range zone {
+			header[j] = running[strings.TrimSpace(lines[j])]
+		}
+		return header
+	}
+	isEdge := func(line string) bool {
+		trimmed := strings.TrimSpace(line)
+		return trimmed == "" || running[trimmed]
+	}
+	for j := 0; j < len(lines) && isEdge(lines[j]); j++ {
+		header[j] = true
+	}
+	for j := len(lines) - 1; j >= 0 && isEdge(lines[j]); j-- {
+		header[j] = true
+	}
+	return header
+}
+
+// edgeZone returns the indexes of a page's first and last headerZoneLines
+// non-empty lines, and whether those are all of its non-empty lines.
+func edgeZone(lines []string) (zone []int, whole bool) {
+	for j, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			zone = append(zone, j)
+		}
+	}
+	if len(zone) <= 2*headerZoneLines {
+		return zone, true
+	}
+	return slices.Concat(zone[:headerZoneLines], zone[len(zone)-headerZoneLines:]), false
+}
+
+// runningLines returns the trimmed lines that recur, once per page, in the
+// edge zone of enough pages to be a running header or footer.
+func runningLines(pages []string) map[string]bool {
+	if len(pages) < minHeaderPages {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, page := range pages {
+		lines := strings.Split(page, "\n")
+		onPage := make(map[string]int)
+		for _, line := range lines {
+			onPage[strings.TrimSpace(line)]++
+		}
+		zone, _ := edgeZone(lines)
+		for _, j := range zone {
+			if line := strings.TrimSpace(lines[j]); onPage[line] == 1 {
+				counts[line]++
+			}
+		}
+	}
+	minPages := max(minHeaderPages, int(math.Ceil(headerPageShare*float64(len(pages)))))
+	running := make(map[string]bool)
+	for line, n := range counts {
+		if n >= minPages {
+			running[line] = true
+		}
+	}
+	return running
+}
+
+// pageRef is the artifact ref, and marker, of a PDF page.
+func pageRef(page int) string {
+	return fmt.Sprintf("p%d", page)
+}
+
+// PageImage is one rendered PDF page; Ref matches the page's text marker.
+type PageImage struct {
+	Ref string
+	PNG []byte
+}
+
 // ExtractPDFImages renders each PDF page to a PNG using pdftoppm (poppler) at
-// the given DPI. The returned slice is ordered by page number — pages[0] is
-// page 1, pages[1] is page 2, etc. Pages that fail to render individually are
-// skipped (returned slice may have gaps); a fully empty result returns
-// (nil, error).
-func ExtractPDFImages(ctx context.Context, pdfData []byte, dpi int) ([][]byte, error) {
-	if dpi <= 0 {
-		return nil, nil
-	}
-
-	tmp, err := os.CreateTemp("", "crawl-img-*.pdf")
+// the given DPI, ordered by page number. Pages whose PNG can't be read are
+// skipped; each image keeps its own page's ref, so a gap does not shift the
+// pages after it. A fully empty result is an error.
+func ExtractPDFImages(ctx context.Context, pdfData []byte, dpi int) ([]PageImage, error) {
+	path, err := writeTempPDF(pdfData)
 	if err != nil {
-		return nil, fmt.Errorf("creating temp pdf: %w", err)
+		return nil, err
 	}
-	defer os.Remove(tmp.Name())
-
-	if _, err := tmp.Write(pdfData); err != nil {
-		tmp.Close()
-		return nil, fmt.Errorf("writing temp pdf: %w", err)
-	}
-	tmp.Close()
+	defer os.Remove(path)
 
 	outDir, err := os.MkdirTemp("", "crawl-img-out-*")
 	if err != nil {
@@ -234,7 +370,7 @@ func ExtractPDFImages(ctx context.Context, pdfData []byte, dpi int) ([][]byte, e
 	prefix := filepath.Join(outDir, "page")
 	cmd := exec.CommandContext(ctx, "pdftoppm",
 		"-png", "-r", fmt.Sprintf("%d", dpi),
-		tmp.Name(), prefix,
+		path, prefix,
 	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -274,14 +410,13 @@ func ExtractPDFImages(ctx context.Context, pdfData []byte, dpi int) ([][]byte, e
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].page < files[j].page })
 
-	images := make([][]byte, 0, len(files))
+	images := make([]PageImage, 0, len(files))
 	for _, f := range files {
 		data, err := os.ReadFile(filepath.Join(outDir, f.name))
 		if err != nil {
-			// Per plan: log+skip per-page failures, don't fail the whole doc.
 			continue
 		}
-		images = append(images, data)
+		images = append(images, PageImage{Ref: pageRef(f.page), PNG: data})
 	}
 	if len(images) == 0 {
 		return nil, fmt.Errorf("pdftoppm produced output but all reads failed")

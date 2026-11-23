@@ -9,8 +9,8 @@ Filenames **must match** the `model = '...'` values in
 
 | Stage     | Default filename                  |
 | --------- | --------------------------------- |
-| embedding | `Qwen3-Embedding-4B-Q8_0.gguf`    |
-| agent     | `Qwen3-Embedding-8B-Q8_0.gguf`    |
+| embedding | `Octen-Embedding-4B.Q8_0.gguf`    |
+| agent     | `gemma-4-12b-it-Q8_K_XL.gguf`     |
 | reranker  | `bge-reranker-v2-m3` (gguf)       |
 
 Per-model launch args (e.g. `--mmproj` for a vision model, custom `-c`

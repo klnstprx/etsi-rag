@@ -9,6 +9,7 @@ We normalise on a small, conservative set of axes that are known to be
 semantically irrelevant for UMA URLs:
 
 - lowercase scheme and host (RFC 3986: scheme/host are case-insensitive)
+- put uma.es hosts on https, as the crawler does (UMA redirects http to https)
 - strip default ports (:80 for http, :443 for https)
 - drop fragment (#... is client-side only)
 - collapse a single trailing slash on the path
@@ -38,6 +39,10 @@ def canonicalize(url: str) -> str:
     netloc = host
     if parts.port is not None and str(parts.port) != _DEFAULT_PORTS.get(scheme):
         netloc = f"{host}:{parts.port}"
+
+    # The crawler records every uma.es URL under https, as UMA redirects http.
+    if host == "uma.es" or host.endswith(".uma.es"):
+        scheme = "https"
 
     # Preserve userinfo if (rarely) present.
     if parts.username:

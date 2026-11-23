@@ -41,51 +41,57 @@ func (l *LlamaCppCounter) WithMaxRetries(n int) *LlamaCppCounter {
 	return l
 }
 
-// doWithRetry performs the HTTP call and retries on 5xx with exponential
-// backoff. Non-5xx errors return immediately. The returned response body has
-// been read into memory and the underlying response closed.
-func (l *LlamaCppCounter) doWithRetry(req *http.Request) (status int, body []byte, err error) {
-	// Body must be replayable for retries; require requests to use bytes.Reader.
-	var rawBody []byte
-	if req.Body != nil {
-		rawBody, err = io.ReadAll(req.Body)
-		if err != nil {
-			return 0, nil, fmt.Errorf("buffering request body: %w", err)
-		}
-		req.Body.Close()
+// post sends payload as JSON to the llama.cpp endpoint op ("tokenize" or
+// "detokenize") and returns the status and body of any response below 500.
+// Network errors and 5xx responses are retried with exponential backoff,
+// since the router may be restarting the upstream model, and fail with
+// ErrBackend once the retries run out.
+func (l *LlamaCppCounter) post(ctx context.Context, op string, payload any) (int, []byte, error) {
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return 0, nil, fmt.Errorf("marshaling %s request: %w", op, err)
 	}
 
 	for attempt := 0; ; attempt++ {
-		if rawBody != nil {
-			req.Body = io.NopCloser(bytes.NewReader(rawBody))
-		}
-		resp, doErr := l.client.Do(req)
-		if doErr != nil {
-			// Network error — retry too, since router may be restarting upstream.
-			if attempt < l.maxRetries {
-				if !sleepWithCtx(req.Context(), backoffDelay(attempt)) {
-					return 0, nil, req.Context().Err()
-				}
-				continue
-			}
-			return 0, nil, doErr
-		}
-		body, err = io.ReadAll(resp.Body)
-		resp.Body.Close()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, l.baseURL+"/"+op, bytes.NewReader(reqBody))
 		if err != nil {
-			return resp.StatusCode, nil, fmt.Errorf("reading response: %w", err)
+			return 0, nil, fmt.Errorf("creating %s request: %w", op, err)
 		}
-		if resp.StatusCode < 500 || attempt >= l.maxRetries {
-			return resp.StatusCode, body, nil
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := l.client.Do(req)
+		if err != nil {
+			if attempt >= l.maxRetries {
+				return 0, nil, fmt.Errorf("%s request: %w: %w", op, ErrBackend, err)
+			}
+		} else {
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				return 0, nil, fmt.Errorf("%s request: reading response: %w: %w", op, ErrBackend, err)
+			}
+			if resp.StatusCode < 500 {
+				return resp.StatusCode, body, nil
+			}
+			if attempt >= l.maxRetries {
+				return 0, nil, fmt.Errorf("%s request: %w: status %d: %s", op, ErrBackend, resp.StatusCode, snippet(body))
+			}
 		}
-		if !sleepWithCtx(req.Context(), backoffDelay(attempt)) {
-			return 0, nil, req.Context().Err()
+
+		if !sleepWithCtx(ctx, backoffDelay(attempt)) {
+			return 0, nil, fmt.Errorf("%s request: %w", op, ctx.Err())
 		}
 	}
 }
 
+// snippet bounds a response body quoted in an error message.
+func snippet(body []byte) string {
+	return string(body[:min(len(body), 512)])
+}
+
 // backoffDelay returns the wait before attempt n+1 (0-indexed): 200, 400, 800,
-// 1600, 3200 ms with ±20 % jitter. Five retries total ≈ 6.2 s worst case.
+// 1600, … ms (doubling) with ±10 % jitter. DefaultMaxRetries (10) adds up to
+// ≈ 205 s worst case.
 func backoffDelay(attempt int) time.Duration {
 	base := 200 * time.Millisecond
 	d := base << attempt
@@ -132,20 +138,9 @@ func (l *LlamaCppCounter) Count(ctx context.Context, text string) (int, error) {
 }
 
 func (l *LlamaCppCounter) Tokenize(ctx context.Context, text string) ([]int, error) {
-	body, err := json.Marshal(tokenizeRequest{Content: text, AddSpecial: false, Model: l.model})
+	status, respBody, err := l.post(ctx, "tokenize", tokenizeRequest{Content: text, AddSpecial: false, Model: l.model})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling tokenize request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l.baseURL+"/tokenize", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating tokenize request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	status, respBody, err := l.doWithRetry(req)
-	if err != nil {
-		return nil, fmt.Errorf("tokenize request: %w", err)
+		return nil, err
 	}
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("tokenize: unexpected status %d", status)
@@ -163,28 +158,14 @@ func (l *LlamaCppCounter) Detokenize(ctx context.Context, tokens []int) (string,
 	if len(tokens) == 0 {
 		return "", nil
 	}
-	body, err := json.Marshal(detokenizeRequest{Tokens: tokens, Model: l.model})
-	if err != nil {
-		return "", fmt.Errorf("marshaling detokenize request: %w", err)
-	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l.baseURL+"/detokenize", bytes.NewReader(body))
+	status, respBody, err := l.post(ctx, "detokenize", detokenizeRequest{Tokens: tokens, Model: l.model})
 	if err != nil {
-		return "", fmt.Errorf("creating detokenize request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	status, respBody, err := l.doWithRetry(req)
-	if err != nil {
-		return "", fmt.Errorf("detokenize request: %w", err)
+		return "", err
 	}
 	if status != http.StatusOK {
-		snippet := respBody
-		if len(snippet) > 512 {
-			snippet = snippet[:512]
-		}
 		return "", fmt.Errorf("detokenize: status %d with %d tokens (first=%d last=%d): %s",
-			status, len(tokens), tokens[0], tokens[len(tokens)-1], string(snippet))
+			status, len(tokens), tokens[0], tokens[len(tokens)-1], snippet(respBody))
 	}
 
 	var result detokenizeResponse

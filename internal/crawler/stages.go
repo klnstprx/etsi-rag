@@ -17,27 +17,21 @@ import (
 
 // crawlStageAll runs BFS crawl for all enabled sources concurrently, sending items to parseCh.
 // It blocks until all sources have finished crawling.
-func (c *Crawler) crawlStageAll(
-	ctx context.Context,
-	sources []domain.CrawlSource,
-	parseCh chan<- CrawlItem,
-	progress *RunProgress,
-	runStartedAt time.Time,
-) {
-	progress.CrawlActive.Store(1)
-	defer progress.CrawlActive.Store(0)
+func (c *Crawler) crawlStageAll(ctx context.Context, r *run, sources []domain.CrawlSource, parseCh chan<- CrawlItem) {
+	r.progress.CrawlActive.Store(1)
+	defer r.progress.CrawlActive.Store(0)
 
 	sem := make(chan struct{}, c.config.Concurrency)
-	var globalPages atomic.Int64
-	var globalVisited sync.Map
-	var seenSubjects sync.Map // subject code → true (dedup across plans)
+	var f frontier
+	// Claim every seed up front so another source's links never queue it:
+	// each seed is fetched once per pass, by the source that owns it.
+	for _, src := range sources {
+		f.visited.Store(normalizeURL(src.SeedURL, c.config.StripQueryParams), true)
+	}
 	var wg sync.WaitGroup
 
 	for _, src := range sources {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
@@ -45,21 +39,39 @@ func (c *Crawler) crawlStageAll(
 			}
 			defer func() { <-sem }()
 
-			if err := c.crawlSourceStage(ctx, src, parseCh, progress, &globalPages, &globalVisited, &seenSubjects); err != nil {
+			if err := c.crawlSourceStage(ctx, src, parseCh, r.progress, &f); err != nil {
 				c.logger.Error().Err(err).Str("source", src.Name).Msg("source crawl failed")
 			}
 
 			// Mark stale pages after source completes
-			stale, err := c.store.MarkStalePages(ctx, src.Key, runStartedAt)
+			stale, err := c.store.MarkStalePages(ctx, src.Key, r.startedAt)
 			if err != nil {
 				c.logger.Warn().Err(err).Str("source", src.Name).Msg("failed to mark stale pages")
 			} else if stale > 0 {
 				c.logger.Info().Int("stale", stale).Str("source", src.Name).Msg("marked stale pages")
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
+}
+
+// frontier is the link-admission state shared by every source of one crawl.
+type frontier struct {
+	pages    atomic.Int64 // pages taken off any queue, capped by MaxPages
+	visited  sync.Map     // normalised URL → true
+	subjects sync.Map     // subjectKey → true once a page of that plan's subject was kept
+}
+
+// admit reports whether a normalised link should be queued: followable from
+// seedPath and not seen before. The scope check comes first, so a link outside
+// this source's scope stays free for the source that owns it.
+func (f *frontier) admit(link, seedPath string) bool {
+	if !shouldFollow(link, seedPath) {
+		return false
+	}
+	_, seen := f.visited.LoadOrStore(link, true)
+	return !seen
 }
 
 // crawlSourceStage runs BFS for a single source, sending CrawlItems to parseCh.
@@ -68,9 +80,7 @@ func (c *Crawler) crawlSourceStage(
 	src domain.CrawlSource,
 	parseCh chan<- CrawlItem,
 	progress *RunProgress,
-	globalPages *atomic.Int64,
-	globalVisited *sync.Map,
-	seenSubjects *sync.Map,
+	f *frontier,
 ) error {
 	c.logger.Info().Str("source", src.Name).Str("seed", src.SeedURL).Msg("starting source crawl")
 
@@ -81,7 +91,6 @@ func (c *Crawler) crawlSourceStage(
 
 	seedURL := normalizeURL(src.SeedURL, c.config.StripQueryParams)
 	queue := []queueItem{{url: seedURL, depth: 0}}
-	globalVisited.Store(seedURL, true)
 
 	// Per-source counters for completion summary
 	var srcDiscovered, srcFetched, srcFailed int
@@ -93,21 +102,13 @@ func (c *Crawler) crawlSourceStage(
 	}
 	seedPath := seedParsed.Path
 
-	srcRef := CrawlSourceRef{
-		Key: src.Key,
-	}
-
-	ticker := time.NewTicker(c.fetcher.Delay())
-	defer ticker.Stop()
-
+	// Pacing lives in the fetcher, per host and shared by every source.
 	for len(queue) > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
-		if globalPages.Load() >= int64(c.config.MaxPages) {
+		if f.pages.Load() >= int64(c.config.MaxPages) {
 			c.logger.Info().Str("source", src.Name).Msg("global page limit reached")
 			break
 		}
@@ -119,8 +120,13 @@ func (c *Crawler) crawlSourceStage(
 		if item.depth > c.config.MaxDepth {
 			continue
 		}
+		// One page per plan's subject; claimed only once a page is kept, so a
+		// URL that fails or redirects away leaves the subject's other URLs in play.
+		if _, kept := f.subjects.Load(subjectKey(item.url)); kept {
+			continue
+		}
 
-		globalPages.Add(1)
+		f.pages.Add(1)
 		progress.Discovered.Add(1)
 		srcDiscovered++
 		if item.depth > maxDepthReached {
@@ -138,55 +144,52 @@ func (c *Crawler) crawlSourceStage(
 		progress.Fetched.Add(1)
 		srcFetched++
 
+		// A redirected page is recorded under its final URL, which is also the
+		// base its relative links resolve against.
+		pageURL := item.url
+		if final := normalizeURL(result.URL, c.config.StripQueryParams); final != item.url {
+			if !f.admit(final, seedPath) {
+				c.logger.Debug().Str("url", item.url).Str("final_url", final).Msg("redirect target already seen or out of scope, skipped")
+				continue
+			}
+			pageURL = final
+		}
+		if subject := subjectKey(pageURL); subject != "" {
+			f.subjects.Store(subject, true)
+		}
+
 		// Store raw bytes in object store
-		objKey := objectStoreKey(result.ContentType, item.url)
+		objKey := objectStoreKey(result.ContentType, pageURL)
 		contentTypeHeader := "text/html"
 		if result.ContentType == "pdf" {
 			contentTypeHeader = "application/pdf"
 		}
 		if err := c.objStore.Put(ctx, objKey, result.Body, contentTypeHeader); err != nil {
-			c.logger.Warn().Err(err).Str("url", item.url).Msg("object store put failed")
+			c.logger.Warn().Err(err).Str("url", pageURL).Msg("object store put failed")
 		}
 
 		ci := CrawlItem{
-			URL:         item.url,
+			URL:         pageURL,
 			ContentType: result.ContentType,
 			Body:        result.Body,
 			ObjKey:      objKey,
-			Source:      srcRef,
+			SourceKey:   src.Key,
 			Screenshot:  result.Screenshot,
 		}
 
-		// For HTML: parse now (need links for BFS), pass result to parse stage
-		if result.ContentType != "pdf" {
-			parsed, err := ParseHTML(result.Body, item.url)
-			if err != nil {
-				c.logger.Warn().Err(err).Str("url", item.url).Msg("html parse failed")
-				progress.CrawlFail.Add(1)
-				c.recordFailedPage(ctx, src.Key, item.url, err)
-				continue
-			}
-			ci.HTMLParsed = parsed
-			// Don't keep raw body for HTML — parse result has everything
-			ci.Body = nil
-
-			// Enqueue discovered links. Normalize first so tracking-param variants
-			// collapse into a single globalVisited entry and one fetch.
+		if err := ci.parseHTML(); err != nil {
+			c.logger.Warn().Err(err).Str("url", pageURL).Msg("html parse failed")
+			progress.CrawlFail.Add(1)
+			c.recordFailedPage(ctx, src.Key, pageURL, err)
+			continue
+		}
+		if parsed := ci.HTMLParsed; parsed != nil {
+			// Normalize first so tracking-param variants collapse into one visited entry and one fetch.
 			for _, rawLink := range parsed.Links {
 				link := normalizeURL(rawLink, c.config.StripQueryParams)
-				if _, alreadySeen := globalVisited.LoadOrStore(link, true); alreadySeen {
-					continue
+				if f.admit(link, seedPath) {
+					queue = append(queue, queueItem{url: link, depth: item.depth + 1})
 				}
-				if !shouldFollow(link, seedPath) {
-					continue
-				}
-				// Dedup subject pages: same subject code across different plans
-				if code := subjectCode(link); code != "" {
-					if _, seen := seenSubjects.LoadOrStore(code, true); seen {
-						continue
-					}
-				}
-				queue = append(queue, queueItem{url: link, depth: item.depth + 1})
 			}
 			// Links are only needed for BFS; nil out to free memory
 			parsed.Links = nil
@@ -208,6 +211,44 @@ func (c *Crawler) crawlSourceStage(
 		Int("depth_reached", maxDepthReached).
 		Msg("source finished")
 	return nil
+}
+
+// replayStage stands in for the crawl stage during reprocess: it feeds the
+// bodies archived in the object store into parseCh instead of fetching.
+func (c *Crawler) replayStage(ctx context.Context, pages []domain.CrawlPage, parseCh chan<- CrawlItem, progress *RunProgress) {
+	for _, page := range pages {
+		if ctx.Err() != nil {
+			return
+		}
+
+		body, err := c.objStore.Get(ctx, page.ObjectStoreKey)
+		if err != nil {
+			c.logger.Warn().Err(err).Str("url", page.URL).Msg("object store get failed")
+			progress.CrawlFail.Add(1)
+			continue
+		}
+		progress.Discovered.Add(1)
+		progress.Fetched.Add(1)
+
+		ci := CrawlItem{
+			URL:         page.URL,
+			ContentType: page.ContentType,
+			Body:        body,
+			ObjKey:      page.ObjectStoreKey,
+			SourceKey:   page.SourceKey,
+		}
+		if err := ci.parseHTML(); err != nil {
+			c.logger.Warn().Err(err).Str("url", page.URL).Msg("html parse failed")
+			progress.CrawlFail.Add(1)
+			continue
+		}
+
+		select {
+		case parseCh <- ci:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // parseStage reads CrawlItems, extracts text + computes content hash, sends ParseItems.
@@ -243,7 +284,7 @@ func (c *Crawler) parseStage(
 				text = markers.Format("full") + "\n" + text
 				artifacts = append(artifacts, ParsedArtifact{
 					Ref:      "full",
-					Kind:     string(domain.ArtifactHTMLScreenshot),
+					Kind:     domain.ArtifactHTMLScreenshot,
 					MimeType: "image/png",
 					Data:     item.Screenshot,
 				})
@@ -257,7 +298,7 @@ func (c *Crawler) parseStage(
 			if err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("pdf extraction failed")
 				progress.ParseFail.Add(1)
-				c.recordFailedPage(ctx, item.Source.Key, item.URL, err)
+				c.recordFailedPage(ctx, item.SourceKey, item.URL, err)
 				continue
 			}
 			text = result.Text
@@ -272,25 +313,28 @@ func (c *Crawler) parseStage(
 				if err != nil {
 					c.logger.Warn().Err(err).Str("url", item.URL).Msg("pdf image render failed (continuing without images)")
 				} else {
-					for i, png := range images {
+					for _, img := range images {
 						artifacts = append(artifacts, ParsedArtifact{
-							Ref:      fmt.Sprintf("p%d", i+1),
-							Kind:     string(domain.ArtifactPDFPage),
+							Ref:      img.Ref,
+							Kind:     domain.ArtifactPDFPage,
 							MimeType: "image/png",
-							Data:     png,
+							Data:     img.PNG,
 						})
 					}
 				}
 			}
 		}
 
-		if isLowQualityContent(text, c.config.MinContentLen, c.config.RejectionPatterns) {
-			c.logger.Debug().Str("url", item.URL).Int("len", len(text)).Msg("skipped low-quality content")
+		// Judge and hash the text without image markers, so a screenshot that
+		// fails on one fetch does not skip the page or change its document.
+		body, _ := markers.ExtractBoundaries(text)
+		if isLowQualityContent(body, c.config.MinContentLen, c.config.RejectionPatterns) {
+			c.logger.Debug().Str("url", item.URL).Int("len", len(body)).Msg("skipped low-quality content")
 			progress.Skipped.Add(1)
 			continue
 		}
 
-		contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+		contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
 		progress.Parsed.Add(1)
 
 		pi := ParseItem{
@@ -301,7 +345,7 @@ func (c *Crawler) parseStage(
 			ContentType: item.ContentType,
 			Language:    pageLang,
 			ObjKey:      item.ObjKey,
-			Source:      item.Source,
+			SourceKey:   item.SourceKey,
 			Artifacts:   artifacts,
 		}
 
@@ -315,12 +359,11 @@ func (c *Crawler) parseStage(
 
 // embedStage reads ParseItems, checks for changes, and ingests into the RAG pipeline.
 // Runs as a worker goroutine; exits when inCh is closed.
-// After 3 consecutive embed failures, it cancels the crawl via cancelFn.
+// After MaxEmbedFails consecutive embed failures, it cancels the crawl via cancelFn.
 func (c *Crawler) embedStage(
 	ctx context.Context,
 	inCh <-chan ParseItem,
 	progress *RunProgress,
-	runStartedAt time.Time,
 	cancelFn context.CancelFunc,
 	force bool,
 ) {
@@ -335,31 +378,27 @@ func (c *Crawler) embedStage(
 		}
 
 		now := time.Now()
-		existing, _ := c.store.GetCrawlPageByURL(ctx, item.URL)
+		existing, _ := c.store.CrawlPageByURL(ctx, item.URL)
 
-		if !force && existing != nil && existing.ContentHash == item.ContentHash {
-			// URL + content unchanged — bump timestamp only.
+		if !force && existing != nil && existing.DocID != nil && existing.ContentHash == item.ContentHash {
+			// URL + content unchanged — bump timestamp only, and retry any
+			// artifact an earlier crawl failed to store.
 			existing.LastCrawledAt = &now
 			existing.Status = domain.CrawlPageFetched
+			existing.ErrorMessage = nil
 			if err := c.store.UpsertCrawlPage(ctx, existing); err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert unchanged page failed")
 			}
+			c.storeArtifacts(ctx, item.URL, *existing.DocID, item.Artifacts)
 			progress.Skipped.Add(1)
 			embedSkipped++
 			continue
 		}
 
 		docID := StableDocID(item.ContentHash)
-		// Prefer the per-page <html lang> when the parser extracted a supported
-		// language; fall back to Spanish (project is UMA-only Spanish content).
-		language := domain.LanguageES
-		if item.Language != "" {
-			language = domain.Language(item.Language)
-		}
-		urlStr := item.URL
-
+		docURL, docTitle := item.URL, item.Title
 		page := &domain.CrawlPage{
-			SourceKey:      item.Source.Key,
+			SourceKey:      item.SourceKey,
 			URL:            item.URL,
 			ContentType:    item.ContentType,
 			Title:          item.Title,
@@ -370,68 +409,44 @@ func (c *Crawler) embedStage(
 			LastCrawledAt:  &now,
 			LastChangedAt:  &now,
 		}
+		if force && existing != nil {
+			// Reprocess fetches nothing, so the page keeps the outcome of its
+			// last crawl: a page that failed it stays failed.
+			page.Status = existing.Status
+			page.ErrorMessage = existing.ErrorMessage
+			page.LastCrawledAt = existing.LastCrawledAt
+		}
 
-		// Content-addressed dedup: if a document with this ID already exists
-		// (same content reached via another URL, or an earlier crawl of this
-		// URL), skip the embed and just record the URL — unless force is set,
-		// in which case delete the stale doc (chunks/embeddings cascade) so
-		// ingester.Ingest can re-embed with the current model. This is the
-		// reprocess-after-model-change path: without the delete, CreateDocument
-		// would hit the PK and stale embeddings would linger.
+		// Content-addressed dedup: the same content reached via another URL (or
+		// an earlier crawl) is stored once. force (reprocess) replaces it so the
+		// current model re-embeds it instead of hitting the documents PK.
 		docExists, err := c.store.DocumentExists(ctx, docID)
 		if err != nil {
 			c.logger.Warn().Err(err).Str("url", item.URL).Msg("document existence check failed")
 		}
 		if docExists {
 			if !force {
-				if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
-					c.logger.Warn().Err(err).Str("url", item.URL).Msg("upsert page failed")
-				}
-				// UMA's CMS serves identical content at the bare program URL and at
-				// one of its /cms/menu/... sub-pages. Whoever hits the embed worker
-				// first stamps documents.url, so on re-crawl the canonical bare URL
-				// can lose the race to a sub-page and disappear from eval/lookup.
-				// Swap to the more canonical URL when this happens — see
-				// preferCanonical in crawler.go.
-				if existingURL, err := c.store.GetDocumentURL(ctx, docID); err == nil {
-					if preferCanonical(item.URL, existingURL) {
-						if err := c.store.UpdateDocumentURL(ctx, docID, item.URL); err != nil {
-							c.logger.Warn().Err(err).Str("doc_id", docID).Str("url", item.URL).Msg("canonical url swap failed")
-						} else {
-							c.logger.Debug().Str("doc_id", docID).Str("from", existingURL).Str("to", item.URL).Msg("documents.url swapped to more canonical")
-						}
-					}
-				}
+				c.recordDuplicate(ctx, page, docID)
 				progress.Skipped.Add(1)
 				embedSkipped++
 				continue
 			}
-			// force (reprocess) path. UMA's CMS serves identical content at the
-			// bare program URL and its /cms/menu/... sub-pages; they share a
-			// content hash and collapse to one docID. Recreating under item.URL
-			// would key documents.url to whichever colliding page is reprocessed
-			// last — flipping it off the canonical bare URL and silently breaking
-			// eval golden_urls (the !force dedup path above guards this on a live
-			// crawl; reprocess must guard it too). Preserve the more canonical of
-			// {existing, item.URL} — see preferCanonical in crawler.go.
-			if existingURL, err := c.store.GetDocumentURL(ctx, docID); err == nil && !preferCanonical(item.URL, existingURL) {
-				urlStr = existingURL
-			}
-			if err := c.store.DeleteDocument(ctx, docID); err != nil {
+			docURL, docTitle, err = c.dropForReembed(ctx, docID, item.URL, item.Title)
+			if err != nil {
 				c.logger.Warn().Err(err).Str("url", item.URL).Str("doc_id", docID).Msg("delete stale document failed")
 				progress.EmbedFail.Add(1)
 				embedFailed++
-				c.recordFailedPage(ctx, item.Source.Key, item.URL, err)
+				c.recordFailedPage(ctx, item.SourceKey, item.URL, err)
 				continue
 			}
 		}
 
 		doc := domain.Document{
 			ID:       docID,
-			Title:    item.Title,
+			Title:    docTitle,
 			Content:  item.Text,
-			URL:      &urlStr,
-			Language: language,
+			URL:      &docURL,
+			Language: pageLanguage(item.Language),
 		}
 
 		if _, _, err := c.ingester.Ingest(ctx, []domain.Document{doc}); err != nil {
@@ -446,7 +461,7 @@ func (c *Crawler) embedStage(
 			}
 			progress.EmbedFail.Add(1)
 			embedFailed++
-			c.recordFailedPage(ctx, item.Source.Key, item.URL, err)
+			c.recordFailedPage(ctx, item.SourceKey, item.URL, err)
 			if chunkErr {
 				continue
 			}
@@ -479,11 +494,60 @@ func (c *Crawler) embedStage(
 	}
 }
 
-// storeArtifacts uploads each rendered image to RustFS and records a row in
-// document_artifacts. Failures are logged but never propagate — text-only
-// retrieval remains correct without images.
+// pageLanguage returns the language parsed from <html lang>, falling back to
+// Spanish because the corpus is UMA-only Spanish content.
+func pageLanguage(lang string) domain.Language {
+	if lang == "" {
+		return domain.LanguageES
+	}
+	return domain.Language(lang)
+}
+
+// recordDuplicate links page to the document already stored for its content.
+// UMA's CMS serves identical content at a bare program URL and its /cms/menu/...
+// sub-pages, so documents.url and its title move to the more canonical page
+// instead of keeping whichever page won the embed race.
+func (c *Crawler) recordDuplicate(ctx context.Context, page *domain.CrawlPage, docID string) {
+	if err := c.store.UpsertCrawlPage(ctx, page); err != nil {
+		c.logger.Warn().Err(err).Str("url", page.URL).Msg("upsert page failed")
+	}
+	existingURL, err := c.store.DocumentURL(ctx, docID)
+	if err != nil || !preferCanonical(page.URL, existingURL) {
+		return
+	}
+	if err := c.store.UpdateDocumentPage(ctx, docID, page.URL, page.Title); err != nil {
+		c.logger.Warn().Err(err).Str("doc_id", docID).Str("url", page.URL).Msg("canonical url swap failed")
+		return
+	}
+	c.logger.Debug().Str("doc_id", docID).Str("from", existingURL).Str("to", page.URL).Msg("documents.url swapped to more canonical")
+}
+
+// dropForReembed deletes docID (chunks and embeddings cascade) so reprocess can
+// re-ingest it, and returns the URL and title the new row should carry. Pages
+// sharing the content collapse to one docID, so the more canonical of the
+// stored page and pageURL wins rather than whichever page is reprocessed last;
+// reprocessing the stored page itself refreshes its title.
+func (c *Crawler) dropForReembed(ctx context.Context, docID, pageURL, pageTitle string) (docURL, docTitle string, err error) {
+	docURL, docTitle = pageURL, pageTitle
+	if existing, err := c.store.Document(ctx, docID); err == nil && existing.URL != nil &&
+		*existing.URL != pageURL && !preferCanonical(pageURL, *existing.URL) {
+		docURL, docTitle = *existing.URL, existing.Title
+	}
+	if err := c.store.DeleteDocument(ctx, docID); err != nil {
+		return "", "", err
+	}
+	return docURL, docTitle, nil
+}
+
+// storeArtifacts uploads each rendered image docID has no row for yet to
+// RustFS and records it in document_artifacts, so an image that failed on an
+// earlier crawl is retried. Failures are logged but never propagate —
+// text-only retrieval remains correct without images.
 func (c *Crawler) storeArtifacts(ctx context.Context, pageURL, docID string, arts []ParsedArtifact) {
 	for _, art := range arts {
+		if _, err := c.store.Artifact(ctx, docID, art.Ref); err == nil {
+			continue
+		}
 		key := imageObjectStoreKey(pageURL, art.Ref)
 		if err := c.objStore.Put(ctx, key, art.Data, art.MimeType); err != nil {
 			c.logger.Warn().Err(err).Str("url", pageURL).Str("ref", art.Ref).Msg("artifact put failed")
@@ -492,7 +556,7 @@ func (c *Crawler) storeArtifacts(ctx context.Context, pageURL, docID string, art
 		row := &domain.Artifact{
 			DocID:          docID,
 			Ref:            art.Ref,
-			Kind:           domain.ArtifactKind(art.Kind),
+			Kind:           art.Kind,
 			ObjectStoreKey: key,
 			MimeType:       art.MimeType,
 		}

@@ -60,16 +60,18 @@ Object key schema:
 | Package | Purpose | Install |
 |---------|---------|---------|
 | `poppler` | `pdftotext` (PDF text extraction), `pdfinfo` (PDF metadata), `pdftoppm` (PDF page → PNG renders) | `paru -S poppler` |
-| `chromium` | Headless browser for JS-rendered pages and full-page screenshots (go-rod) | `paru -S chromium` |
+| `chromium` | Headless browser for JS-rendered pages and full-page screenshots (chromedp) | `paru -S chromium` |
 
 ## Build Dependencies
 
 | Tool | Purpose |
 |------|---------|
-| Go 1.25+ | Compiler |
+| Go 1.26+ | Compiler |
 | `templ` | Template compiler (`.templ` -> `_templ.go`) |
 | `tailwindcss` | CSS (standalone CLI, no Node.js) |
 | `golangci-lint` | Linter (optional) |
+
+Keep `templ` CLI and library versions aligned; the Dockerfile pins the CLI.
 
 ## Containerized Deployment
 
@@ -89,15 +91,17 @@ are hardware-specific and multi-GB, so the operator supplies them.
 
 ### Image design
 
-- **Multi-stage build.** Stage 1 (`golang:1.25-bookworm`) installs the `templ`
+- **Multi-stage build.** Stage 1 (`golang:1.26-bookworm`) installs the `templ`
   and `tailwindcss` CLIs, regenerates the embedded admin assets, and compiles a
   static `CGO_ENABLED=0` binary. Stage 2 (`debian:bookworm-slim`) carries only
   the binary plus the crawler's runtime deps.
 - **Not scratch/alpine.** The crawler shells out to `poppler-utils`
-  (`pdftoppm`/`pdfinfo`) and drives a system `chromium` via go-rod, so the
+  (`pdftoppm`/`pdfinfo`) and drives a system `chromium` via chromedp, so the
   runtime image installs both.
-- **Runs unprivileged** (uid 10001). Chromium refuses to start as root without
-  `--no-sandbox`; as a non-root user it works under Docker's default seccomp.
+- **Runs unprivileged** (uid 10001). Inside a container (`/.dockerenv`,
+  `/.containerenv` or Kubernetes) the crawler starts Chromium with
+  `--no-sandbox`, as go-rod did, because container runtimes commonly block the
+  namespaces its sandbox needs; the non-root user is what confines the browser.
 - **Config seeding.** `docker-entrypoint.sh` copies `config.default.toml` →
   `config.toml` on first boot (the binary's `config.Load` does not fall back to
   the template at runtime). docker-compose bind-mounts

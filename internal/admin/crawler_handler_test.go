@@ -4,32 +4,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-
-	"github.com/rs/zerolog"
 
 	"etsi-rag/internal/config"
 	"etsi-rag/internal/domain"
 	"etsi-rag/internal/sources"
 )
 
-// setupTestHandlerWithSources extends setupTestAdminHandler with a writable
-// configDir seeded with one source AND a wired sources.Registry, matching
-// what server.New does in production.
+// setupTestHandlerWithSources extends setupTestAdminHandler with a sources.toml
+// seeded in a temp dir and a wired sources.Registry, matching server.New.
 func setupTestHandlerWithSources(t *testing.T, seed []domain.CrawlSource) *Handler {
 	t.Helper()
 	h, _ := setupTestAdminHandler(t)
 
-	dir := t.TempDir()
-	h.configDir = dir
-	path := config.SourcesPath(dir)
+	path := config.SourcesPath(t.TempDir())
 	if err := config.WriteSources(seed, path); err != nil {
 		t.Fatalf("seeding sources.toml: %v", err)
 	}
-	reg := sources.New(path, zerolog.New(os.Stderr).Level(zerolog.Disabled))
+	reg := sources.New(path)
 	if err := reg.Load(); err != nil {
 		t.Fatalf("loading test registry: %v", err)
 	}
@@ -119,9 +111,9 @@ func TestSourceUpdate_HappyPath(t *testing.T) {
 		t.Fatalf("status = %d, want %d (body=%q)", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	got, err := config.LoadSources(h.configDir)
+	got, err := config.LoadSourcesFile(h.sources.Path())
 	if err != nil {
-		t.Fatalf("LoadSources: %v", err)
+		t.Fatalf("LoadSourcesFile: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("len(sources) = %d, want 1", len(got))
@@ -131,22 +123,5 @@ func TestSourceUpdate_HappyPath(t *testing.T) {
 	}
 	if len(got[0].Tags) != 2 || got[0].Tags[0] != "a" || got[0].Tags[1] != "b" {
 		t.Errorf("Tags = %v, want [a b]", got[0].Tags)
-	}
-}
-
-// stat helper exists so a future failing happy-path test can also assert the
-// file exists at the expected location, surfacing tempdir wiring breakage
-// before the test author has to chase it.
-func TestSourceUpdate_HappyPath_FileLayout(t *testing.T) {
-	h := setupTestHandlerWithSources(t, []domain.CrawlSource{
-		{Key: "valid", Name: "X", SeedURL: "https://example.com/", Enabled: true},
-	})
-	expected := filepath.Join(h.configDir, "sources.toml")
-	if _, err := os.Stat(expected); err != nil {
-		t.Fatalf("expected sources.toml at %s: %v", expected, err)
-	}
-	if !strings.HasPrefix(h.configDir, os.TempDir()) {
-		// Defensive: future setup change might point configDir at $HOME.
-		t.Logf("configDir = %s (not under TempDir; verify before extending)", h.configDir)
 	}
 }

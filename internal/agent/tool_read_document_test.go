@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -185,6 +186,19 @@ func TestReadDocument_QueryModeDefaultTopK(t *testing.T) {
 	count := strings.Count(got.Text, "DefaultDoc")
 	if count != 3 {
 		t.Errorf("expected 3 results in default mode, got %d (text=%q)", count, got.Text)
+	}
+}
+
+func TestReadDocument_QueryModeRejectsNonPositiveTopK(t *testing.T) {
+	tool, s := setupReadDocFixture(t)
+	seedDoc(t, s, "doc-k", "https://uma.es/k", "K-Doc", []string{"a", "b"})
+
+	for _, topK := range []int{0, -2} {
+		_, err := tool.Execute(context.Background(),
+			fmt.Sprintf(`{"url":"https://uma.es/k","query":"x","top_k":%d}`, topK))
+		if err == nil || !strings.Contains(err.Error(), "top_k") {
+			t.Errorf("top_k=%d: want an error naming top_k, got %v", topK, err)
+		}
 	}
 }
 
