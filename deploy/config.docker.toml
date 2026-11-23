@@ -57,15 +57,15 @@ title_in_search_text = true  # embed and keyword-index each chunk with its docum
 
 [embedding]
 backend = 'local-llama'
-model = 'Octen-Embedding-4B.Q8_0.gguf'  # filename resolved by the router from --models-dir
+model = 'octen-embedding-4b'  # section name in deploy/presets.ini
 dimension = 2560
-max_tokens = 512
+max_tokens = 0   # 0 = auto-detect via /props
 batch_size = 8
 
 [retrieval]
 top_k = 10
-max_context_tokens = 2048
-retrieval_mode = 'dense'
+max_context_tokens = 4092
+retrieval_mode = 'hybrid'
 
 [reranker]
 enabled = true
@@ -79,7 +79,7 @@ title_in_text = true          # rerank "document title > breadcrumb: body"; fals
 
 [agent]
 backend = 'local-llama'
-model = 'gemma-4-12b-it-Q8_K_XL.gguf'
+model = 'gemma4-12b'  # section name in deploy/presets.ini
 max_tokens = 1024
 temperature = 0.7
 context_window = 0

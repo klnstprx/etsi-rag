@@ -7,9 +7,9 @@
 #
 # Quick start:
 #   1. Install the NVIDIA Container Toolkit (for the llama GPU service).
-#   2. Drop your .gguf weights into ./models — filenames must match the
-#      `model = '...'` values in deploy/config.docker.toml (the router
-#      resolves models by filename from --models-dir, loading on first use).
+#   2. Drop your .gguf weights into ./models under the filenames listed in
+#      models/README.md. deploy/presets.ini maps each file to the model ID
+#      that deploy/config.docker.toml uses (loaded on first use).
 #   3. docker compose up --build
 #
 # Admin UI:      http://localhost:3000/admin
@@ -40,21 +40,19 @@ services:
   llama:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     command:
-      - "--models-dir"
-      - "/models"
+      # Per-model settings (context, slots, GPU placement, vision projector)
+      # live in the preset; see deploy/presets.ini and docs/llama-server.md.
+      - "--models-preset"
+      - "/presets/presets.ini"
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "1337"
-      - "--models-max"
-      - "4"
-      # Per-model args (e.g. --mmproj for vision, -c context size) need a
-      # router preset: add `--models-preset /models/presets.ini` and mount it.
-      # See docs/llama-server.md.
     ports:
       - "1337:1337"   # exposed for debugging; the app reaches it via service DNS
     volumes:
       - ./models:/models:ro
+      - ./deploy/presets.ini:/presets/presets.ini:ro
     # GPU access via CDI — the one form that is portable across BOTH Docker
     # and Podman (the compose `devices` field accepts CDI device names on both).
     #

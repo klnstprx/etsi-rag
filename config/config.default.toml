@@ -47,7 +47,7 @@ title_in_search_text = true  # embed and keyword-index each chunk with its docum
 
 [embedding]
 backend = 'local-llama'
-model = 'Octen-Embedding-4B.Q8_0.gguf'  # Apache-2.0 fine-tune of Qwen3-Embedding-4B; the evaluated embedder
+model = 'octen-embedding-4b'  # Octen-Embedding-4B Q8_0, an Apache-2.0 fine-tune of Qwen3-Embedding-4B; the evaluated embedder
 dimension = 2560
 max_tokens = 0   # 0 = auto-detect via /props; non-zero overrides. 512-token floor when neither is available.
 batch_size = 8
@@ -85,7 +85,7 @@ backend = 'local-llama'
 # use gemma-4-E4B-it-Q8_K_XL.gguf where memory is tight, or any instruct model
 # your backend serves. Reasoning models that emit hidden "thinking" tokens need
 # max_tokens raised well above their reasoning budget, or they return empty text.
-model = 'gemma-4-12b-it-Q8_K_XL.gguf'
+model = 'gemma4-12b'  # Gemma 4 12B Q8_K_XL; the evaluated and shipped agent
 max_tokens = 1024
 temperature = 0.7
 # 0 = auto: follow the llama.cpp /props probe (the per-request n_ctx the

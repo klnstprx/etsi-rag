@@ -58,7 +58,7 @@ The preset assigns per-model settings (multimodal projector, context size, sampl
 ```ini
 version = 1
 
-[gemma-4-12b-it-Q8_K_XL.gguf]
+[gemma4-12b]
 model = /home/you/Models/gemma-4-12b-it-GGUF/gemma-4-12b-it-UD-Q8_K_XL.gguf
 mmproj = /home/you/Models/gemma-4-12b-it-GGUF/mmproj-F32.gguf
 c = 32768
@@ -72,7 +72,7 @@ reasoning = off
 n-gpu-layers = all
 fit = off
 
-[Octen-Embedding-4B.Q8_0.gguf]
+[octen-embedding-4b]
 model = /home/you/Models/Octen-Embedding-4B/Octen-Embedding-4B.Q8_0.gguf
 embedding = true
 c = 8192
